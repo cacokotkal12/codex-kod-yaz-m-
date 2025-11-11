@@ -201,6 +201,11 @@ class GUIAbort(RuntimeError):
     """GUI'den gelen anlık durdurma isteği."""
 
 
+def _raise_gui_abort(msg: str = "GUI durdurma isteği"):
+    exc = globals().get("GUIAbort", GUIAbort)
+    raise exc(msg)
+
+
 def dump_crash(e: Exception, stage: str = "UNKNOWN"):
     try:
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -239,6 +244,8 @@ def with_retry(name="", attempts=4, delay=0.6):
                     if r not in (None, False):
                         if i > 1: log(f"[RETRY] {name or fn.__name__} deneme={i} OK", "warning")
                         return r
+                except GUIAbort:
+                    raise
                 except Exception as e:
                     log(f"[RETRY] {name or fn.__name__} hata={e} deneme={i}", "warning")
                 time.sleep(delay)
@@ -664,20 +671,19 @@ def wait_if_paused():
     told = False
     while is_capslock_on():
         if _abort_requested():
-            return False
+            _raise_gui_abort()
         if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
         _ORIG_SLEEP(0.1);
         watchdog_enforce()
     if _abort_requested():
-        return False
+        _raise_gui_abort()
     return True
 
 
 def pause_point():
-    if wait_if_paused() is False:
-        return False
+    wait_if_paused()
     if _abort_requested():
-        return False
+        _raise_gui_abort()
     return True
 
 
@@ -3429,18 +3435,34 @@ def _check_hotkeys_for_buy_mode():
 
 def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
     told = False
+    abort_fn = globals().get("_abort_requested")
+    AbortExc = globals().get("GUIAbort", GUIAbort)
+
+    def _ensure_not_aborted():
+        if abort_fn and abort_fn():
+            raise AbortExc("GUI durdurma isteği")
+
     try:
-        is_caps = globals().get("is_capslock_on");
+        is_caps = globals().get("is_capslock_on")
         wdog = globals().get("watchdog_enforce")
-        if not is_caps or not wdog: return
+        if not is_caps or not wdog:
+            _ensure_not_aborted()
+            return True
         while is_caps():
-            if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
-            _check_hotkeys_for_buy_mode();
-            time.sleep(0.1);
+            _ensure_not_aborted()
+            if not told:
+                print("[PAUSE] CapsLock AÇIK. Devam için kapat.")
+                told = True
+            _check_hotkeys_for_buy_mode()
+            time.sleep(0.1)
             wdog()
         _check_hotkeys_for_buy_mode()
+        _ensure_not_aborted()
+    except AbortExc:
+        raise
     except Exception:
-        pass
+        _ensure_not_aborted()
+    return True
 
 
 def go_to_npc_from_top(w):  # moda göre sayfa seçimi
@@ -3591,6 +3613,8 @@ def retry_on_exception(retries=2, delay=0.5, allowed_exceptions=(Exception,), ba
                 try:
                     return fn(*a, **k)
                 except allowed_exceptions as e:
+                    if isinstance(e, GUIAbort):
+                        raise
                     if r <= 0: raise
                     time.sleep(d);
                     d *= backoff;
