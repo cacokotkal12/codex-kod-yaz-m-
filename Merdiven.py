@@ -3966,6 +3966,8 @@ _ADV_CATEGORY_RULES = (
         names=(
             'BUY_MODE',
             'BUY_TURNS',
+            'FABRIC_STEPS',
+            'LINEN_STEPS',
             'NPC_GIDIS_SURESI',
             'NPC_SEEK_TIMEOUT',
             'NPC_POSTBUY_FIRST_A_DURATION',
@@ -3981,6 +3983,8 @@ _ADV_CATEGORY_RULES = (
             'NPC_',
             'BUY_',
             'USE_STORAGE',
+            'FABRIC_',
+            'LINEN_',
         ),
     )),
     ("Scroll", dict(
@@ -4032,6 +4036,7 @@ _ADV_CATEGORY_RULES = (
             'TURN_',
             'X_',
             'Y_',
+            'PREC_',
         ),
     )),
     ("Town", dict(
@@ -4071,6 +4076,7 @@ _ADV_CATEGORY_RULES = (
             'UPGRADE_',
             'UPG_',
             'CONFIRM_',
+            'YAMA_QC_',
         ),
     )),
     ("OCR/ROI", dict(
@@ -4101,11 +4107,14 @@ _ADV_CATEGORY_RULES = (
         names=(
             'FORCE_PLUS7_ONCE',
             'BASMA_HAKKI',
+            'WRAP_SLOTS',
         ),
         prefixes=(
             'PLUS7_',
             'PLUS8_',
             'PLUSN_',
+            'WRAP_',
+            'YAMA_QC_',
         ),
     )),
     ("Günlükleme", dict(
@@ -4146,6 +4155,7 @@ _ADV_CATEGORY_RULES = (
             'GUI_AUTO_OPEN_SPEED',
             'DEBUG_SAVE',
             'ON_TEMPLATE_TIMEOUT_RESTART',
+            'ITEMS_DEPLETED_FLAG',
         ),
         prefixes=(
             'AUTO_',
@@ -4153,6 +4163,17 @@ _ADV_CATEGORY_RULES = (
             'F_WAIT_',
             'GUI_',
             'DEBUG_',
+        ),
+    )),
+    ("Girdi/WinAPI", dict(
+        prefixes=(
+            'SC_',
+            'VK_',
+            'KEYEVENTF_',
+            'MOUSEEVENTF_',
+            'TH32CS_',
+            'CF_',
+            'GMEM_',
         ),
     )),
 )
