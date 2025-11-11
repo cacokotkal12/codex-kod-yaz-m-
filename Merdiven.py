@@ -67,7 +67,7 @@ def _read_y_now():
 # [PATCH_Y_LOCK_END]
 
 import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
-    sys, atexit, traceback, logging
+    sys, atexit, traceback, logging, functools
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -152,6 +152,38 @@ _logger.addHandler(_handler)
 def log(msg, lvl="info"): getattr(_logger, lvl, _logger.info)(msg)
 
 
+_ORIG_SLEEP = time.sleep
+_KEYBOARD_IS_PRESSED_ORIG = getattr(keyboard, "is_pressed", None)
+
+
+def _abort_requested() -> bool:
+    if globals().get("GUI_ABORT", False):
+        return True
+    if _KEYBOARD_IS_PRESSED_ORIG is not None:
+        try:
+            if _KEYBOARD_IS_PRESSED_ORIG("f12"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _sleep_abortable(seconds: float):
+    if seconds <= 0:
+        return _ORIG_SLEEP(seconds)
+    end = time.time() + float(seconds)
+    while True:
+        if _abort_requested():
+            break
+        remaining = end - time.time()
+        if remaining <= 0:
+            break
+        _ORIG_SLEEP(remaining if remaining < 0.12 else 0.12)
+
+
+time.sleep = _sleep_abortable
+
+
 def _grab_full_bgr():
     try:
         if mss is not None:
@@ -163,6 +195,10 @@ def _grab_full_bgr():
         pass
     im = ImageGrab.grab();
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
+
+
+class GUIAbort(RuntimeError):
+    """GUI'den gelen anlık durdurma isteği."""
 
 
 def dump_crash(e: Exception, stage: str = "UNKNOWN"):
@@ -180,9 +216,12 @@ def dump_crash(e: Exception, stage: str = "UNKNOWN"):
 
 def crashguard(stage=""):
     def deco(fn):
+        @functools.wraps(fn)
         def wrap(*a, **kw):
             try:
                 return fn(*a, **kw)
+            except GUIAbort:
+                raise
             except Exception as e:
                 dump_crash(e, stage or fn.__name__); raise
 
@@ -560,6 +599,8 @@ def set_stage(name: str):
 
 def watchdog_enforce():
     global _stage_enter_ts
+    if _abort_requested():
+        raise GUIAbort("GUI durdurma isteği")
     if bool(ctypes.windll.user32.GetKeyState(0x14) & 1): _stage_enter_ts = time.time(); return
     if (time.time() - _stage_enter_ts) > WATCHDOG_TIMEOUT: raise WatchdogTimeout(
         f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
@@ -622,14 +663,21 @@ def is_capslock_on(): return bool(ctypes.windll.user32.GetKeyState(VK_CAPITAL) &
 def wait_if_paused():
     told = False
     while is_capslock_on():
+        if _abort_requested():
+            return False
         if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
-        time.sleep(0.1);
+        _ORIG_SLEEP(0.1);
         watchdog_enforce()
+    if _abort_requested():
+        return False
+    return True
 
 
 def pause_point():
-    wait_if_paused();
-    if _kb_pressed('f12'): return False
+    if wait_if_paused() is False:
+        return False
+    if _abort_requested():
+        return False
     return True
 
 
@@ -3065,93 +3113,97 @@ def main():
     print(f"[AYAR] +7 taraması NPC alışından {PLUS7_START_FROM_TURN_AFTER_PURCHASE}. tur sonra aktif.")
     print(f"[AYAR] Başlangıç: GLOBAL_CYCLE={GLOBAL_CYCLE}, NEXT_PLUS7_CHECK_AT={NEXT_PLUS7_CHECK_AT}")
     if AUTO_SPEED_PROFILE: _apply_profile("BALANCED"); maybe_autotune(True)
-    while True:
-        w = None
-        try:
-            print(">>> AŞAMA 1: Launcher ile başlat");
+    try:
+        while True:
+            w = None
             set_stage("BOOT");
-            w = launch_via_launcher_and_wait()
-            if not w: print("Başlatma başarısız. LAUNCHER_EXE/START koordinatı kontrol."); raise WatchdogTimeout(
-                "Oyun penceresi yok.")
-            with key_tempo(0.5):
-                set_stage("SPLASH_PASS");
-                time.sleep(0.5)
-                for _ in range(2): time.sleep(1.5); mouse_move(*SPLASH_CLICK_POS); mouse_click("left"); time.sleep(0.5)
-                safe_press_enter_if_not_ingame(w);
-                print(">>> Splash geçildi. Login.")
-                set_stage("LOGIN_INPUT");
-                time.sleep(0.5);
-                perform_login_inputs(w);
-                print("[LOGIN] Kimlik bilgileri girildi.")
-                set_stage("SERVER_LIST");
-                time.sleep(0.8)
-                for _ in range(2): mouse_move(*SERVER_OPEN_POS); mouse_click("left"); time.sleep(0.15)
-                print("[SERVER] Server listesi açıldı.")
-                set_stage("SERVER_SELECT");
-                time.sleep(1)
-                server_xy = random.choice(SERVER_CHOICES)
-                for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
-                print(f"[SERVER] Rastgele server: {server_xy}")
-                set_stage("SERVER_POST_SELECT");
-                press_key(SC_ENTER);
-                release_key(SC_ENTER);
-                time.sleep(1.5)
-                ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
-                if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
-                    "oyun_start.png tıklanamadı.")
-                time.sleep(1);
-                press_key(SC_ENTER);
-                release_key(SC_ENTER);
-                time.sleep(1)
-                ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
-                                                  allow_periodic_enter=False)
-                if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
-            set_stage("INGAME_TOWN");
-            ensure_ui_closed();
-            send_town_command();
-            _town_log_once("[TOWN] Bir kez town atıldı.")
-            press_key(SC_O);
-            release_key(SC_O);
-            time.sleep(0.1);
-            _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
-            maybe_autotune(True)
-            set_stage("RUN_WORKFLOW");
-            cycle_done, _purchased = run_stairs_and_workflow(w)
-            if cycle_done:
-                set_stage("CYCLE_EXIT_RESTART");
-                print("[CYCLE] Tur tamamlandı → KO kapatılıp baştan.")
-                try:
-                    exit_game_fast(w)
-                except Exception as e:
-                    print(f"[CYCLE] Çıkış hata: {e}")
-                time.sleep(1.0);
-                GLOBAL_CYCLE += 1;
-                print(f"[CYCLE] Yeni tur: {GLOBAL_CYCLE}. Planlı +7 ≥ {NEXT_PLUS7_CHECK_AT}.");
-                continue
-            else:
-                print("[CYCLE] Tamamlanmadan sonlandı (F12 veya hata).")
-                if _kb_pressed('f12'): print("[CYCLE] F12 tespit edildi, makro çıkıyor."); break
-                print("[RESTART] Hata sonrası temiz başlatma...")
+            try:
+                print(">>> AŞAMA 1: Launcher ile başlat");
+                w = launch_via_launcher_and_wait()
+                if not w:
+                    print("Başlatma başarısız. LAUNCHER_EXE/START koordinatı kontrol.")
+                    raise WatchdogTimeout("Oyun penceresi yok.")
+                with key_tempo(0.5):
+                    set_stage("SPLASH_PASS");
+                    time.sleep(0.5)
+                    for _ in range(2): time.sleep(1.5); mouse_move(*SPLASH_CLICK_POS); mouse_click("left"); time.sleep(0.5)
+                    safe_press_enter_if_not_ingame(w);
+                    print(">>> Splash geçildi. Login.")
+                    set_stage("LOGIN_INPUT");
+                    time.sleep(0.5);
+                    perform_login_inputs(w);
+                    print("[LOGIN] Kimlik bilgileri girildi.")
+                    set_stage("SERVER_LIST");
+                    time.sleep(0.8)
+                    for _ in range(2): mouse_move(*SERVER_OPEN_POS); mouse_click("left"); time.sleep(0.15)
+                    print("[SERVER] Server listesi açıldı.")
+                    set_stage("SERVER_SELECT");
+                    time.sleep(1)
+                    server_xy = random.choice(SERVER_CHOICES)
+                    for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
+                    print(f"[SERVER] Rastgele server: {server_xy}")
+                    set_stage("SERVER_POST_SELECT");
+                    press_key(SC_ENTER);
+                    release_key(SC_ENTER);
+                    time.sleep(1.5)
+                    ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
+                    if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
+                        "oyun_start.png tıklanamadı.")
+                    time.sleep(1);
+                    press_key(SC_ENTER);
+                    release_key(SC_ENTER);
+                    time.sleep(1)
+                    ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
+                                                      allow_periodic_enter=False)
+                    if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
+                set_stage("INGAME_TOWN");
+                ensure_ui_closed();
+                send_town_command();
+                _town_log_once("[TOWN] Bir kez town atıldı.")
+                press_key(SC_O);
+                release_key(SC_O);
+                time.sleep(0.1);
+                _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
+                maybe_autotune(True)
+                set_stage("RUN_WORKFLOW");
+                cycle_done, _purchased = run_stairs_and_workflow(w)
+                if cycle_done:
+                    set_stage("CYCLE_EXIT_RESTART");
+                    print("[CYCLE] Tur tamamlandı → KO kapatılıp baştan.")
+                    try:
+                        exit_game_fast(w)
+                    except Exception as e:
+                        print(f"[CYCLE] Çıkış hata: {e}")
+                    time.sleep(1.0);
+                    GLOBAL_CYCLE += 1;
+                    print(f"[CYCLE] Yeni tur: {GLOBAL_CYCLE}. Planlı +7 ≥ {NEXT_PLUS7_CHECK_AT}.");
+                    continue
+                else:
+                    print("[CYCLE] Tamamlanmadan sonlandı (F12 veya hata).")
+                    if _kb_pressed('f12'): print("[CYCLE] F12 tespit edildi, makro çıkıyor."); break
+                    print("[RESTART] Hata sonrası temiz başlatma...")
+                    try:
+                        if w is not None:
+                            exit_game_fast(w)
+                        else:
+                            close_all_game_instances()
+                    except Exception as e:
+                        print(f"[RESTART] Kapatma hata: {e}")
+                    time.sleep(2.0);
+                    continue
+            except WatchdogTimeout as e:
+                print(f"[WATCHDOG] {e} → Oyun yeniden başlatılıyor...")
                 try:
                     if w is not None:
                         exit_game_fast(w)
                     else:
                         close_all_game_instances()
-                except Exception as e:
-                    print(f"[RESTART] Kapatma hata: {e}")
-                time.sleep(2.0);
+                except Exception as ee:
+                    print(f"[WATCHDOG] Kapatma sırasında hata: {ee}")
+                time.sleep(3.0);
                 continue
-        except WatchdogTimeout as e:
-            print(f"[WATCHDOG] {e} → Oyun yeniden başlatılıyor...")
-            try:
-                if w is not None:
-                    exit_game_fast(w)
-                else:
-                    close_all_game_instances()
-            except Exception as ee:
-                print(f"[WATCHDOG] Kapatma sırasında hata: {ee}")
-            time.sleep(3.0);
-            continue
+    except GUIAbort:
+        print("[MAIN] GUI durdurma isteği alındı; çıkılıyor.")
 
 
 # ===================== MİKRO ADIM DÜZELTME FONKSİYONLARI (v2) =====================
@@ -4358,6 +4410,23 @@ def _MERDIVEN_RUN_GUI():
 
                 m._kb_pressed = _kb
 
+            if hasattr(keyboard, "is_pressed"):
+                orig = getattr(m, "_GUI_ORIG_IS_PRESSED", None) or _KEYBOARD_IS_PRESSED_ORIG or keyboard.is_pressed
+
+                def _gui_is_pressed(key):
+                    try:
+                        if str(key).lower() == "f12" and getattr(m, "GUI_ABORT", False):
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        return orig(key)
+                    except Exception:
+                        return False
+
+                m._GUI_ORIG_IS_PRESSED = orig
+                keyboard.is_pressed = _gui_is_pressed
+
         # ---- UI kur ----
         def _build(self):
             nb = ttk.Notebook(self.root);
@@ -4602,14 +4671,34 @@ def _MERDIVEN_RUN_GUI():
 
         def _run(self):
             try:
-                self.stage.set("Başlatılıyor..."); m.main(); self.stage.set("Bitti/sonlandı.")
+                self.stage.set("Başlatılıyor...");
+                try:
+                    m.main()
+                except getattr(m, "GUIAbort", GUIAbort):
+                    self.stage.set("Kullanıcı tarafından durduruldu.")
+                    self._msg("Makro kullanıcı isteğiyle durdu.")
+                else:
+                    if getattr(m, "GUI_ABORT", False):
+                        self.stage.set("Kullanıcı tarafından durduruldu.")
+                        self._msg("Makro kullanıcı isteğiyle durdu.")
+                    else:
+                        self.stage.set("Bitti/sonlandı.")
             except Exception as e:
                 self.stage.set(f"Hata: {e}"); self._msg(f"main() hata: {e}")
+            finally:
+                self.root.after(0, self._sync_thread_state)
 
         def stop(self):
             self._msg("Durdur (F12 sanalı)...");
             m.GUI_ABORT = True;
             self.stage.set("Durduruluyor (F12)...")
+
+        def _sync_thread_state(self):
+            thr = getattr(self, "thr", None)
+            if thr and thr.is_alive():
+                self.root.after(200, self._sync_thread_state)
+            else:
+                self.thr = None
 
         def kill_all(self):
             self.stop()
