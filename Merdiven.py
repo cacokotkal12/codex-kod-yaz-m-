@@ -96,6 +96,20 @@ def PERSIST_PATH(name):
     return os.path.join(base, name)
 
 
+def _MERDIVEN_CFG_PATH():
+    """Ayar dosyası için tekil ve yazılabilir yol döndür."""
+    import os
+    try:
+        path = PERSIST_PATH('merdiven_config.json')
+    except Exception:
+        path = os.path.join(os.path.expanduser('~'), 'merdiven_config.json')
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    return path
+
+
 try:
     import mss
 except Exception:
@@ -3473,11 +3487,14 @@ from functools import wraps
 
 
 # --- Config yükle/kaydet ---
-def load_config(path='merdiven_config.json', defaults=None):
+def load_config(path=None, defaults=None):
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
     if defaults is None:
         defaults = json.loads(
             r'''{"timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm 7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         if not os.path.exists(path):
             with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
             return defaults
@@ -3498,8 +3515,11 @@ def load_config(path='merdiven_config.json', defaults=None):
         return defaults
 
 
-def save_config(cfg, path='merdiven_config.json'):
+def save_config(cfg, path=None):
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
         return True
@@ -3723,22 +3743,6 @@ _GLOBAL_PATCH_UTILS = {'load_config': load_config, 'save_config': save_config, '
 # ========================== [ENTEGRE GUI BLOĞU] ==========================
 # Bu blok YAMAİCİN.PY ile otomatik eklendi. Kısa, stabil, tek dosya EXE uyumlu.
 # Başlat/Durdur/Kaydet/Hepsini Kapat + "Gelişmiş" sekmesiyle TÜM büyük harfli değişkenleri düzenler.
-def _MERDIVEN_CFG_PATH():
-    # Config yolu: EXE klasörü; yazılamazsa %APPDATA%\Merdiven
-    import os, sys
-    base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(
-        os.path.dirname(__file__))
-    p = PERSIST_PATH('merdiven_config.json')
-    try:
-        os.makedirs(base, exist_ok=True)
-        open(p, "a", encoding="utf-8").close()
-        return p
-    except Exception:
-        app = os.path.join(os.getenv("APPDATA") or base, "Merdiven")
-        os.makedirs(app, exist_ok=True)
-        return PERSIST_PATH('merdiven_config.json')
-
-
 _TR = {
     'ANVIL_CONFIRM_WAIT_MS': 'anvil onay bekleme (ms)',
     'ANVIL_HOVER_CLEAR_SEC': 'anvil hover temizleme (sn)',
@@ -3925,53 +3929,297 @@ _TR_HELP.update({
     # … sende olan diğer anahtarlar aynı şekilde devam edecek …
 })
 
-_ADV_GROUP = dict(globals().get('_ADV_GROUP', {}))
-_ADV_GROUP.update({
-    # Kategoriler (filtre için) — mevcut eşleştirmelerin tamamını aynen koru
-    'ANVIL_CONFIRM_WAIT_MS': 'Anvil',
-    'ANVIL_HOVER_CLEAR_SEC': 'Anvil',
-    'ANVIL_HOVER_GUARD': 'Anvil',
-    'ANVIL_WALK_TIME': 'Anvil',
-    'AUTO_BANK_PLUS8': 'Banka',
-    'AUTO_BANK_PLUS8_DELAY': 'Banka',
-    'BANK_OPEN': 'Banka',
-    'BANK_PAGE_CLICK_DELAY': 'Banka',
-    'BANK_PANEL_ROWS': 'Banka',
-    'BANK_PANEL_COLS': 'Banka',
-    'BANK_INV_LEFT': 'Banka',
-    'BANK_INV_TOP': 'Banka',
-    'BANK_INV_RIGHT': 'Banka',
-    'BANK_INV_BOTTOM': 'Banka',
-    'SPEED_PROFILE': 'Hız',
-    'AUTO_SPEED_PROFILE': 'Hız',
-    'AUTO_TUNE_INTERVAL': 'Hız',
-    'PRESS_MIN': 'Hız',
-    'PRESS_MAX': 'Hız',
-    'PRE_BRAKE_DELTA': 'Hız',
-    'ROI_STALE_MS': 'OCR/ROI',
-    'UPG_ROI_STALE_MS': 'OCR/ROI',
-    'EMPTY_SLOT_TEMPLATE_PATH': 'OCR/ROI',
-    'EMPTY_SLOT_MATCH_THRESHOLD': 'OCR/ROI',
-    'FALLBACK_MEAN_THRESHOLD': 'OCR/ROI',
-    'FALLBACK_EDGE_DENSITY_THRESHOLD': 'OCR/ROI',
-    'EMPTY_SLOT_THRESHOLD': 'OCR/ROI',
-    'ENABLE_YAMA_SLOT_CACHE': 'OCR/ROI',
-    'MAX_CACHE_SIZE_PER_SNAPSHOT': 'OCR/ROI',
-    'TOOLTIP_GRAB_WITH_MSS': 'OCR/ROI',
-    'TOOLTIP_OFFSET_Y': 'OCR/ROI',
-    'TOOLTIP_ROI_W': 'OCR/ROI',
-    'TOOLTIP_ROI_H': 'OCR/ROI',
-    'BUY_MODE': 'NPC/598',
-    'BUY_TURNS': 'NPC/598',
-    # … sende olan diğer eşleştirmeler aynı şekilde devam edecek …
-})
+_ADV_CATEGORY_RULES = (
+    ("Oyuna Giriş", dict(
+        names=(
+            'LOGIN_USERNAME',
+            'LOGIN_PASSWORD',
+            'LOGIN_USERNAME_CLICK_POS',
+            'LOGIN_PASSWORD_CLICK_POS',
+        ),
+        prefixes=(
+            'LOGIN_',
+            'SERVER_',
+            'SPLASH_',
+        ),
+    )),
+    ("Launcher", dict(
+        names=(
+            'WINDOW_TITLE_KEYWORD',
+            'WINDOW_APPEAR_TIMEOUT',
+            'GAME_START_TEMPLATE_PATH',
+            'GAME_START_MATCH_THRESHOLD',
+            'GAME_START_FIND_TIMEOUT',
+            'GAME_START_SCALES',
+            'TEMPLATE_EXTRA_CLICK_POS',
+            'REQUEST_RELAUNCH',
+        ),
+        prefixes=(
+            'WINDOW_',
+            'GAME_START_',
+            'LAUNCHER_',
+            'TEMPLATE_',
+        ),
+    )),
+    ("Anvil", dict(
+        prefixes=(
+            'ANVIL_',
+        ),
+    )),
+    ("NPC/598", dict(
+        names=(
+            'BUY_MODE',
+            'BUY_TURNS',
+            'FABRIC_STEPS',
+            'LINEN_STEPS',
+            'NPC_GIDIS_SURESI',
+            'NPC_SEEK_TIMEOUT',
+            'NPC_POSTBUY_FIRST_A_DURATION',
+            'NPC_POSTBUY_SECOND_A_DURATION',
+            'NPC_POSTBUY_A_WHILE_W_DURATION',
+            'NPC_POSTBUY_FINAL_W_DURATION',
+            'NPC_POSTBUY_TARGET_X1',
+            'NPC_POSTBUY_TARGET_X2',
+            'NPC_POSTBUY_SEEK_TIMEOUT',
+            'NPC_MENU_PAGE2_POS',
+        ),
+        prefixes=(
+            'NPC_',
+            'BUY_',
+            'USE_STORAGE',
+            'FABRIC_',
+            'LINEN_',
+        ),
+    )),
+    ("Scroll", dict(
+        names=(
+            'SCROLL_ALIM_ADET',
+            'SCROLL_MID_ALIM_ADET',
+        ),
+        prefixes=(
+            'SCROLL_',
+        ),
+    )),
+    ("Banka", dict(
+        names=(
+            'AUTO_BANK_PLUS8',
+            'AUTO_BANK_PLUS8_DELAY',
+            'BANK_OPEN',
+            'BANK_PAGE_CLICK_DELAY',
+            'BANK_PANEL_ROWS',
+            'BANK_PANEL_COLS',
+            'BANK_INV_LEFT',
+            'BANK_INV_TOP',
+            'BANK_INV_RIGHT',
+            'BANK_INV_BOTTOM',
+            'BANK_FULL_FLAG',
+        ),
+        prefixes=(
+            'AUTO_BANK_',
+            'BANK_',
+            'INV_',
+            'SLOT_',
+        ),
+    )),
+    ("598 Takip", dict(
+        names=(
+            'TARGET_NPC_X',
+            'TARGET_STABLE_HITS',
+            'TARGET_Y_AFTER_TURN',
+            'STAIRS_TOP_Y',
+            'X_TOLERANCE',
+            'X_BAND_CONSEC',
+            'X_TOL_TIMEOUT',
+            'X_TOL_READ_DELAY',
+            'Y_SEEK_TIMEOUT',
+        ),
+        prefixes=(
+            'TARGET_',
+            'STAIRS_',
+            'VALID_',
+            'TURN_',
+            'X_',
+            'Y_',
+            'PREC_',
+        ),
+    )),
+    ("Town", dict(
+        names=(
+            'TOWN_CLICK_POS',
+            'TOWN_WAIT',
+            'TOWN_MIN_INTERVAL_SEC',
+            'TOWN_LOCKED',
+            'TOWN_HARD_LOCK',
+        ),
+        prefixes=(
+            'TOWN_',
+        ),
+    )),
+    ("Hız", dict(
+        names=(
+            'SPEED_PROFILE',
+            'AUTO_SPEED_PROFILE',
+            'AUTO_TUNE_INTERVAL',
+            'PRESS_MIN',
+            'PRESS_MAX',
+            'PRE_BRAKE_DELTA',
+            'MAX_STEPS',
+            'STUCK_TIMEOUT',
+        ),
+        prefixes=(
+            'AUTO_SPEED_',
+            'AUTO_TUNE_',
+            'SPEED_',
+            'PRESS_',
+            'MICRO_',
+            'PRE_BRAKE_',
+        ),
+    )),
+    ("Upgrade", dict(
+        prefixes=(
+            'UPGRADE_',
+            'UPG_',
+            'CONFIRM_',
+            'YAMA_QC_',
+        ),
+    )),
+    ("OCR/ROI", dict(
+        names=(
+            'ROI_STALE_MS',
+            'UPG_ROI_STALE_MS',
+            'EMPTY_SLOT_TEMPLATE_PATH',
+            'EMPTY_SLOT_MATCH_THRESHOLD',
+            'FALLBACK_MEAN_THRESHOLD',
+            'FALLBACK_EDGE_DENSITY_THRESHOLD',
+            'EMPTY_SLOT_THRESHOLD',
+            'ENABLE_YAMA_SLOT_CACHE',
+            'MAX_CACHE_SIZE_PER_SNAPSHOT',
+            'TOOLTIP_GRAB_WITH_MSS',
+            'TOOLTIP_OFFSET_Y',
+            'TOOLTIP_ROI_W',
+            'TOOLTIP_ROI_H',
+        ),
+        prefixes=(
+            'HOVER_WAIT_',
+            'TOOLTIP_',
+            'ROI_',
+            'EMPTY_',
+            'FALLBACK_',
+        ),
+    )),
+    ('+7/+8', dict(
+        names=(
+            'FORCE_PLUS7_ONCE',
+            'BASMA_HAKKI',
+            'WRAP_SLOTS',
+        ),
+        prefixes=(
+            'PLUS7_',
+            'PLUS8_',
+            'PLUSN_',
+            'WRAP_',
+            'YAMA_QC_',
+        ),
+    )),
+    ("Günlükleme", dict(
+        prefixes=(
+            'LOG_',
+            'CRASH_',
+        ),
+    )),
+    ("Genel İzleme", dict(
+        names=(
+            'HP_POTION_THRESHOLD',
+            'HP_POTION_TARGET',
+            'HP_LOW_SLEEP',
+            'GLOBAL_CYCLE',
+            'GLOBAL_LOOP_SLEEP',
+            'NEXT_PLUS7_CHECK_AT',
+            'MODE',
+        ),
+        prefixes=(
+            'HP_',
+            'GLOBAL_',
+        ),
+    )),
+    ("Otomasyon", dict(
+        names=(
+            'AUTO_LOGIN',
+            'AUTO_RELAUNCH',
+            'AUTO_TOWN',
+            'AUTO_EXIT_ON_EMPTY',
+            'AUTO_SCROLL',
+            'AUTO_BANK',
+            'AUTO_SMART_TOWN',
+            'AUTO_REPAIR',
+            'WATCHDOG_TIMEOUT',
+            'WATCHDOG_RELAUNCH_WAIT',
+            'F_WAIT_AFTER_LOGIN',
+            'F_WAIT_AFTER_FAIL',
+            'GUI_AUTO_OPEN_SPEED',
+            'DEBUG_SAVE',
+            'ON_TEMPLATE_TIMEOUT_RESTART',
+            'ITEMS_DEPLETED_FLAG',
+        ),
+        prefixes=(
+            'AUTO_',
+            'WATCHDOG_',
+            'F_WAIT_',
+            'GUI_',
+            'DEBUG_',
+        ),
+    )),
+    ("Girdi/WinAPI", dict(
+        prefixes=(
+            'SC_',
+            'VK_',
+            'KEYEVENTF_',
+            'MOUSEEVENTF_',
+            'TH32CS_',
+            'CF_',
+            'GMEM_',
+        ),
+    )),
+)
+
+
+def _build_adv_grouping():
+    base = dict(globals().get('_ADV_GROUP', {}))
+    prefix_rules = list(globals().get('_ADV_PREFIX_GROUPS', ()))
+    order = list(globals().get('_ADV_GROUP_ORDER', ()))
+    seen_prefixes = {p for p, _ in prefix_rules}
+
+    for category, rule in _ADV_CATEGORY_RULES:
+        if category not in order:
+            order.append(category)
+        for name in rule.get('names', ()):  # type: ignore[arg-type]
+            base.setdefault(name, category)
+        for prefix in rule.get('prefixes', ()):  # type: ignore[arg-type]
+            if prefix not in seen_prefixes:
+                prefix_rules.append((prefix, category))
+                seen_prefixes.add(prefix)
+
+    if 'Genel' not in order:
+        order.append('Genel')
+
+    return base, tuple(order), tuple(prefix_rules)
+
+
+_ADV_GROUP, _ADV_GROUP_ORDER, _ADV_PREFIX_GROUPS = _build_adv_grouping()
+
 
 def _norm_txt(s: str) -> str:
     try: return str(s).casefold()
     except: return str(s).lower()
 
 def _adv_group_of(name: str) -> str:
-    return _ADV_GROUP.get(name, "Tümü")
+    grp = _ADV_GROUP.get(name)
+    if grp:
+        return grp
+    for prefix, fallback in _ADV_PREFIX_GROUPS:
+        if name.startswith(prefix):
+            return fallback
+    return 'Genel'
 
 class _Tooltip:
     # Basit hover tooltip (arka plan işlevsel; gerekirse messagebox fallback kullanılabilir)
@@ -4241,34 +4489,55 @@ def _MERDIVEN_RUN_GUI():
             for w in self.adv_container.winfo_children(): w.destroy()
             self.adv_rows = []
             F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
-            row = 0
+            grouped = {}
             for name, val in self._adv_items():
                 if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
                     continue
-                ttk.Label(self.adv_container, text=_tr_name(name)).grid(row=row, column=0, sticky="w")
-                if isinstance(val, bool):
-                    var = tk.StringVar(value=str(val));
-                    w = ttk.Combobox(self.adv_container, values=["True", "False"], textvariable=var, width=8,
-                                     state="readonly")
-                else:
-                    var = tk.StringVar(value=str(val));
-                    w = ttk.Entry(self.adv_container, textvariable=var, width=28)
-                w.grid(row=row, column=1, sticky="w", padx=3)
-                ttk.Button(self.adv_container, text="Uygula",
-                           command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
-                           ).grid(row=row, column=2, sticky="w")
+                grouped.setdefault(_adv_group_of(name), []).append((name, val))
 
-                # (İsteğe bağlı) bilgi (tooltip) butonu
+            if not grouped:
+                ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
+                self.adv_container.update_idletasks()
                 try:
-                    _ib = ttk.Button(self.adv_container, width=2, text="i")
-                    _ib.grid(row=row, column=3, padx=2, pady=1, sticky="w")
-                    _Tooltip(_ib, _TR_HELP.get(name, "Açıklama yok"))
+                    self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
                 except Exception:
                     pass
+                return
 
-                # >>> Bu iki satır kesinlikle try/except DIŞINDA kalmalı:
-                self.adv_rows.append((name, var))
-                row += 1
+            def _grp_key(grp_name: str):
+                try:
+                    return (_ADV_GROUP_ORDER.index(grp_name), grp_name)
+                except ValueError:
+                    return (len(_ADV_GROUP_ORDER), grp_name)
+
+            for grp_name in sorted(grouped.keys(), key=_grp_key):
+                entries = grouped[grp_name]
+                entries.sort(key=lambda item: _tr_name(item[0]).upper())
+                title = grp_name or 'Genel'
+                frame = ttk.LabelFrame(self.adv_container, text=title)
+                frame.pack(fill="x", padx=6, pady=4, anchor="n")
+                frame.columnconfigure(1, weight=1)
+
+                for row, (name, val) in enumerate(entries):
+                    ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+                    if isinstance(val, bool):
+                        var = tk.StringVar(value=str(val))
+                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
+                                              state="readonly")
+                    else:
+                        var = tk.StringVar(value=str(val))
+                        widget = ttk.Entry(frame, textvariable=var, width=28)
+                    widget.grid(row=row, column=1, sticky="we", padx=3)
+                    ttk.Button(frame, text="Uygula",
+                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
+                               ).grid(row=row, column=2, sticky="w", padx=2)
+                    try:
+                        info_btn = ttk.Button(frame, width=2, text="i")
+                        info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
+                        _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
+                    except Exception:
+                        pass
+                    self.adv_rows.append((name, var))
 
             self.adv_container.update_idletasks()
             try:
