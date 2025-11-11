@@ -68,6 +68,7 @@ def _read_y_now():
 
 import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
     sys, atexit, traceback, logging
+from collections import OrderedDict
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -201,107 +202,234 @@ def with_retry(name="", attempts=4, delay=0.6):
 def _bye(): log("[EXIT] program sonlandı")
 
 
+# ============================== AYAR GRUPLARI ALTYAPISI ==============================
+class ConfigGroup:
+    """Konfigürasyon değişkenlerini mantıksal başlıklar altında toplar."""
+
+    __slots__ = ("title", "defaults")
+
+    def __init__(self, title: str, **values):
+        self.title = title
+        self.defaults = OrderedDict(values)
+
+    def apply(self):
+        g = globals()
+        for key, value in list(self.defaults.items()):
+            resolved = value() if callable(value) else value
+            self.defaults[key] = resolved
+            g[key] = resolved
+
+    def current_items(self):
+        g = globals()
+        for key in self.defaults:
+            yield key, g.get(key)
+
+
+CONFIG_GROUPS = OrderedDict()
+
+
+def register_group(name: str, title: str, **values) -> ConfigGroup:
+    """Grubu kaydedip değerleri global değişkenlere yazar."""
+
+    group = ConfigGroup(title, **values)
+    group.apply()
+    CONFIG_GROUPS[name] = group
+    return group
+
+
+def iter_config_groups():
+    """Gruplanmış ayarları (ad, başlık, güncel değerler) şeklinde döndür."""
+
+    for key, group in CONFIG_GROUPS.items():
+        yield key, group.title, list(group.current_items())
+
+
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
-tus_hizi = 0.050;
-mouse_hizi = 0.1;
-jitter_px = 0
+register_group(
+    "input",
+    "Hız / Tıklama / Jitter",
+    tus_hizi=0.050,
+    mouse_hizi=0.1,
+    jitter_px=0,
+)
 # ---- OCR / Tesseract ----
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
 # ---- Watchdog ----
-WATCHDOG_TIMEOUT = 120;
-F_WAIT_TIMEOUT_SECONDS = 30.0
+register_group(
+    "watchdog",
+    "Watchdog",
+    WATCHDOG_TIMEOUT=120,
+    F_WAIT_TIMEOUT_SECONDS=30.0,
+)
 # ---- Banka +8 otomatik başlatma ----
-AUTO_BANK_PLUS8 = True  # True: 30 sn sonra otomatik +8 döngüsüne gir
-AUTO_BANK_PLUS8_DELAY = 30.0  # saniye; istersen değeri değiştir
+register_group(
+    "bank_auto",
+    "Banka +8 otomatik başlatma",
+    AUTO_BANK_PLUS8=True,  # True: 30 sn sonra otomatik +8 döngüsüne gir
+    AUTO_BANK_PLUS8_DELAY=30.0,  # saniye; istersen değeri değiştir
+)
 # ---- Merdiven Başlangıç Koord. ----
-VALID_X_LEFT = {811, 812, 813};
-VALID_X_RIGHT = {819, 820, 821};
-VALID_X = VALID_X_LEFT | VALID_X_RIGHT
-STOP_Y = {598};
-STAIRS_TOP_Y = 598
+register_group(
+    "stairs",
+    "Merdiven Başlangıç Koord.",
+    VALID_X_LEFT={811, 812, 813},
+    VALID_X_RIGHT={819, 820, 821},
+    VALID_X=lambda: globals()["VALID_X_LEFT"] | globals()["VALID_X_RIGHT"],
+    STOP_Y={598},
+    STAIRS_TOP_Y=598,
+)
 # ---- Envanter / Banka Grid ----
-INV_LEFT, INV_TOP, INV_RIGHT, INV_BOTTOM = 664, 449, 1007, 644
-UPG_INV_LEFT, UPG_INV_TOP, UPG_INV_RIGHT, UPG_INV_BOTTOM = 650, 434, 996, 632
-BANK_INV_LEFT, BANK_INV_TOP, BANK_INV_RIGHT, BANK_INV_BOTTOM = 648, 423, 996, 621
-SLOT_COLS, SLOT_ROWS = 7, 4
+register_group(
+    "inventory",
+    "Envanter / Banka Grid",
+    INV_LEFT=664,
+    INV_TOP=449,
+    INV_RIGHT=1007,
+    INV_BOTTOM=644,
+    UPG_INV_LEFT=650,
+    UPG_INV_TOP=434,
+    UPG_INV_RIGHT=996,
+    UPG_INV_BOTTOM=632,
+    BANK_INV_LEFT=648,
+    BANK_INV_TOP=423,
+    BANK_INV_RIGHT=996,
+    BANK_INV_BOTTOM=621,
+    SLOT_COLS=7,
+    SLOT_ROWS=4,
+)
 # ---- Banka Sağ Üst Panel (6x4) ----
-BANK_PANEL_LEFT, BANK_PANEL_TOP, BANK_PANEL_RIGHT, BANK_PANEL_BOTTOM = 665, 156, 980, 363
-BANK_PANEL_COLS, BANK_PANEL_ROWS = 6, 4
+register_group(
+    "bank_panel",
+    "Banka Sağ Üst Panel",
+    BANK_PANEL_LEFT=665,
+    BANK_PANEL_TOP=156,
+    BANK_PANEL_RIGHT=980,
+    BANK_PANEL_BOTTOM=363,
+    BANK_PANEL_COLS=6,
+    BANK_PANEL_ROWS=4,
+)
 # ---- Boş Slot Tespiti ----
-EMPTY_SLOT_TEMPLATE_PATH = "empty_slot.png"
-EMPTY_SLOT_MATCH_THRESHOLD = 0.85;
-FALLBACK_MEAN_THRESHOLD = 55.0;
-FALLBACK_EDGE_DENSITY_THRESHOLD = 0.030
-EMPTY_SLOT_THRESHOLD = 24;
-DEBUG_SAVE = False
+register_group(
+    "empty_slot",
+    "Boş Slot Tespiti",
+    EMPTY_SLOT_TEMPLATE_PATH="empty_slot.png",
+    EMPTY_SLOT_MATCH_THRESHOLD=0.85,
+    FALLBACK_MEAN_THRESHOLD=55.0,
+    FALLBACK_EDGE_DENSITY_THRESHOLD=0.030,
+    EMPTY_SLOT_THRESHOLD=24,
+    DEBUG_SAVE=False,
+)
 # ---- UPG / Basma Param. ----
-BASMA_HAKKI = 31
-SCROLL_POS = (671, 459);
-UPGRADE_BTN_POS = (747, 358);
-CONFIRM_BTN_POS = (737, 479)
-UPG_STEP_DELAY = 0.05
-SCROLL_FIND_ROI_W = 128;
-SCROLL_FIND_ROI_H = 128
+register_group(
+    "upgrade",
+    "UPG / Basma Param.",
+    BASMA_HAKKI=31,
+    SCROLL_POS=(671, 459),
+    UPGRADE_BTN_POS=(747, 358),
+    CONFIRM_BTN_POS=(737, 479),
+    UPG_STEP_DELAY=0.05,
+    SCROLL_FIND_ROI_W=128,
+    SCROLL_FIND_ROI_H=128,
+)
 # ---- Anvil/Scroll Yeniden Açma ----
-SCROLL_PANEL_REOPEN_MAX = 10;
-SCROLL_PANEL_REOPEN_DELAY = 0.1
+register_group(
+    "scroll_panel",
+    "Anvil/Scroll Yeniden Açma",
+    SCROLL_PANEL_REOPEN_MAX=10,
+    SCROLL_PANEL_REOPEN_DELAY=0.1,
+)
 # ---- Scroll Alma Ayarları ----
-SCROLL_ALIM_ADET = 3000;
-SCROLL_MID_ALIM_ADET = 199;
-SCROLL_VENDOR_MID_POS = (737, 233)
+register_group(
+    "scroll_purchase",
+    "Scroll Alma Ayarları",
+    SCROLL_ALIM_ADET=3000,
+    SCROLL_MID_ALIM_ADET=199,
+    SCROLL_VENDOR_MID_POS=(737, 233),
+)
 # ---- NPC / Storage ----
-TARGET_NPC_X = 768;
-TARGET_Y_AFTER_TURN = 648
-NPC_CONTEXT_RIGHTCLICK_POS = (535, 520)
-NPC_OPEN_TEXT_TEMPLATE_PATH = "npc_acma.png";
-NPC_OPEN_MATCH_THRESHOLD = 0.68;
-NPC_OPEN_FIND_TIMEOUT = 5.0
-NPC_OPEN_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
-USE_STORAGE_TEMPLATE_PATHS = ["use_storage.png", "use_stroge.png"];
-USE_STORAGE_MATCH_THRESHOLD = 0.78;
-USE_STORAGE_FIND_TIMEOUT = 6.0
-USE_STORAGE_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
+register_group(
+    "npc_storage",
+    "NPC / Storage",
+    TARGET_NPC_X=768,
+    TARGET_Y_AFTER_TURN=648,
+    NPC_CONTEXT_RIGHTCLICK_POS=(535, 520),
+    NPC_OPEN_TEXT_TEMPLATE_PATH="npc_acma.png",
+    NPC_OPEN_MATCH_THRESHOLD=0.68,
+    NPC_OPEN_FIND_TIMEOUT=5.0,
+    NPC_OPEN_SCALES=(0.85, 0.9, 1.0, 1.1, 1.2),
+    USE_STORAGE_TEMPLATE_PATHS=["use_storage.png", "use_stroge.png"],
+    USE_STORAGE_MATCH_THRESHOLD=0.78,
+    USE_STORAGE_FIND_TIMEOUT=6.0,
+    USE_STORAGE_SCALES=(0.85, 0.9, 1.0, 1.1, 1.2),
+)
 # ---- Banka Sayfa Düğmeleri ----
-BANK_NEXT_PAGE_POS = (731, 389);
-BANK_PREV_PAGE_POS = (668, 389);
-BANK_PAGE_CLICK_DELAY = 0.12
+register_group(
+    "bank_nav",
+    "Banka Sayfa Düğmeleri",
+    BANK_NEXT_PAGE_POS=(731, 389),
+    BANK_PREV_PAGE_POS=(668, 389),
+    BANK_PAGE_CLICK_DELAY=0.12,
+)
 # ---- Game Start (Launcher sonrası) ----
-GAME_START_TEMPLATE_PATH = "oyun_start.png";
-GAME_START_MATCH_THRESHOLD = 0.70;
-GAME_START_FIND_TIMEOUT = 8.0;
-GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
-TEMPLATE_EXTRA_CLICK_POS = (931, 602)
+register_group(
+    "game_start",
+    "Game Start (Launcher sonrası)",
+    GAME_START_TEMPLATE_PATH="oyun_start.png",
+    GAME_START_MATCH_THRESHOLD=0.70,
+    GAME_START_FIND_TIMEOUT=8.0,
+    GAME_START_SCALES=(0.85, 0.9, 1.0, 1.1, 1.2),
+    TEMPLATE_EXTRA_CLICK_POS=(931, 602),
+)
 # ---- Launcher ----
-LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
-LAUNCHER_START_CLICK_POS = (974, 726)
-WINDOW_TITLE_KEYWORD = "Knight Online";
-WINDOW_APPEAR_TIMEOUT = 120.0
+register_group(
+    "launcher",
+    "Launcher",
+    LAUNCHER_EXE=r"C:\\NTTGame\\KnightOnlineEn\\Launcher.exe",
+    LAUNCHER_START_CLICK_POS=(974, 726),
+    WINDOW_TITLE_KEYWORD="Knight Online",
+    WINDOW_APPEAR_TIMEOUT=120.0,
+)
 # ---- Login Bilgileri ve Tıklama Koord. ----
-LOGIN_USERNAME = os.getenv("KO_USER", "cacokotkal12");
-LOGIN_PASSWORD = os.getenv("KO_PASS", "Vaz14999999jS@1")
-# Bu alanları kendi ekranına göre ayarla (gerekirse TAB ile de ilerliyor):
-LOGIN_USERNAME_CLICK_POS = (579, 326)  # kullanıcı adı alanı
-LOGIN_PASSWORD_CLICK_POS = (579, 378)  # şifre alanı
-SERVER_OPEN_POS = (455, 231)  # server list drop-down
-SERVER_CHOICES = [(671, 254), (676, 281)]  # listeden seçimlerden biri
+register_group(
+    "login",
+    "Oyuna giriş",
+    LOGIN_USERNAME=lambda: os.getenv("KO_USER", "cacokotkal12"),
+    LOGIN_PASSWORD=lambda: os.getenv("KO_PASS", "Vaz14999999jS@1"),
+    LOGIN_USERNAME_CLICK_POS=(579, 326),
+    LOGIN_PASSWORD_CLICK_POS=(579, 378),
+    SERVER_OPEN_POS=(455, 231),
+    SERVER_CHOICES=[(671, 254), (676, 281)],
+)
 # ---- HP Bar / In-Game Teyit ----
-HP_POINTS = [(185, 68), (218, 74)];
-HP_RED_MIN = 120.0;
-HP_RED_DELTA = 35.0
+register_group(
+    "ingame_hp",
+    "HP Bar / In-Game Teyit",
+    HP_POINTS=[(185, 68), (218, 74)],
+    HP_RED_MIN=120.0,
+    HP_RED_DELTA=35.0,
+)
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
-X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
-X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-X_TOL_READ_DELAY = 0.02  # X okuma aralığı (sn)
-X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
+register_group(
+    "precision",
+    "Hassas X hedefi",
+    X_TOLERANCE=1,  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
+    X_BAND_CONSEC=2,  # band içinde ardışık okuma sayısı (titreşim süzgeci)
+    X_TOL_READ_DELAY=0.02,  # X okuma aralığı (sn)
+    X_TOL_TIMEOUT=20.0,  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
+)
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
-PRESS_MIN = 0.035  # S/W mikro basış minimum (sn)
-PRESS_MAX = 0.090  # S/W mikro basış maksimum (sn)
-MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
-STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
+register_group(
+    "micro_steps",
+    "598→597 Mikro ayar",
+    PRESS_MIN=0.035,  # S/W mikro basış minimum (sn)
+    PRESS_MAX=0.090,  # S/W mikro basış maksimum (sn)
+    MAX_STEPS=400,  # 598→597 düzeltmede en fazla adım
+    STUCK_TIMEOUT=10,  # (sn) değişim olmazsa güvenlik bırakma
+)
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
 try:
     # süreleri makul aralığa kırp
@@ -318,43 +446,88 @@ try:
 except Exception as _e:
     print('[MikroAdim] sabit denetimi uyarı:', _e)
 
-PRE_BRAKE_DELTA = 2;
-MICRO_PULSE_DURATION = 0.100;
-MICRO_READ_DELAY = 0.015;
-TARGET_STABLE_HITS = 10
+register_group(
+    "micro_control",
+    "Mikro adım kontrol",
+    PRE_BRAKE_DELTA=2,
+    MICRO_PULSE_DURATION=0.100,
+    MICRO_READ_DELAY=0.015,
+    TARGET_STABLE_HITS=10,
+)
 # ---- Yürüme / Dönüş ----
-ANVIL_WALK_TIME = 2.5;
-NPC_GIDIS_SURESI = 5.0;
-NPC_SEEK_TIMEOUT = 20.0;
-Y_SEEK_TIMEOUT = 20.0
-TURN_LEFT_SEC = 1.443;
-TURN_RIGHT_SEC = 1.44
+register_group(
+    "movement",
+    "Yürüme / Dönüş",
+    NPC_GIDIS_SURESI=5.0,
+    NPC_SEEK_TIMEOUT=20.0,
+    Y_SEEK_TIMEOUT=20.0,
+    TURN_LEFT_SEC=1.443,
+    TURN_RIGHT_SEC=1.44,
+)
+# ---- Anvil ----
+register_group(
+    "anvil",
+    "Anvil",
+    ANVIL_WALK_TIME=2.5,
+    ANVIL_CONFIRM_WAIT_MS=45,
+    ANVIL_HOVER_CLEAR_SEC=0.035,
+    ANVIL_HOVER_GUARD=True,
+    ANVIL_MOUSE_PARK_POS=(5, 5),
+)
 # ---- Town ----
-TOWN_CLICK_POS = (775, 775);
-TOWN_WAIT = 2.5
+register_group(
+    "town",
+    "Town",
+    TOWN_CLICK_POS=(775, 775),
+    TOWN_WAIT=2.5,
+)
 # ---- Splash/Login yardımcı tık ----
-SPLASH_CLICK_POS = (700, 550)
+register_group(
+    "splash",
+    "Splash/Login yardımcı tık",
+    SPLASH_CLICK_POS=(700, 550),
+)
 # ---- Tooltip OCR
-
-HOVER_WAIT_INV = 0.080;
-HOVER_WAIT_BANK = 0.20;
-TOOLTIP_ROI_W, TOOLTIP_ROI_H = 640, 480;
-TOOLTIP_OFFSET_Y = 40;
-TOOLTIP_FALLBACK_BBOX = (290, 95, 1007, 662)
+register_group(
+    "tooltip",
+    "Tooltip OCR",
+    HOVER_WAIT_INV=0.080,
+    HOVER_WAIT_BANK=0.20,
+    TOOLTIP_ROI_W=640,
+    TOOLTIP_ROI_H=480,
+    TOOLTIP_OFFSET_Y=40,
+    TOOLTIP_FALLBACK_BBOX=(290, 95, 1007, 662),
+)
 # ---- +N (7/8) Şablon Yolları ----
-PLUS7_TEMPLATE_PATHS = ["plus7.png", "plus7_var2.png"];
-PLUS8_TEMPLATE_PATHS = ["plus8.png"]
-# ---- Scroll Takası Şablon & Ayarlcacokotkal12 ar ----
-SCROLL_LOW_TEMPLATE_PATHS = ["scroll_low.png", "scroll_low2.png"]
-SCROLL_MID_TEMPLATE_PATHS = ["scroll_mid.png", "scroll_mid2.png"]
-SCROLL_MATCH_THRESHOLD = 0.70;
-SCROLL_SCALES = (0.80, 0.90, 1.00, 1.10, 1.20);
-SCROLL_SWAP_MAX_STACKS = 8
+register_group(
+    "plus_templates",
+    "+N (7/8) Şablon Yolları",
+    PLUS7_TEMPLATE_PATHS=["plus7.png", "plus7_var2.png"],
+    PLUS8_TEMPLATE_PATHS=["plus8.png"],
+)
+# ---- Scroll Takası Şablon & Ayarları ----
+register_group(
+    "scroll_swap",
+    "Scroll Takası",
+    SCROLL_LOW_TEMPLATE_PATHS=["scroll_low.png", "scroll_low2.png"],
+    SCROLL_MID_TEMPLATE_PATHS=["scroll_mid.png", "scroll_mid2.png"],
+    SCROLL_MATCH_THRESHOLD=0.70,
+    SCROLL_SCALES=(0.80, 0.90, 1.00, 1.10, 1.20),
+    SCROLL_SWAP_MAX_STACKS=8,
+)
 # ---- Scroll arama (sabit nokta yerine tüm UPG/INV içinde) ----
-SCROLL_SEARCH_ANYWHERE = True  # True: scroll'u UPG/INV içinde her yerde ara
-SCROLL_SEARCH_REGIONS = ("UPG", "INV")  # istersen ("UPG", "INV") yapabilirsin
+register_group(
+    "scroll_search",
+    "Scroll arama",
+    SCROLL_SEARCH_ANYWHERE=True,  # True: scroll'u UPG/INV içinde her yerde ara
+    SCROLL_SEARCH_REGIONS=("UPG", "INV"),  # istersen ("UPG", "INV") yapabilirsin
+)
 # ================== AYAR (en üste, diğer sabitlerin yanına) ==================
-ON_TEMPLATE_TIMEOUT_RESTART = True  # True: npc_acma.png vb. zaman aşımında town yerine oyunu kapatıp yeniden başlat
+register_group(
+    "timeouts",
+    "Zaman aşımı davranışları",
+    ON_TEMPLATE_TIMEOUT_RESTART=True,  # True: npc_acma.png vb. zaman aşımında town yerine oyunu kapatıp yeniden başlat
+)
 
 
 def find_scroll_pos_anywhere(required: str, regions=SCROLL_SEARCH_REGIONS):
@@ -398,22 +571,41 @@ def click_scroll_anywhere(required: str, regions=SCROLL_SEARCH_REGIONS) -> bool:
 
 
 # ---- NPC'den alış şablonu ----
-NPC_BUY_STEPS = [((687, 237), 2, "right"), ((737, 237), 2, "right"), ((787, 237), 3, "right"), ((837, 237), 3, "right"),
-                 ((887, 237), 4, "right"), ((912, 498), 1, "left"), ((729, 584), 1, "left")]
-NPC_BUY_TURN_COUNT = 2;
-NPC_MENU_PAGE2_POS = (968, 328)
+register_group(
+    "npc_buy",
+    "NPC'den alış",
+    NPC_BUY_STEPS=[
+        ((687, 237), 2, "right"),
+        ((737, 237), 2, "right"),
+        ((787, 237), 3, "right"),
+        ((837, 237), 3, "right"),
+        ((887, 237), 4, "right"),
+        ((912, 498), 1, "left"),
+        ((729, 584), 1, "left"),
+    ],
+    NPC_BUY_TURN_COUNT=2,
+    NPC_MENU_PAGE2_POS=(968, 328),
+)
 # ---- NPC sonrası Anvil rotası ----
-NPC_POSTBUY_FIRST_A_DURATION = 3.1;
-NPC_POSTBUY_TARGET_X1 = 795;
-NPC_POSTBUY_A_WHILE_W_DURATION = 0.08;
-NPC_POSTBUY_TARGET_X2 = 814
-NPC_POSTBUY_SECOND_A_DURATION = 1.4;
-NPC_POSTBUY_FINAL_W_DURATION = 4.0;
-NPC_POSTBUY_SEEK_TIMEOUT = 20.0
+register_group(
+    "npc_postbuy",
+    "NPC sonrası Anvil rotası",
+    NPC_POSTBUY_FIRST_A_DURATION=3.1,
+    NPC_POSTBUY_TARGET_X1=795,
+    NPC_POSTBUY_A_WHILE_W_DURATION=0.08,
+    NPC_POSTBUY_TARGET_X2=814,
+    NPC_POSTBUY_SECOND_A_DURATION=1.4,
+    NPC_POSTBUY_FINAL_W_DURATION=4.0,
+    NPC_POSTBUY_SEEK_TIMEOUT=20.0,
+)
 # ---- +7 taraması tur planı ----
-PLUS7_START_FROM_TURN_AFTER_PURCHASE = 4;
-GLOBAL_CYCLE = 1;
-NEXT_PLUS7_CHECK_AT = 1
+register_group(
+    "plus7_cycle",
+    "+7 taraması tur planı",
+    PLUS7_START_FROM_TURN_AFTER_PURCHASE=4,
+    GLOBAL_CYCLE=1,
+    NEXT_PLUS7_CHECK_AT=1,
+)
 # ---- NPC Onay (shop kimliği) ----
 NPC_CONFIRM_TEMPLATE_PATH = "npc_onay.png";
 NPC_CONFIRM_RECT = (713, 51, 911, 84);
