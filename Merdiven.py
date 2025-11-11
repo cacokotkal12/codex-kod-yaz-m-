@@ -3966,6 +3966,38 @@ _ADV_GROUP.update({
     # … sende olan diğer eşleştirmeler aynı şekilde devam edecek …
 })
 
+# Yaygın önekler için kategori atamalarını otomatik tamamla
+for _prefix, _group in (
+    ("LOGIN_", "Oyuna Giriş"),
+    ("SERVER_", "Oyuna Giriş"),
+    ("SPLASH_", "Oyuna Giriş"),
+    ("LAUNCHER_", "Launcher"),
+    ("ANVIL_", "Anvil"),
+    ("NPC_", "NPC/598"),
+    ("SCROLL_", "Scroll"),
+    ("BANK_", "Banka"),
+    ("TOWN_", "Town"),
+    ("AUTO_", "Otomasyon"),
+):
+    for _name in list(globals()):
+        if _name.startswith(_prefix) and _name.isupper():
+            _ADV_GROUP.setdefault(_name, _group)
+
+_ADV_GROUP_ORDER_DEFAULT = (
+    'Oyuna Giriş',
+    'Launcher',
+    'Anvil',
+    'NPC/598',
+    'Scroll',
+    'Banka',
+    'Town',
+    'Hız',
+    'OCR/ROI',
+    'Otomasyon',
+    'Tümü',
+)
+ADVANCED_GROUP_ORDER = tuple(globals().get('ADVANCED_GROUP_ORDER', _ADV_GROUP_ORDER_DEFAULT))
+
 def _norm_txt(s: str) -> str:
     try: return str(s).casefold()
     except: return str(s).lower()
@@ -4228,37 +4260,54 @@ def _MERDIVEN_RUN_GUI():
 
         def _adv_items(self):
             items = []
+            order_map = getattr(self, '_adv_group_order_map', None)
+            if order_map is None:
+                order_map = {g: i for i, g in enumerate(ADVANCED_GROUP_ORDER)}
+                self._adv_group_order_map = order_map
             for k in dir(m):
                 try:
                     v = getattr(m, k)
-                    if self._is_editable(k, v): items.append((k, v))
-                except:
+                    if self._is_editable(k, v):
+                        grp = _adv_group_of(k)
+                        items.append((grp, k, v))
+                except Exception:
                     pass
-            items.sort(key=lambda x: x[0]);
+            items.sort(key=lambda x: (order_map.get(x[0], len(order_map)), x[0] or '', x[1]))
             return items
 
         def _build_adv(self):
-            for w in self.adv_container.winfo_children(): w.destroy()
+            for w in self.adv_container.winfo_children():
+                w.destroy()
             self.adv_rows = []
             F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
             row = 0
-            for name, val in self._adv_items():
-                if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
+            last_group = None
+            shown = 0
+            for group, name, val in self._adv_items():
+                search_blob = f"{name} {_TR.get(name, '')}".upper()
+                if F and F not in search_blob:
                     continue
-                ttk.Label(self.adv_container, text=_tr_name(name)).grid(row=row, column=0, sticky="w")
+                if group != last_group:
+                    heading = group or "Tümü"
+                    pad_top = (10 if shown else 4)
+                    ttk.Label(self.adv_container, text=heading, font=("Segoe UI", 10, "bold")) \
+                        .grid(row=row, column=0, columnspan=4, sticky="w", pady=(pad_top, 2))
+                    row += 1
+                    last_group = group
+                ttk.Label(self.adv_container, text=_tr_name(name)) \
+                    .grid(row=row, column=0, sticky="w", padx=(12, 0))
                 if isinstance(val, bool):
-                    var = tk.StringVar(value=str(val));
+                    var = tk.StringVar(value=str(val))
                     w = ttk.Combobox(self.adv_container, values=["True", "False"], textvariable=var, width=8,
                                      state="readonly")
                 else:
-                    var = tk.StringVar(value=str(val));
+                    var = tk.StringVar(value=str(val))
                     w = ttk.Entry(self.adv_container, textvariable=var, width=28)
                 w.grid(row=row, column=1, sticky="w", padx=3)
                 ttk.Button(self.adv_container, text="Uygula",
                            command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
                            ).grid(row=row, column=2, sticky="w")
 
-                # (İsteğe bağlı) bilgi (tooltip) butonu
                 try:
                     _ib = ttk.Button(self.adv_container, width=2, text="i")
                     _ib.grid(row=row, column=3, padx=2, pady=1, sticky="w")
@@ -4266,14 +4315,18 @@ def _MERDIVEN_RUN_GUI():
                 except Exception:
                     pass
 
-                # >>> Bu iki satır kesinlikle try/except DIŞINDA kalmalı:
                 self.adv_rows.append((name, var))
                 row += 1
+                shown += 1
+
+            if not shown:
+                ttk.Label(self.adv_container, text="Sonuç bulunamadı.") \
+                    .grid(row=0, column=0, sticky="w", padx=4, pady=4)
 
             self.adv_container.update_idletasks()
             try:
                 self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
-            except:
+            except Exception:
                 pass
 
         def _apply_one_adv(self, name, val_raw):
