@@ -3927,27 +3927,59 @@ _TR_HELP.update({
 
 _ADV_GROUP = dict(globals().get('_ADV_GROUP', {}))
 _ADV_GROUP.update({
-    # Kategoriler (filtre için) — mevcut eşleştirmelerin tamamını aynen koru
+    # Kategoriler (filtre için) — mevcut eşleştirmelerin tamamını aynen koru ve genişlet
     'ANVIL_CONFIRM_WAIT_MS': 'Anvil',
     'ANVIL_HOVER_CLEAR_SEC': 'Anvil',
     'ANVIL_HOVER_GUARD': 'Anvil',
     'ANVIL_WALK_TIME': 'Anvil',
+    'ANVIL_MOUSE_PARK_POS': 'Anvil',
     'AUTO_BANK_PLUS8': 'Banka',
     'AUTO_BANK_PLUS8_DELAY': 'Banka',
     'BANK_OPEN': 'Banka',
     'BANK_PAGE_CLICK_DELAY': 'Banka',
     'BANK_PANEL_ROWS': 'Banka',
     'BANK_PANEL_COLS': 'Banka',
+    'BANK_PANEL_LEFT': 'Banka',
+    'BANK_PANEL_TOP': 'Banka',
+    'BANK_PANEL_RIGHT': 'Banka',
+    'BANK_PANEL_BOTTOM': 'Banka',
     'BANK_INV_LEFT': 'Banka',
     'BANK_INV_TOP': 'Banka',
     'BANK_INV_RIGHT': 'Banka',
     'BANK_INV_BOTTOM': 'Banka',
+    'BANK_FULL_FLAG': 'Banka',
+    'BANK_MOVE_RETRY_LIMIT': 'Banka',
+    'BANK_MOVE_RETRY_DELAY': 'Banka',
+    'SCROLL_ALIM_ADET': 'Scroll',
+    'SCROLL_MID_ALIM_ADET': 'Scroll',
+    'SCROLL_POS': 'Scroll',
+    'SCROLL_VENDOR_MID_POS': 'Scroll',
+    'SCROLL_SWAP_MAX_STACKS': 'Scroll',
+    'SCROLL_SEARCH_ANYWHERE': 'Scroll',
+    'SCROLL_SEARCH_REGIONS': 'Scroll',
+    'SCROLL_LOW_TEMPLATE_PATHS': 'Scroll',
+    'SCROLL_MID_TEMPLATE_PATHS': 'Scroll',
+    'SCROLL_MATCH_THRESHOLD': 'Scroll',
+    'SCROLL_SCALES': 'Scroll',
+    'SCROLL_FIND_ROI_W': 'Scroll',
+    'SCROLL_FIND_ROI_H': 'Scroll',
+    'SCROLL_PANEL_REOPEN_MAX': 'Scroll',
+    'SCROLL_PANEL_REOPEN_DELAY': 'Scroll',
+    'SCROLL_GLOBAL_REOPEN_LIMIT_LOW': 'Scroll',
+    'SCROLL_GLOBAL_REOPEN_LIMIT_MID': 'Scroll',
+    'SCROLL_REOPEN_WAIT': 'Scroll',
+    'SCROLL_REOPEN_TIMEOUT': 'Scroll',
+    'SCROLL_PANEL_FAILSAFE_TIMEOUT': 'Scroll',
     'SPEED_PROFILE': 'Hız',
     'AUTO_SPEED_PROFILE': 'Hız',
     'AUTO_TUNE_INTERVAL': 'Hız',
     'PRESS_MIN': 'Hız',
     'PRESS_MAX': 'Hız',
     'PRE_BRAKE_DELTA': 'Hız',
+    'MICRO_PULSE_DURATION': 'Hız',
+    'MICRO_READ_DELAY': 'Hız',
+    'MAX_STEPS': 'Hız',
+    'STUCK_TIMEOUT': 'Hız',
     'ROI_STALE_MS': 'OCR/ROI',
     'UPG_ROI_STALE_MS': 'OCR/ROI',
     'EMPTY_SLOT_TEMPLATE_PATH': 'OCR/ROI',
@@ -3961,17 +3993,139 @@ _ADV_GROUP.update({
     'TOOLTIP_OFFSET_Y': 'OCR/ROI',
     'TOOLTIP_ROI_W': 'OCR/ROI',
     'TOOLTIP_ROI_H': 'OCR/ROI',
+    'LOGIN_USERNAME': 'Oyuna Giriş',
+    'LOGIN_PASSWORD': 'Oyuna Giriş',
+    'LOGIN_USERNAME_CLICK_POS': 'Oyuna Giriş',
+    'LOGIN_PASSWORD_CLICK_POS': 'Oyuna Giriş',
+    'WINDOW_TITLE_KEYWORD': 'Launcher',
+    'WINDOW_APPEAR_TIMEOUT': 'Launcher',
+    'GAME_START_TEMPLATE_PATH': 'Launcher',
+    'GAME_START_MATCH_THRESHOLD': 'Launcher',
+    'GAME_START_FIND_TIMEOUT': 'Launcher',
+    'GAME_START_SCALES': 'Launcher',
+    'LAUNCHER_EXE': 'Launcher',
+    'REQUEST_RELAUNCH': 'Launcher',
     'BUY_MODE': 'NPC/598',
     'BUY_TURNS': 'NPC/598',
-    # … sende olan diğer eşleştirmeler aynı şekilde devam edecek …
+    'NPC_BUY_TURN_COUNT': 'NPC/598',
+    'NPC_BUY_STEPS': 'NPC/598',
+    'NPC_MENU_PAGE2_POS': 'NPC/598',
+    'NPC_POSTBUY_FIRST_A_DURATION': 'NPC/598',
+    'NPC_POSTBUY_SECOND_A_DURATION': 'NPC/598',
+    'NPC_POSTBUY_A_WHILE_W_DURATION': 'NPC/598',
+    'NPC_POSTBUY_FINAL_W_DURATION': 'NPC/598',
+    'NPC_POSTBUY_TARGET_X1': 'NPC/598',
+    'NPC_POSTBUY_TARGET_X2': 'NPC/598',
+    'NPC_POSTBUY_SEEK_TIMEOUT': 'NPC/598',
+    'NPC_GIDIS_SURESI': 'NPC/598',
+    'NPC_SEEK_TIMEOUT': 'NPC/598',
+    'NPC_OPEN_FIND_TIMEOUT': 'NPC/598',
+    'NPC_OPEN_MATCH_THRESHOLD': 'NPC/598',
+    'NPC_OPEN_TEXT_TEMPLATE_PATH': 'NPC/598',
+    'NPC_CONFIRM_MATCH_THRESHOLD': 'NPC/598',
+    'NPC_CONFIRM_TEMPLATE_PATH': 'NPC/598',
+    'NPC_CONFIRM_RECT': 'NPC/598',
+    'NPC_CONFIRM_SCALES': 'NPC/598',
+    'TARGET_NPC_X': '598 Takip',
+    'TARGET_STABLE_HITS': '598 Takip',
+    'TARGET_Y_AFTER_TURN': '598 Takip',
+    'STAIRS_TOP_Y': '598 Takip',
+    'STAIRS_TOP_S_BACKOFF_PULSES': '598 Takip',
+    'STAIRS_TOP_S_BACKOFF_DURATION': '598 Takip',
+    'X_TOLERANCE': '598 Takip',
+    'X_BAND_CONSEC': '598 Takip',
+    'X_TOL_TIMEOUT': '598 Takip',
+    'X_TOL_READ_DELAY': '598 Takip',
+    'Y_SEEK_TIMEOUT': '598 Takip',
+    'TOWN_CLICK_POS': 'Town',
+    'TOWN_WAIT': 'Town',
+    'TOWN_MIN_INTERVAL_SEC': 'Town',
+    'TOWN_LOCKED': 'Town',
+    'TOWN_HARD_LOCK': 'Town',
+    'FORCE_PLUS7_ONCE': '+7/+8',
+    'BASMA_HAKKI': '+7/+8',
+    'PLUS7_START_FROM_TURN_AFTER_PURCHASE': '+7/+8',
+    'PLUS7_TEMPLATE_PATHS': '+7/+8',
+    'PLUS7_TEMPLATE_TIMEOUT': '+7/+8',
+    'PLUS8_TEMPLATE_PATHS': '+7/+8',
+    'PLUS8_TEMPLATE_TIMEOUT': '+7/+8',
+    'PLUSN_FAST_MODE': '+7/+8',
+    'PLUSN_HOVER_SAMPLES': '+7/+8',
+    'PLUSN_USE_OCR_FALLBACK': '+7/+8',
+    'PLUSN_WAIT_BETWEEN': '+7/+8',
+    'GLOBAL_CYCLE': 'Genel İzleme',
+    'NEXT_PLUS7_CHECK_AT': 'Genel İzleme',
+    'MODE': 'Genel İzleme',
+    'LOG_DIR': 'Günlükleme',
+    'CRASH_DIR': 'Günlükleme',
+    'WATCHDOG_TIMEOUT': 'Otomasyon',
+    'ON_TEMPLATE_TIMEOUT_RESTART': 'Otomasyon',
+    'GUI_AUTO_OPEN_SPEED': 'Otomasyon',
+    'DEBUG_SAVE': 'Otomasyon',
 })
+
+_ADV_GROUP_ORDER = (
+    'Oyuna Giriş',
+    'Launcher',
+    'Anvil',
+    'NPC/598',
+    'Scroll',
+    'Banka',
+    '598 Takip',
+    'Town',
+    'Hız',
+    'Upgrade',
+    'OCR/ROI',
+    '+7/+8',
+    'Günlükleme',
+    'Genel İzleme',
+    'Otomasyon',
+    'Genel'
+)
+
+_ADV_PREFIX_GROUPS = (
+    ('LOGIN_', 'Oyuna Giriş'),
+    ('WINDOW_', 'Launcher'),
+    ('GAME_START_', 'Launcher'),
+    ('LAUNCHER_', 'Launcher'),
+    ('ANVIL_', 'Anvil'),
+    ('NPC_', 'NPC/598'),
+    ('BUY_', 'NPC/598'),
+    ('SCROLL_', 'Scroll'),
+    ('BANK_', 'Banka'),
+    ('TARGET_', '598 Takip'),
+    ('STAIRS_', '598 Takip'),
+    ('TOWN_', 'Town'),
+    ('SPEED_', 'Hız'),
+    ('PRESS_', 'Hız'),
+    ('MICRO_', 'Hız'),
+    ('UPG_', 'Upgrade'),
+    ('TOOLTIP_', 'OCR/ROI'),
+    ('ROI_', 'OCR/ROI'),
+    ('PLUS7_', '+7/+8'),
+    ('PLUS8_', '+7/+8'),
+    ('PLUSN_', '+7/+8'),
+    ('AUTO_', 'Otomasyon'),
+    ('GLOBAL_', 'Genel İzleme'),
+    ('LOG_', 'Günlükleme'),
+    ('CRASH_', 'Günlükleme'),
+    ('WATCHDOG_', 'Otomasyon'),
+    ('GUI_', 'Otomasyon'),
+    ('DEBUG_', 'Otomasyon'),
+)
 
 def _norm_txt(s: str) -> str:
     try: return str(s).casefold()
     except: return str(s).lower()
 
 def _adv_group_of(name: str) -> str:
-    return _ADV_GROUP.get(name, "Tümü")
+    grp = _ADV_GROUP.get(name)
+    if grp:
+        return grp
+    for prefix, fallback in _ADV_PREFIX_GROUPS:
+        if name.startswith(prefix):
+            return fallback
+    return 'Genel'
 
 class _Tooltip:
     # Basit hover tooltip (arka plan işlevsel; gerekirse messagebox fallback kullanılabilir)
@@ -4241,34 +4395,55 @@ def _MERDIVEN_RUN_GUI():
             for w in self.adv_container.winfo_children(): w.destroy()
             self.adv_rows = []
             F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
-            row = 0
+            grouped = {}
             for name, val in self._adv_items():
                 if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
                     continue
-                ttk.Label(self.adv_container, text=_tr_name(name)).grid(row=row, column=0, sticky="w")
-                if isinstance(val, bool):
-                    var = tk.StringVar(value=str(val));
-                    w = ttk.Combobox(self.adv_container, values=["True", "False"], textvariable=var, width=8,
-                                     state="readonly")
-                else:
-                    var = tk.StringVar(value=str(val));
-                    w = ttk.Entry(self.adv_container, textvariable=var, width=28)
-                w.grid(row=row, column=1, sticky="w", padx=3)
-                ttk.Button(self.adv_container, text="Uygula",
-                           command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
-                           ).grid(row=row, column=2, sticky="w")
+                grouped.setdefault(_adv_group_of(name), []).append((name, val))
 
-                # (İsteğe bağlı) bilgi (tooltip) butonu
+            if not grouped:
+                ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
+                self.adv_container.update_idletasks()
                 try:
-                    _ib = ttk.Button(self.adv_container, width=2, text="i")
-                    _ib.grid(row=row, column=3, padx=2, pady=1, sticky="w")
-                    _Tooltip(_ib, _TR_HELP.get(name, "Açıklama yok"))
+                    self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
                 except Exception:
                     pass
+                return
 
-                # >>> Bu iki satır kesinlikle try/except DIŞINDA kalmalı:
-                self.adv_rows.append((name, var))
-                row += 1
+            def _grp_key(grp_name: str):
+                try:
+                    return (_ADV_GROUP_ORDER.index(grp_name), grp_name)
+                except ValueError:
+                    return (len(_ADV_GROUP_ORDER), grp_name)
+
+            for grp_name in sorted(grouped.keys(), key=_grp_key):
+                entries = grouped[grp_name]
+                entries.sort(key=lambda item: _tr_name(item[0]).upper())
+                title = grp_name or 'Genel'
+                frame = ttk.LabelFrame(self.adv_container, text=title)
+                frame.pack(fill="x", padx=6, pady=4, anchor="n")
+                frame.columnconfigure(1, weight=1)
+
+                for row, (name, val) in enumerate(entries):
+                    ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+                    if isinstance(val, bool):
+                        var = tk.StringVar(value=str(val))
+                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
+                                              state="readonly")
+                    else:
+                        var = tk.StringVar(value=str(val))
+                        widget = ttk.Entry(frame, textvariable=var, width=28)
+                    widget.grid(row=row, column=1, sticky="we", padx=3)
+                    ttk.Button(frame, text="Uygula",
+                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
+                               ).grid(row=row, column=2, sticky="w", padx=2)
+                    try:
+                        info_btn = ttk.Button(frame, width=2, text="i")
+                        info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
+                        _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
+                    except Exception:
+                        pass
+                    self.adv_rows.append((name, var))
 
             self.adv_container.update_idletasks()
             try:
