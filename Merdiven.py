@@ -66,12 +66,14 @@ def _read_y_now():
 
 # [PATCH_Y_LOCK_END]
 
-import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
-    sys, atexit, traceback, logging, functools
+import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
+    sys, atexit, traceback, logging, functools, copy
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 # [PATCH_TOWN_LOCK_BEGIN]
@@ -3539,10 +3541,333 @@ def buy_items_from_npc():
     return True
 
 
+# ====================== KALICI AYAR ŞEMASI / GUI DESTEK ======================
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _cfg_default(name: str, fallback: Any) -> Any:
+    return copy.deepcopy(globals().get(name, fallback))
+
+
+def _split_str_list(raw: Any) -> List[str]:
+    return [p.strip() for p in re.split(r"[|,;\n]+", str(raw or "")) if p.strip()]
+
+
+def _parse_number_list(raw: Any) -> List[float]:
+    return [float(x) for x in _NUMBER_RE.findall(str(raw or ""))]
+
+
+def _ensure_float_list(value: Any) -> List[float]:
+    if isinstance(value, (list, tuple, set)):
+        seq = sorted(value) if isinstance(value, set) else list(value)
+    else:
+        seq = _parse_number_list(value)
+    return [float(x) for x in seq]
+
+
+def _ensure_int_list(value: Any) -> List[int]:
+    if isinstance(value, (list, tuple, set)):
+        seq = sorted(value) if isinstance(value, set) else list(value)
+    else:
+        seq = _parse_number_list(value)
+    return [int(round(float(x))) for x in seq]
+
+
+def _ensure_str_list(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple, set)):
+        seq = list(value)
+    else:
+        seq = _split_str_list(value)
+    out = []
+    for item in seq:
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def _ensure_int_pair(value: Any) -> Tuple[int, int]:
+    nums = _ensure_int_list(value)
+    if len(nums) < 2:
+        raise ValueError("En az iki sayı gerekir")
+    return nums[0], nums[1]
+
+
+def _ensure_int_quad(value: Any) -> Tuple[int, int, int, int]:
+    nums = _ensure_int_list(value)
+    if len(nums) < 4:
+        raise ValueError("Dört sayı gerekir")
+    return nums[0], nums[1], nums[2], nums[3]
+
+
+def _ensure_pair_list(value: Any) -> List[Tuple[int, int]]:
+    if isinstance(value, (list, tuple, set)):
+        iterable: Iterable[Any] = list(value)
+    else:
+        iterable = _split_str_list(value)
+    result: List[Tuple[int, int]] = []
+    for item in iterable:
+        result.append(_ensure_int_pair(item))
+    return result
+
+
+def _ensure_regions(value: Any) -> Tuple[str, ...]:
+    return tuple(_ensure_str_list(value))
+
+
+def _ensure_int_set(value: Any) -> set:
+    return set(_ensure_int_list(value))
+
+
+@dataclass
+class ConfigField:
+    key: str
+    label: str
+    category: str
+    field_type: str = "str"
+    default: Any = None
+    description: str = ""
+    choices: Optional[Sequence[str]] = None
+    secret: bool = False
+    runtime_only: bool = False
+    width: int = 0
+    apply: Optional[Callable[[Any], Any]] = None
+
+
+CONFIG_FIELDS: List[ConfigField] = [
+    ConfigField("tus_hizi", "Tuş hızı (sn)", "Hız & Tıklama", "float",
+                _cfg_default("tus_hizi", 0.050), "Makro genel tuş basım süresi."),
+    ConfigField("mouse_hizi", "Mouse hızı (sn)", "Hız & Tıklama", "float",
+                _cfg_default("mouse_hizi", 0.100), "Mouse tıklama aralığı."),
+    ConfigField("jitter_px", "Jitter (px)", "Hız & Tıklama", "int",
+                _cfg_default("jitter_px", 0), "Mouse konumuna eklenen rastgele piksel sapması."),
+    ConfigField("VALID_X_LEFT", "Geçerli X (sol)", "Koordinat Grupları", "list_int",
+                _cfg_default("VALID_X_LEFT", {811, 812, 813}),
+                "Merdiven sol X değerleri.", apply=_ensure_int_set),
+    ConfigField("VALID_X_RIGHT", "Geçerli X (sağ)", "Koordinat Grupları", "list_int",
+                _cfg_default("VALID_X_RIGHT", {819, 820, 821}),
+                "Merdiven sağ X değerleri.", apply=_ensure_int_set),
+    ConfigField("STOP_Y", "Y duruş noktaları", "Koordinat Grupları", "list_int",
+                _cfg_default("STOP_Y", {598}), "Merdiven üstü Y değerleri.", apply=_ensure_int_set),
+    ConfigField("SCROLL_POS", "Scroll pozisyonu (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("SCROLL_POS", (671, 459)),
+                "Scroll satın alma konumu.", apply=_ensure_int_pair),
+    ConfigField("UPGRADE_BTN_POS", "Upgrade butonu (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("UPGRADE_BTN_POS", (747, 358)),
+                "Upgrade panelindeki buton koordinatı.", apply=_ensure_int_pair),
+    ConfigField("CONFIRM_BTN_POS", "Onay butonu (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("CONFIRM_BTN_POS", (737, 479)),
+                "Anvil onay butonu koordinatı.", apply=_ensure_int_pair),
+    ConfigField("SCROLL_VENDOR_MID_POS", "Scroll orta pos (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("SCROLL_VENDOR_MID_POS", (747, 358)),
+                "Scroll paneli orta noktası.", apply=_ensure_int_pair),
+    ConfigField("NPC_CONTEXT_RIGHTCLICK_POS", "NPC sağ tık (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("NPC_CONTEXT_RIGHTCLICK_POS", (535, 520)),
+                "NPC menüsünü açan sağ tık noktası.", apply=_ensure_int_pair),
+    ConfigField("NPC_MENU_PAGE2_POS", "NPC sayfa 2 (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("NPC_MENU_PAGE2_POS", (968, 328)),
+                "Keten için ikinci sayfa koordinatı.", apply=_ensure_int_pair),
+    ConfigField("BANK_NEXT_PAGE_POS", "Banka ileri (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("BANK_NEXT_PAGE_POS", (731, 389)),
+                "Banka ileri sayfa butonu.", apply=_ensure_int_pair),
+    ConfigField("BANK_PREV_PAGE_POS", "Banka geri (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("BANK_PREV_PAGE_POS", (668, 389)),
+                "Banka geri sayfa butonu.", apply=_ensure_int_pair),
+    ConfigField("GAME_START_SCALES", "Launcher Start ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("GAME_START_SCALES", (0.85, 0.9, 1.0, 1.1, 1.2)),
+                "Launcher Start butonu arama ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("TEMPLATE_EXTRA_CLICK_POS", "Ek tık (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (931, 602)),
+                "Template sonrası ekstra tıklama noktası.", apply=_ensure_int_pair),
+    ConfigField("LAUNCHER_START_CLICK_POS", "Launcher Start (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("LAUNCHER_START_CLICK_POS", (974, 726)),
+                "Launcher üzerindeki Start butonu koordinatı.", apply=_ensure_int_pair),
+    ConfigField("LOGIN_USERNAME_CLICK_POS", "Kullanıcı adı (x,y)", "Sunucu / Login", "int_pair",
+                _cfg_default("LOGIN_USERNAME_CLICK_POS", (579, 326)),
+                "Launcher kullanıcı adı alanı koordinatı.", apply=_ensure_int_pair),
+    ConfigField("LOGIN_PASSWORD_CLICK_POS", "Şifre alanı (x,y)", "Sunucu / Login", "int_pair",
+                _cfg_default("LOGIN_PASSWORD_CLICK_POS", (579, 378)),
+                "Launcher şifre alanı koordinatı.", apply=_ensure_int_pair),
+    ConfigField("SERVER_OPEN_POS", "Sunucu listesi (x,y)", "Sunucu / Login", "int_pair",
+                _cfg_default("SERVER_OPEN_POS", (455, 231)),
+                "Sunucu seçim açılır listesinin konumu.", apply=_ensure_int_pair),
+    ConfigField("SERVER_CHOICES", "Sunucu seçimleri", "Sunucu / Login", "list_pairs",
+                _cfg_default("SERVER_CHOICES", [(671, 254), (676, 281)]),
+                "Sunucu listesindeki seçim koordinatları.", apply=_ensure_pair_list),
+    ConfigField("HP_POINTS", "HP ölçüm noktaları", "HP & Town", "list_pairs",
+                _cfg_default("HP_POINTS", [(185, 68), (218, 74)]),
+                "HP barının kontrol edildiği koordinatlar.", apply=_ensure_pair_list),
+    ConfigField("TOWN_CLICK_POS", "Town tık (x,y)", "HP & Town", "int_pair",
+                _cfg_default("TOWN_CLICK_POS", (775, 775)),
+                "Town komutunun tıklama noktası.", apply=_ensure_int_pair),
+    ConfigField("SPLASH_CLICK_POS", "Splash tık (x,y)", "HP & Town", "int_pair",
+                _cfg_default("SPLASH_CLICK_POS", (700, 550)),
+                "Splash ekranını geçmek için tıklanan koordinat.", apply=_ensure_int_pair),
+    ConfigField("TOOLTIP_FALLBACK_BBOX", "Tooltip bbox (x1,y1,x2,y2)", "HP & Town", "int_quad",
+                _cfg_default("TOOLTIP_FALLBACK_BBOX", (290, 95, 1007, 662)),
+                "Tooltip OCR fallback alanı.", apply=_ensure_int_quad),
+    ConfigField("NPC_OPEN_SCALES", "NPC açma ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("NPC_OPEN_SCALES", (0.85, 0.9, 1.0, 1.1, 1.2)),
+                "NPC açma şablonu ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("USE_STORAGE_TEMPLATE_PATHS", "Storage şablonları", "Şablon Listeleri", "list_str",
+                _cfg_default("USE_STORAGE_TEMPLATE_PATHS", ["use_storage.png", "use_stroge.png"]),
+                "Depo açma şablon dosyaları.", apply=_ensure_str_list, width=28),
+    ConfigField("USE_STORAGE_SCALES", "Storage ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("USE_STORAGE_SCALES", (0.85, 0.9, 1.0, 1.1, 1.2)),
+                "Storage şablonu ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("PLUS7_TEMPLATE_PATHS", "+7 şablonları", "Şablon Listeleri", "list_str",
+                _cfg_default("PLUS7_TEMPLATE_PATHS", ["plus7.png", "plus7_var2.png"]),
+                "+7 algılama şablon dosyaları.", apply=_ensure_str_list, width=28),
+    ConfigField("PLUS8_TEMPLATE_PATHS", "+8 şablonları", "Şablon Listeleri", "list_str",
+                _cfg_default("PLUS8_TEMPLATE_PATHS", ["plus8.png"]),
+                "+8 algılama şablon dosyaları.", apply=_ensure_str_list, width=28),
+    ConfigField("SCROLL_LOW_TEMPLATE_PATHS", "Low scroll şablonları", "Şablon Listeleri", "list_str",
+                _cfg_default("SCROLL_LOW_TEMPLATE_PATHS", ["scroll_low.png", "scroll_low2.png"]),
+                "Low scroll şablon dosyaları.", apply=_ensure_str_list, width=28),
+    ConfigField("SCROLL_MID_TEMPLATE_PATHS", "Mid scroll şablonları", "Şablon Listeleri", "list_str",
+                _cfg_default("SCROLL_MID_TEMPLATE_PATHS", ["scroll_mid.png", "scroll_mid2.png"]),
+                "Mid scroll şablon dosyaları.", apply=_ensure_str_list, width=28),
+    ConfigField("SCROLL_SCALES", "Scroll ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("SCROLL_SCALES", (0.80, 0.90, 1.00, 1.10, 1.20)),
+                "Scroll şablon tarama ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("SCROLL_SEARCH_REGIONS", "Scroll bölgeleri", "Ölçek Listeleri", "list_str",
+                _cfg_default("SCROLL_SEARCH_REGIONS", ("UPG", "INV")),
+                "Scroll araması yapılacak bölgeler.", apply=_ensure_regions),
+]
+
+
+CONFIG_FIELD_MAP: Dict[str, ConfigField] = {f.key: f for f in CONFIG_FIELDS}
+CONFIG_CATEGORY_ORDER: Tuple[str, ...] = tuple(dict.fromkeys(f.category for f in CONFIG_FIELDS))
+
+
+def _serialize_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_serialize_value(v) for v in value]
+    if isinstance(value, list):
+        return [_serialize_value(v) for v in value]
+    if isinstance(value, set):
+        return [_serialize_value(v) for v in sorted(value)]
+    return value
+
+
+def _format_field_value(field: ConfigField, value: Any) -> str:
+    if field.field_type == "int_pair":
+        x, y = _ensure_int_pair(value)
+        return f"{x}, {y}"
+    if field.field_type == "int_quad":
+        a, b, c, d = _ensure_int_quad(value)
+        return f"{a}, {b}, {c}, {d}"
+    if field.field_type == "list_pairs":
+        pairs = _ensure_pair_list(value)
+        return " | ".join(f"{px},{py}" for px, py in pairs)
+    if field.field_type == "list_float":
+        vals = _ensure_float_list(value)
+        return ", ".join(f"{v:g}" for v in vals)
+    if field.field_type == "list_int":
+        vals = _ensure_int_list(value)
+        return ", ".join(str(v) for v in vals)
+    if field.field_type == "list_str":
+        vals = _ensure_str_list(value)
+        return ", ".join(vals)
+    return str(value)
+
+
+def _parse_field_value(field: ConfigField, raw: str) -> Any:
+    txt = str(raw or "").strip()
+    if field.field_type == "float":
+        return float(txt)
+    if field.field_type == "int":
+        return int(float(txt))
+    if field.field_type == "str":
+        return txt
+    if field.field_type == "int_pair":
+        nums = _parse_number_list(txt)
+        if len(nums) < 2:
+            raise ValueError("En az iki sayı girin")
+        return [int(round(nums[0])), int(round(nums[1]))]
+    if field.field_type == "int_quad":
+        nums = _parse_number_list(txt)
+        if len(nums) < 4:
+            raise ValueError("Dört sayı girin")
+        return [int(round(nums[i])) for i in range(4)]
+    if field.field_type == "list_float":
+        nums = _parse_number_list(txt)
+        if not nums:
+            raise ValueError("Liste boş olamaz")
+        return [float(x) for x in nums]
+    if field.field_type == "list_int":
+        nums = _parse_number_list(txt)
+        if not nums:
+            raise ValueError("Liste boş olamaz")
+        return [int(round(x)) for x in nums]
+    if field.field_type == "list_str":
+        return _split_str_list(txt)
+    if field.field_type == "list_pairs":
+        if not txt:
+            return []
+        chunks = [c for c in re.split(r"[;|\n]+", txt) if c.strip()]
+        pairs: List[List[int]] = []
+        for chunk in chunks:
+            nums = _parse_number_list(chunk)
+            if len(nums) < 2:
+                raise ValueError("Koordinat çifti için en az iki sayı girin")
+            pairs.append([int(round(nums[0])), int(round(nums[1]))])
+        return pairs
+    raise ValueError(f"Desteklenmeyen alan tipi: {field.field_type}")
+
+
+def _schema_defaults(base_defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = copy.deepcopy(base_defaults or {})
+    for field in CONFIG_FIELDS:
+        if field.key not in defaults:
+            defaults[field.key] = _serialize_value(field.default)
+    return defaults
+
+
+def _serialize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: _serialize_value(v) for k, v in cfg.items()}
+
+
+def apply_config_values(cfg: Dict[str, Any]) -> None:
+    g = globals()
+    for field in CONFIG_FIELDS:
+        if field.runtime_only:
+            continue
+        if field.key not in cfg:
+            continue
+        value = cfg[field.key]
+        try:
+            applied = field.apply(value) if field.apply else value
+        except Exception as exc:
+            print(f"[CFG] {field.key} uygulanamadı: {exc}")
+            continue
+        g[field.key] = applied
+    try:
+        g['VALID_X'] = set(g.get('VALID_X_LEFT', set())) | set(g.get('VALID_X_RIGHT', set()))
+    except Exception:
+        pass
+    try:
+        if not isinstance(g.get('STOP_Y'), set):
+            g['STOP_Y'] = set(g.get('STOP_Y', []))
+    except Exception:
+        pass
+    try:
+        if isinstance(g.get('SCROLL_SEARCH_REGIONS'), list):
+            g['SCROLL_SEARCH_REGIONS'] = tuple(g['SCROLL_SEARCH_REGIONS'])
+    except Exception:
+        pass
+
+
 # >>> MEGA_IMPROVE_BEGIN_V1
 # === 2..8 İyileştirmeleri (config, OCR, state, rapor, scroll fix, buy wrapper) ===
 import os, json, csv, time, traceback
 from functools import wraps
+
+
+_BASE_CONFIG_DEFAULTS = json.loads(
+    r'''{"timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
 
 
 # --- Config yükle/kaydet ---
@@ -3550,8 +3875,7 @@ def load_config(path=None, defaults=None):
     if path is None:
         path = _MERDIVEN_CFG_PATH()
     if defaults is None:
-        defaults = json.loads(
-            r'''{"timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm 7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
+        defaults = _schema_defaults(_BASE_CONFIG_DEFAULTS)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if not os.path.exists(path):
@@ -3570,7 +3894,7 @@ def load_config(path=None, defaults=None):
         _merge(cfg, defaults)
         return cfg
     except Exception as e:
-        print('[PATCH][config] load error:', e);
+        print('[PATCH][config] load error:', e)
         return defaults
 
 
@@ -3580,10 +3904,10 @@ def save_config(cfg, path=None):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
         return True
     except Exception as e:
-        print('[PATCH][config] save error:', e);
+        print('[PATCH][config] save error:', e)
         return False
 
 
@@ -3728,6 +4052,10 @@ try:
     _GLOBAL_PATCH_CFG = load_config()
 except Exception:
     _GLOBAL_PATCH_CFG = {}
+try:
+    apply_config_values(_GLOBAL_PATCH_CFG)
+except Exception:
+    pass
 try:
     _ld = _GLOBAL_PATCH_CFG.get('logging', {}).get('log_dir', 'logs');
     _ensure_dir(_ld)
@@ -5478,7 +5806,7 @@ def yama_save_extra_cfg():
         })
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
         print('[YAMA CFG] kaydedildi:', p);
         return True
     except Exception as e:
@@ -5642,23 +5970,25 @@ def _y_coerce_tuple(val):
     return (0,0)
 
 def _y_load_store():
-    # Var olan konfig dosyasını kullanmaya çalış; bulunamazsa basit json kullan
-    import os, json
-    appdir=os.path.join(os.path.expanduser("~"),"AppData","Roaming","Merdiven")
-    path=os.path.join(appdir,"merdiven_config.json")
-    if not os.path.isdir(appdir):
-        try: os.makedirs(appdir, exist_ok=True)
-        except: pass
     def _load():
         try:
-            with open(path,"r",encoding="utf-8") as f: return json.load(f)
-        except: return {}
-    def _save(d):
+            return load_config()
+        except Exception as e:
+            print('[GUI] config yüklenemedi:', e)
+            return _schema_defaults(_BASE_CONFIG_DEFAULTS)
+
+    def _save(data):
         try:
-            with open(path,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
-            print("[GUI] Ayarlar kaydedildi:", path)
-        except Exception as e: print("[GUI] Kayıt hatası:", e)
-    return _load,_save
+            cfg = data if isinstance(data, dict) else {}
+            ok = save_config(cfg)
+            if ok:
+                print('[GUI] Ayarlar kaydedildi:', _MERDIVEN_CFG_PATH())
+            else:
+                print('[GUI] Kayıt hatası: save_config başarısız')
+        except Exception as e:
+            print('[GUI] Kayıt hatası:', e)
+
+    return _load, _save
 
 def _y_get_adv_container(root):
     # Gelişmiş alanı bulmaya çalış; bulamazsa root'a ekle
@@ -5734,9 +6064,68 @@ def _y_build_and_attach_gui(root):
     gdef=globals().get("_YAMA_GUI_DEFAULTS",{}).copy()
 
     # --- Kapsayıcıyı bul
-    adv=_y_get_adv_container(root)
-    lf = ttk.LabelFrame(adv, text="NPC Alış (Gelişmiş) — Fabric & Linen & Diğer")
-    lf.pack(fill="x", padx=6, pady=6)
+    adv = _y_get_adv_container(root)
+    outer = ttk.LabelFrame(adv, text="Gelişmiş Ayarlar")
+    outer.pack(fill="both", padx=6, pady=6, expand=True)
+
+    nb = ttk.Notebook(outer)
+    nb.pack(fill="both", expand=True)
+
+    general_tab = ttk.Frame(nb)
+    nb.add(general_tab, text="Genel Parametreler")
+    npc_tab = ttk.Frame(nb)
+    nb.add(npc_tab, text="NPC / Upgrade")
+
+    general_vars: Dict[str, Any] = {}
+    if CONFIG_FIELDS:
+        cgen = tk.Canvas(general_tab, highlightthickness=0)
+        vs_gen = ttk.Scrollbar(general_tab, orient="vertical", command=cgen.yview)
+        cgen.configure(yscrollcommand=vs_gen.set)
+        general_frame = ttk.Frame(cgen)
+        _general_window = cgen.create_window((0, 0), window=general_frame, anchor="nw")
+        cgen.bind("<Configure>", lambda e: cgen.itemconfigure(_general_window, width=e.width))
+        general_frame.bind("<Configure>", lambda e: cgen.configure(scrollregion=cgen.bbox("all")))
+        cgen.pack(side="left", fill="both", expand=True)
+        vs_gen.pack(side="right", fill="y")
+
+        for category in CONFIG_CATEGORY_ORDER:
+            fields = [f for f in CONFIG_FIELDS if f.category == category]
+            if not fields:
+                continue
+            grp = ttk.LabelFrame(general_frame, text=category)
+            grp.pack(fill="x", padx=6, pady=4, anchor="n")
+            grp.columnconfigure(1, weight=1)
+            for row, field in enumerate(fields):
+                val = data.get(field.key, field.default)
+                if val is None:
+                    val = field.default
+                if field.field_type == "bool":
+                    var = tk.BooleanVar(value=bool(val))
+                    chk = ttk.Checkbutton(grp, text=field.label, variable=var)
+                    chk.grid(row=row, column=0, sticky="w", padx=4, pady=2, columnspan=2)
+                    if field.description:
+                        _YTooltip(chk, field.description)
+                    general_vars[field.key] = var
+                    continue
+
+                ttk.Label(grp, text=field.label).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+                display = _format_field_value(field, val)
+                if field.choices:
+                    var = tk.StringVar(value=str(display))
+                    widget = ttk.Combobox(grp, textvariable=var, values=list(field.choices), state="readonly",
+                                          width=field.width or 20)
+                else:
+                    var = tk.StringVar(value=str(display))
+                    entry_kwargs = {"textvariable": var, "width": field.width or 24}
+                    if field.secret:
+                        entry_kwargs["show"] = "*"
+                    widget = ttk.Entry(grp, **entry_kwargs)
+                widget.grid(row=row, column=1, sticky="we", padx=4, pady=2)
+                if field.description:
+                    _YTooltip(widget, field.description)
+                general_vars[field.key] = var
+
+    lf = npc_tab
 
     # ========== 1) NPC Alış sekmesi ==========
     # BUY_MODE + BUY_TURNS + PAGE2_POS + CONTEXT + OPEN_* + SCROLL_* alanları
@@ -5839,85 +6228,123 @@ def _y_build_and_attach_gui(root):
     tmin = _y_make_entry(lf_t, "TOWN_MIN_INTERVAL_SEC", data.get("TOWN_MIN_INTERVAL_SEC", gdef.get("TOWN_MIN_INTERVAL_SEC")))
 
     # --- Kaydet / Uygula butonları ---
-    btns = ttk.Frame(lf); btns.pack(fill="x", pady=6)
+    btns = ttk.Frame(outer); btns.pack(fill="x", pady=6)
     def _save_clicked():
+        last_field = None
         try:
-            new={
+            general_updates = {}
+            for field in CONFIG_FIELDS:
+                var = general_vars.get(field.key)
+                if not var:
+                    continue
+                last_field = field
+                if field.field_type == "bool":
+                    value = bool(var.get())
+                else:
+                    raw = var.get()
+                    text_val = str(raw).strip()
+                    if text_val == "":
+                        if field.field_type == "str":
+                            value = ""
+                        elif field.field_type in ("list_str", "list_pairs"):
+                            value = []
+                        else:
+                            general_updates[field.key] = _serialize_value(field.default)
+                            continue
+                    else:
+                        value = _parse_field_value(field, text_val)
+                general_updates[field.key] = _serialize_value(value)
+
+            last_field = None
+            new = dict(general_updates)
+            new.update({
                 "BUY_MODE": buy_mode.get().strip(),
-                "BUY_TURNS": _y_to_int(buy_turns.get(),2),
+                "BUY_TURNS": _y_to_int(buy_turns.get(), 2),
                 "NPC_MENU_PAGE2_POS": _y_coerce_tuple(page2_pos.get()),
                 "NPC_CONTEXT_RIGHTCLICK_POS": _y_coerce_tuple(ctx_pos.get()),
                 "NPC_OPEN_TEXT_TEMPLATE_PATH": tmpl_path.get().strip(),
-                "NPC_OPEN_MATCH_THRESHOLD": _y_to_float(match_thr.get(),0.7),
-                "NPC_OPEN_FIND_TIMEOUT": _y_to_float(find_to.get(),4.0),
-                "NPC_OPEN_SCALES": [ _y_to_float(s,1.0) for s in str(scales.get()).split(",") if s.strip() ],
+                "NPC_OPEN_MATCH_THRESHOLD": _y_to_float(match_thr.get(), 0.7),
+                "NPC_OPEN_FIND_TIMEOUT": _y_to_float(find_to.get(), 4.0),
+                "NPC_OPEN_SCALES": [_y_to_float(s, 1.0) for s in str(scales.get()).split(",") if s.strip()],
 
                 "SCROLL_VENDOR_MID_POS": _y_coerce_tuple(mid_pos.get()),
-                "SCROLL_ALIM_ADET": _y_to_int(low_adet.get(),2),
-                "SCROLL_MID_ALIM_ADET": _y_to_int(mid_adet.get(),2),
+                "SCROLL_ALIM_ADET": _y_to_int(low_adet.get(), 2),
+                "SCROLL_MID_ALIM_ADET": _y_to_int(mid_adet.get(), 2),
 
-                "TARGET_NPC_X": _y_to_int(target_x.get(),766),
-                "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(),6.0),
-                "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(),795),
-                "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(),0.35),
-                "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(),814),
-                "NPC_POSTBUY_SECOND_A_DURATION": _y_to_float(a2.get(),0.2),
-                "NPC_POSTBUY_FINAL_W_DURATION": _y_to_float(wf.get(),0.8),
-                "TARGET_Y_AFTER_TURN": _y_to_int(ty.get(),597),
-                "TURN_LEFT_SEC": _y_to_float(tl.get(),1.36),
-                "NPC_GIDIS_SURESI": _y_to_float(ngs.get(),5.0),
+                "TARGET_NPC_X": _y_to_int(target_x.get(), 766),
+                "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(), 6.0),
+                "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(), 795),
+                "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(), 0.35),
+                "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(), 814),
+                "NPC_POSTBUY_SECOND_A_DURATION": _y_to_float(a2.get(), 0.2),
+                "NPC_POSTBUY_FINAL_W_DURATION": _y_to_float(wf.get(), 0.8),
+                "TARGET_Y_AFTER_TURN": _y_to_int(ty.get(), 597),
+                "TURN_LEFT_SEC": _y_to_float(tl.get(), 1.36),
+                "NPC_GIDIS_SURESI": _y_to_float(ngs.get(), 5.0),
 
-                "BASMA_HAKKI": _y_to_int(basmahk.get(),31),
+                "BASMA_HAKKI": _y_to_int(basmahk.get(), 31),
                 "SCROLL_POS": _y_coerce_tuple(scpos.get()),
                 "UPGRADE_BTN_POS": _y_coerce_tuple(upbtn.get()),
                 "CONFIRM_BTN_POS": _y_coerce_tuple(confbtn.get()),
-                "UPG_STEP_DELAY": _y_to_float(stepd.get(),0.10),
-                "SCROLL_PANEL_REOPEN_MAX": _y_to_int(scmax.get(),10),
-                "SCROLL_PANEL_REOPEN_DELAY": _y_to_float(scdel.get(),0.10),
+                "UPG_STEP_DELAY": _y_to_float(stepd.get(), 0.10),
+                "SCROLL_PANEL_REOPEN_MAX": _y_to_int(scmax.get(), 10),
+                "SCROLL_PANEL_REOPEN_DELAY": _y_to_float(scdel.get(), 0.10),
 
                 "EMPTY_SLOT_TEMPLATE_PATH": estpl.get().strip(),
-                "EMPTY_SLOT_MATCH_THRESHOLD": _y_to_float(esthr.get(),0.85),
-                "FALLBACK_MEAN_THRESHOLD": _y_to_float(fbmean.get(),55.0),
-                "FALLBACK_EDGE_DENSITY_THRESHOLD": _y_to_float(fbedge.get(),0.030),
-                "EMPTY_SLOT_THRESHOLD": _y_to_int(estcnt.get(),24),
+                "EMPTY_SLOT_MATCH_THRESHOLD": _y_to_float(esthr.get(), 0.85),
+                "FALLBACK_MEAN_THRESHOLD": _y_to_float(fbmean.get(), 55.0),
+                "FALLBACK_EDGE_DENSITY_THRESHOLD": _y_to_float(fbedge.get(), 0.030),
+                "EMPTY_SLOT_THRESHOLD": _y_to_int(estcnt.get(), 24),
 
-                "ROI_STALE_MS": _y_to_int(roi1.get(),120),
-                "UPG_ROI_STALE_MS": _y_to_int(roi2.get(),120),
-                "ENABLE_YAMA_SLOT_CACHE": str(ycache.get())=="True",
-                "MAX_CACHE_SIZE_PER_SNAPSHOT": _y_to_int(maxss.get(),512),
+                "ROI_STALE_MS": _y_to_int(roi1.get(), 120),
+                "UPG_ROI_STALE_MS": _y_to_int(roi2.get(), 120),
+                "ENABLE_YAMA_SLOT_CACHE": str(ycache.get()) == "True",
+                "MAX_CACHE_SIZE_PER_SNAPSHOT": _y_to_int(maxss.get(), 512),
 
                 "AUTO_SPEED_PROFILE": auto.get().strip(),
-                "AUTO_TUNE_INTERVAL": _y_to_float(tune.get(),30.0),
+                "AUTO_TUNE_INTERVAL": _y_to_float(tune.get(), 30.0),
                 "SPEED_PROFILE": forced.get().strip(),
 
-                "PLUS7_START_FROM_TURN_AFTER_PURCHASE": _y_to_int(pstart.get(),4),
-                "GLOBAL_CYCLE": _y_to_int(gcyc.get(),1),
-                "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(),1),
+                "PLUS7_START_FROM_TURN_AFTER_PURCHASE": _y_to_int(pstart.get(), 4),
+                "GLOBAL_CYCLE": _y_to_int(gcyc.get(), 1),
+                "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(), 1),
 
-                "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(),1.2),
-            }
-            # Steps
-            fsteps=[]; lsteps=[]
-            for i,(fx,fy,fc,fb) in enumerate(f_vars,1):
-                fsteps.append((_y_to_int(fx.get(),671), _y_to_int(fy.get(),459), _y_to_int(fc.get(),1), fb.get()))
-            for i,(lx,ly,lc,lb) in enumerate(l_vars,1):
-                lsteps.append((_y_to_int(lx.get(),671), _y_to_int(ly.get(),459), _y_to_int(lc.get(),1), lb.get()))
-            new["FABRIC_STEPS"]=fsteps; new["LINEN_STEPS"]=lsteps
+                "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(), 1.2),
+            })
 
-            data.update(new); save(data)
-            messagebox and messagebox.showinfo("Kaydedildi","Ayarlar kaydedildi.")
+            fsteps = []
+            lsteps = []
+            for i, (fx, fy, fc, fb) in enumerate(f_vars, 1):
+                fsteps.append((_y_to_int(fx.get(), 671), _y_to_int(fy.get(), 459), _y_to_int(fc.get(), 1), fb.get()))
+            for i, (lx, ly, lc, lb) in enumerate(l_vars, 1):
+                lsteps.append((_y_to_int(lx.get(), 671), _y_to_int(ly.get(), 459), _y_to_int(lc.get(), 1), lb.get()))
+            new["FABRIC_STEPS"] = fsteps
+            new["LINEN_STEPS"] = lsteps
+
+            data.update(new)
+            save(data)
+            messagebox and messagebox.showinfo("Kaydedildi", "Ayarlar kaydedildi.")
         except Exception as e:
-            print("[GUI] Kayıt hata:", e)
-            messagebox and messagebox.showerror("Hata", str(e))
+            if last_field is not None:
+                label = getattr(last_field, 'label', last_field.key)
+                err = f"{label}: {e}"
+            else:
+                err = str(e)
+            print("[GUI] Kayıt hata:", err)
+            messagebox and messagebox.showerror("Hata", err)
 
     def _apply_clicked():
         # Global değişkenlere uygula + listeleri rebuild et + wrapper'ları hazırla
         try:
-            g=globals()
             cfg = data  # kaydedilmiş (son)
-            # Basit anahtarları uygula
-            for k,v in cfg.items():
-                g[k]=v
+            apply_config_values(cfg)
+            g = globals()
+            for k, v in cfg.items():
+                if k in CONFIG_FIELD_MAP:
+                    continue
+                if k in ('ocr', 'timeouts', 'logging', 'special_deltas', 'gui', 'advanced'):
+                    continue
+                g[k] = v
             # Steps’i uygula
             g["FABRIC_STEPS"]=cfg.get("FABRIC_STEPS", g.get("FABRIC_STEPS",[]))
             g["LINEN_STEPS"]= cfg.get("LINEN_STEPS",  g.get("LINEN_STEPS",[]))
