@@ -1444,6 +1444,12 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 
 def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
     print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
+    set_stage("SCROLL_BUY_MID");
+    if not _is_window_valid(w):
+        w = bring_game_window_to_front();
+        if not _is_window_valid(w):
+            print("[SCROLL][MID] Oyun penceresi bulunamadı.");
+            return False
     while True:
         wait_if_paused();
         watchdog_enforce();
@@ -2644,6 +2650,11 @@ def perform_upgrade_on_slot(col, row, click_region, scroll_required=None, *, win
                     if tries < SCROLL_PANEL_REOPEN_MAX:
                         time.sleep(0.10)
                         continue
+                    if scroll_required == "MID":
+                        print("[SCROLL] MID arama hakkı bitti → MID satın alma stage’i tetikleniyor.")
+                        scroll_alma_stage_mid(win, adet=SCROLL_MID_ALIM_ADET)
+                        REQUEST_RELAUNCH = True
+                        return "EXIT_LOOP"
                     print(f"[SCROLL] {scroll_required} yok → FALLBACK sabit nokta deneniyor: {SCROLL_POS}")
                     found_xy = SCROLL_POS
 
