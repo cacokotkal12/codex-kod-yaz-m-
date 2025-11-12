@@ -1502,7 +1502,13 @@ def wait_for_required_scroll(required: str) -> bool:
 
 # ================== LOW/MID Scroll Alma Stage ==================
 def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos=(535, 520)):
+    global TOWN_LOCKED
     print(f"{prefix} alma stage, hedef adet={adet}")
+
+    globals()['TOWN_HARD_LOCK'] = False
+    TOWN_LOCKED = False
+    _town_log_once('[TOWN] HardLock KAPALI (scroll stage override).')
+    _town_log_once('[TOWN] Kilit sıfırlandı (scroll stage override).')
 
     try:
         if w is not None:
@@ -1520,6 +1526,11 @@ def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos
     while True:
         wait_if_paused()
         watchdog_enforce()
+        if globals().get('TOWN_HARD_LOCK', False):
+            globals()['TOWN_HARD_LOCK'] = False
+            TOWN_LOCKED = False
+            _town_log_once('[TOWN] HardLock KAPALI (scroll stage override).')
+            _town_log_once('[TOWN] Kilit sıfırlandı (scroll stage override).')
         send_town_command()
         time.sleep(0.2)
         x, _y = read_coordinates(w)
