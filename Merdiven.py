@@ -1443,7 +1443,12 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 
 
 def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    """Orta seviye kaydırma (mid scroll) stoğunu NPC'den yeniden doldurur."""
+
     print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
+    # "SCROLL_BUY_MID" sahne etiketi GUI'de kullanıcıya "Orta Scroll Satın Alma"
+    # adımının başladığını gösterir. Böylece makro orta seviye kağıtları toplamaya
+    # geçtiğinde hangi aşamada olduğunu Türkçe anlatımla takip edebilirsiniz.
     set_stage("SCROLL_BUY_MID");
     if not _is_window_valid(w):
         w = bring_game_window_to_front();
@@ -2651,6 +2656,9 @@ def perform_upgrade_on_slot(col, row, click_region, scroll_required=None, *, win
                         time.sleep(0.10)
                         continue
                     if scroll_required == "MID":
+                        # Orta scroll panelini yeniden açma denemeleri tükendi.
+                        # Bu noktada NPC'ye gidip taze orta scroll stoklamak için
+                        # "Orta Scroll Satın Alma" sahnesini çağırıyoruz.
                         print("[SCROLL] MID arama hakkı bitti → MID satın alma stage’i tetikleniyor.")
                         scroll_alma_stage_mid(win, adet=SCROLL_MID_ALIM_ADET)
                         REQUEST_RELAUNCH = True
