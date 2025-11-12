@@ -67,7 +67,7 @@ def _read_y_now():
 # [PATCH_Y_LOCK_END]
 
 import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
-    sys, atexit, traceback, logging, functools
+    sys, atexit, traceback, logging, functools, copy
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -363,21 +363,723 @@ PRESS_MAX = 0.090  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
-try:
-    # süreleri makul aralığa kırp
-    PRESS_MIN = float(PRESS_MIN);
-    PRESS_MAX = float(PRESS_MAX)
-    if PRESS_MIN > PRESS_MAX: PRESS_MIN, PRESS_MAX = PRESS_MAX, PRESS_MIN
-    if PRESS_MIN < 0.01: PRESS_MIN = 0.01
-    if PRESS_MAX > 0.20: PRESS_MAX = 0.20
-    # adım ve timeout sınırları
-    MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
-    if MAX_STEPS > 2000: MAX_STEPS = 2000
-    STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
-    if STUCK_TIMEOUT > 60: STUCK_TIMEOUT = 60
-except Exception as _e:
-    print('[MikroAdim] sabit denetimi uyarı:', _e)
+def _normalize_micro_settings():
+    """PRESS/PULSE parametrelerini güvenli aralıkta tut."""
+    global PRESS_MIN, PRESS_MAX, MAX_STEPS, STUCK_TIMEOUT
+    try:
+        # süreleri makul aralığa kırp
+        PRESS_MIN = float(PRESS_MIN);
+        PRESS_MAX = float(PRESS_MAX)
+        if PRESS_MIN > PRESS_MAX:
+            PRESS_MIN, PRESS_MAX = PRESS_MAX, PRESS_MIN
+        if PRESS_MIN < 0.01:
+            PRESS_MIN = 0.01
+        if PRESS_MAX > 0.20:
+            PRESS_MAX = 0.20
+        # adım ve timeout sınırları
+        MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
+        if MAX_STEPS > 2000:
+            MAX_STEPS = 2000
+        STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
+        if STUCK_TIMEOUT > 60:
+            STUCK_TIMEOUT = 60
+    except Exception as _e:
+        print('[MikroAdim] sabit denetimi uyarı:', _e)
 
+
+_normalize_micro_settings()
+
+
+# ====================== KALICI AYAR ŞEMASI / YÖNETİCİ ======================
+_CONFIG_SECTIONS = [
+    {
+        "id": "input",
+        "label": "Hız / Girdi",
+        "entries": [
+            {"key": "tus_hizi", "type": "float", "default": tus_hizi,
+             "label": "Tuş Hızı (sn)", "help": "Genel klavye basış süresi."},
+            {"key": "mouse_hizi", "type": "float", "default": mouse_hizi,
+             "label": "Mouse Hızı (sn)", "help": "Genel mouse bekleme süresi."},
+            {"key": "jitter_px", "type": "int", "default": jitter_px,
+             "label": "Jitter (px)", "help": "Fareye uygulanacak rastgele piksel kayması."},
+            {"key": "WATCHDOG_TIMEOUT", "type": "float", "default": WATCHDOG_TIMEOUT,
+             "label": "Watchdog Zaman Aşımı (sn)", "help": "Ana döngü için güvenlik zaman aşımı."},
+            {"key": "F_WAIT_TIMEOUT_SECONDS", "type": "float", "default": F_WAIT_TIMEOUT_SECONDS,
+             "label": "F Bekleme Zaman Aşımı (sn)", "help": "F tuşu beklemeleri için maksimum süre."},
+            {"key": "AUTO_BANK_PLUS8", "type": "bool", "default": AUTO_BANK_PLUS8,
+             "label": "+8 Sonrası Otomatik Bank", "help": "+8 sonrası banka döngüsünü otomatik başlat."},
+            {"key": "AUTO_BANK_PLUS8_DELAY", "type": "float", "default": AUTO_BANK_PLUS8_DELAY,
+             "label": "+8 Banka Bekleme (sn)", "help": "+8 sonrasında bankaya gitmeden önce beklenecek süre."},
+        ],
+    },
+    {
+        "id": "stairs",
+        "label": "Merdiven Başlangıcı",
+        "entries": [
+            {"key": "VALID_X_LEFT", "type": "int_set", "default": VALID_X_LEFT,
+             "label": "Sol X Değerleri", "help": "Merdiven başlangıcında kabul edilen sol X değerleri."},
+            {"key": "VALID_X_RIGHT", "type": "int_set", "default": VALID_X_RIGHT,
+             "label": "Sağ X Değerleri", "help": "Merdiven başlangıcında kabul edilen sağ X değerleri."},
+            {"key": "STOP_Y", "type": "int_set", "default": STOP_Y,
+             "label": "Duruş Y Değerleri", "help": "Merdiven duruş Y koordinatları."},
+            {"key": "STAIRS_TOP_Y", "type": "int", "default": STAIRS_TOP_Y,
+             "label": "Merdiven Tepe Y", "help": "Merdiven tepe noktası Y değeri."},
+        ],
+    },
+    {
+        "id": "inventory",
+        "label": "Envanter / Banka Grid",
+        "entries": [
+            {"key": "INV_LEFT", "type": "int", "default": INV_LEFT, "label": "Env. Sol"},
+            {"key": "INV_TOP", "type": "int", "default": INV_TOP, "label": "Env. Üst"},
+            {"key": "INV_RIGHT", "type": "int", "default": INV_RIGHT, "label": "Env. Sağ"},
+            {"key": "INV_BOTTOM", "type": "int", "default": INV_BOTTOM, "label": "Env. Alt"},
+            {"key": "UPG_INV_LEFT", "type": "int", "default": UPG_INV_LEFT, "label": "UPG Env. Sol"},
+            {"key": "UPG_INV_TOP", "type": "int", "default": UPG_INV_TOP, "label": "UPG Env. Üst"},
+            {"key": "UPG_INV_RIGHT", "type": "int", "default": UPG_INV_RIGHT, "label": "UPG Env. Sağ"},
+            {"key": "UPG_INV_BOTTOM", "type": "int", "default": UPG_INV_BOTTOM, "label": "UPG Env. Alt"},
+            {"key": "BANK_INV_LEFT", "type": "int", "default": BANK_INV_LEFT, "label": "Banka Env. Sol"},
+            {"key": "BANK_INV_TOP", "type": "int", "default": BANK_INV_TOP, "label": "Banka Env. Üst"},
+            {"key": "BANK_INV_RIGHT", "type": "int", "default": BANK_INV_RIGHT, "label": "Banka Env. Sağ"},
+            {"key": "BANK_INV_BOTTOM", "type": "int", "default": BANK_INV_BOTTOM, "label": "Banka Env. Alt"},
+            {"key": "SLOT_COLS", "type": "int", "default": SLOT_COLS, "label": "Env. Sütun"},
+            {"key": "SLOT_ROWS", "type": "int", "default": SLOT_ROWS, "label": "Env. Satır"},
+            {"key": "BANK_PANEL_LEFT", "type": "int", "default": BANK_PANEL_LEFT, "label": "Banka Panel Sol"},
+            {"key": "BANK_PANEL_TOP", "type": "int", "default": BANK_PANEL_TOP, "label": "Banka Panel Üst"},
+            {"key": "BANK_PANEL_RIGHT", "type": "int", "default": BANK_PANEL_RIGHT, "label": "Banka Panel Sağ"},
+            {"key": "BANK_PANEL_BOTTOM", "type": "int", "default": BANK_PANEL_BOTTOM, "label": "Banka Panel Alt"},
+            {"key": "BANK_PANEL_COLS", "type": "int", "default": BANK_PANEL_COLS, "label": "Banka Panel Sütun"},
+            {"key": "BANK_PANEL_ROWS", "type": "int", "default": BANK_PANEL_ROWS, "label": "Banka Panel Satır"},
+        ],
+    },
+    {
+        "id": "slot_detection",
+        "label": "Boş Slot Tespiti",
+        "entries": [
+            {"key": "EMPTY_SLOT_TEMPLATE_PATH", "type": "str", "default": EMPTY_SLOT_TEMPLATE_PATH,
+             "label": "Boş Slot Şablonu"},
+            {"key": "EMPTY_SLOT_MATCH_THRESHOLD", "type": "float", "default": EMPTY_SLOT_MATCH_THRESHOLD,
+             "label": "Şablon Eşiği"},
+            {"key": "FALLBACK_MEAN_THRESHOLD", "type": "float", "default": FALLBACK_MEAN_THRESHOLD,
+             "label": "Fallback Ortalama"},
+            {"key": "FALLBACK_EDGE_DENSITY_THRESHOLD", "type": "float",
+             "default": FALLBACK_EDGE_DENSITY_THRESHOLD, "label": "Fallback Kenar Yoğunluğu"},
+            {"key": "EMPTY_SLOT_THRESHOLD", "type": "int", "default": EMPTY_SLOT_THRESHOLD,
+             "label": "Boş Slot Karar"},
+            {"key": "DEBUG_SAVE", "type": "bool", "default": DEBUG_SAVE, "label": "Debug Kaydet"},
+        ],
+    },
+    {
+        "id": "upgrade",
+        "label": "Upgrade / Basma",
+        "entries": [
+            {"key": "BASMA_HAKKI", "type": "int", "default": BASMA_HAKKI, "label": "+8 Deneme Hakkı"},
+            {"key": "SCROLL_POS", "type": "point", "default": SCROLL_POS, "label": "Scroll Pozisyonu"},
+            {"key": "UPGRADE_BTN_POS", "type": "point", "default": UPGRADE_BTN_POS,
+             "label": "Upgrade Butonu"},
+            {"key": "CONFIRM_BTN_POS", "type": "point", "default": CONFIRM_BTN_POS,
+             "label": "Onay Butonu"},
+            {"key": "UPG_STEP_DELAY", "type": "float", "default": UPG_STEP_DELAY,
+             "label": "Upgrade Adım Bekleme"},
+            {"key": "SCROLL_FIND_ROI_W", "type": "int", "default": SCROLL_FIND_ROI_W,
+             "label": "Scroll ROI Genişlik"},
+            {"key": "SCROLL_FIND_ROI_H", "type": "int", "default": SCROLL_FIND_ROI_H,
+             "label": "Scroll ROI Yükseklik"},
+            {"key": "SCROLL_PANEL_REOPEN_MAX", "type": "int", "default": SCROLL_PANEL_REOPEN_MAX,
+             "label": "Panel Açma Deneme"},
+            {"key": "SCROLL_PANEL_REOPEN_DELAY", "type": "float", "default": SCROLL_PANEL_REOPEN_DELAY,
+             "label": "Panel Açma Bekleme"},
+        ],
+    },
+    {
+        "id": "scroll_buy",
+        "label": "Scroll Alım",
+        "entries": [
+            {"key": "SCROLL_ALIM_ADET", "type": "int", "default": SCROLL_ALIM_ADET,
+             "label": "Low Scroll Adedi"},
+            {"key": "SCROLL_MID_ALIM_ADET", "type": "int", "default": SCROLL_MID_ALIM_ADET,
+             "label": "Mid Scroll Adedi"},
+            {"key": "SCROLL_VENDOR_MID_POS", "type": "point", "default": SCROLL_VENDOR_MID_POS,
+             "label": "Vendor Orta Scroll"},
+        ],
+    },
+    {
+        "id": "npc",
+        "label": "NPC / Storage",
+        "entries": [
+            {"key": "TARGET_NPC_X", "type": "int", "default": TARGET_NPC_X,
+             "label": "NPC Hedef X"},
+            {"key": "TARGET_Y_AFTER_TURN", "type": "int", "default": TARGET_Y_AFTER_TURN,
+             "label": "Dönüş Sonrası Y"},
+            {"key": "NPC_CONTEXT_RIGHTCLICK_POS", "type": "point", "default": NPC_CONTEXT_RIGHTCLICK_POS,
+             "label": "NPC Sağ Tık"},
+            {"key": "NPC_OPEN_TEXT_TEMPLATE_PATH", "type": "str", "default": NPC_OPEN_TEXT_TEMPLATE_PATH,
+             "label": "NPC Aç Şablonu"},
+            {"key": "NPC_OPEN_MATCH_THRESHOLD", "type": "float", "default": NPC_OPEN_MATCH_THRESHOLD,
+             "label": "NPC Aç Eşiği"},
+            {"key": "NPC_OPEN_FIND_TIMEOUT", "type": "float", "default": NPC_OPEN_FIND_TIMEOUT,
+             "label": "NPC Aç Zaman Aşımı"},
+            {"key": "NPC_OPEN_SCALES", "type": "float_list", "default": NPC_OPEN_SCALES,
+             "label": "NPC Aç Ölçekleri"},
+            {"key": "USE_STORAGE_TEMPLATE_PATHS", "type": "str_list", "default": USE_STORAGE_TEMPLATE_PATHS,
+             "label": "Storage Şablonları"},
+            {"key": "USE_STORAGE_MATCH_THRESHOLD", "type": "float", "default": USE_STORAGE_MATCH_THRESHOLD,
+             "label": "Storage Eşiği"},
+            {"key": "USE_STORAGE_FIND_TIMEOUT", "type": "float", "default": USE_STORAGE_FIND_TIMEOUT,
+             "label": "Storage Zaman Aşımı"},
+            {"key": "USE_STORAGE_SCALES", "type": "float_list", "default": USE_STORAGE_SCALES,
+             "label": "Storage Ölçekleri"},
+            {"key": "NPC_SEEK_TIMEOUT", "type": "float", "default": NPC_SEEK_TIMEOUT,
+             "label": "NPC Arama Zaman Aşımı"},
+            {"key": "NPC_GIDIS_SURESI", "type": "float", "default": NPC_GIDIS_SURESI,
+             "label": "NPC'ye Yürüme Süresi"},
+        ],
+    },
+    {
+        "id": "bank_controls",
+        "label": "Banka Kontrolleri",
+        "entries": [
+            {"key": "BANK_NEXT_PAGE_POS", "type": "point", "default": BANK_NEXT_PAGE_POS,
+             "label": "Banka Sonraki Sayfa"},
+            {"key": "BANK_PREV_PAGE_POS", "type": "point", "default": BANK_PREV_PAGE_POS,
+             "label": "Banka Önceki Sayfa"},
+            {"key": "BANK_PAGE_CLICK_DELAY", "type": "float", "default": BANK_PAGE_CLICK_DELAY,
+             "label": "Sayfa Tık Bekleme"},
+        ],
+    },
+    {
+        "id": "launcher",
+        "label": "Launcher / Giriş",
+        "entries": [
+            {"key": "GAME_START_TEMPLATE_PATH", "type": "str", "default": GAME_START_TEMPLATE_PATH,
+             "label": "Start Şablonu"},
+            {"key": "GAME_START_MATCH_THRESHOLD", "type": "float", "default": GAME_START_MATCH_THRESHOLD,
+             "label": "Start Eşiği"},
+            {"key": "GAME_START_FIND_TIMEOUT", "type": "float", "default": GAME_START_FIND_TIMEOUT,
+             "label": "Start Zaman Aşımı"},
+            {"key": "GAME_START_SCALES", "type": "float_list", "default": GAME_START_SCALES,
+             "label": "Start Ölçekleri"},
+            {"key": "TEMPLATE_EXTRA_CLICK_POS", "type": "point", "default": TEMPLATE_EXTRA_CLICK_POS,
+             "label": "Ekstra Tık"},
+            {"key": "LAUNCHER_EXE", "type": "str", "default": LAUNCHER_EXE,
+             "label": "Launcher EXE"},
+            {"key": "LAUNCHER_START_CLICK_POS", "type": "point", "default": LAUNCHER_START_CLICK_POS,
+             "label": "Launcher Başlat Tık"},
+            {"key": "WINDOW_TITLE_KEYWORD", "type": "str", "default": WINDOW_TITLE_KEYWORD,
+             "label": "Pencere Başlık Anahtar"},
+            {"key": "WINDOW_APPEAR_TIMEOUT", "type": "float", "default": WINDOW_APPEAR_TIMEOUT,
+             "label": "Pencere Zaman Aşımı"},
+        ],
+    },
+    {
+        "id": "login",
+        "label": "Login Bilgileri",
+        "entries": [
+            {"key": "LOGIN_USERNAME", "type": "str", "default": LOGIN_USERNAME,
+             "label": "Kullanıcı Adı"},
+            {"key": "LOGIN_PASSWORD", "type": "str", "default": LOGIN_PASSWORD,
+             "label": "Şifre", "secret": True},
+            {"key": "LOGIN_USERNAME_CLICK_POS", "type": "point", "default": LOGIN_USERNAME_CLICK_POS,
+             "label": "Kullanıcı Adı Tık"},
+            {"key": "LOGIN_PASSWORD_CLICK_POS", "type": "point", "default": LOGIN_PASSWORD_CLICK_POS,
+             "label": "Şifre Tık"},
+            {"key": "SERVER_OPEN_POS", "type": "point", "default": SERVER_OPEN_POS,
+             "label": "Server Açılır Menü"},
+            {"key": "SERVER_CHOICES", "type": "point_list", "default": SERVER_CHOICES,
+             "label": "Server Seçenekleri"},
+        ],
+    },
+    {
+        "id": "health",
+        "label": "HP Kontrol",
+        "entries": [
+            {"key": "HP_POINTS", "type": "point_list", "default": HP_POINTS,
+             "label": "HP Örnek Noktaları"},
+            {"key": "HP_RED_MIN", "type": "float", "default": HP_RED_MIN,
+             "label": "Kırmızı Min"},
+            {"key": "HP_RED_DELTA", "type": "float", "default": HP_RED_DELTA,
+             "label": "Kırmızı Delta"},
+        ],
+    },
+    {
+        "id": "navigation",
+        "label": "Navigasyon",
+        "entries": [
+            {"key": "X_TOLERANCE", "type": "int", "default": X_TOLERANCE,
+             "label": "X Tolerans"},
+            {"key": "X_BAND_CONSEC", "type": "int", "default": X_BAND_CONSEC,
+             "label": "X Bant Art Arda"},
+            {"key": "X_TOL_READ_DELAY", "type": "float", "default": X_TOL_READ_DELAY,
+             "label": "X Okuma Gecikmesi"},
+            {"key": "X_TOL_TIMEOUT", "type": "float", "default": X_TOL_TIMEOUT,
+             "label": "X Zaman Aşımı"},
+            {"key": "Y_SEEK_TIMEOUT", "type": "float", "default": Y_SEEK_TIMEOUT,
+             "label": "Y Arama Zaman Aşımı"},
+            {"key": "TARGET_STABLE_HITS", "type": "int", "default": TARGET_STABLE_HITS,
+             "label": "Stabil Okuma"},
+        ],
+    },
+    {
+        "id": "micro",
+        "label": "Mikro Adım",
+        "entries": [
+            {"key": "PRESS_MIN", "type": "float", "default": PRESS_MIN,
+             "label": "Mikro Basış Min"},
+            {"key": "PRESS_MAX", "type": "float", "default": PRESS_MAX,
+             "label": "Mikro Basış Max"},
+            {"key": "MAX_STEPS", "type": "int", "default": MAX_STEPS,
+             "label": "Maks. Adım"},
+            {"key": "STUCK_TIMEOUT", "type": "int", "default": STUCK_TIMEOUT,
+             "label": "Takılma Zaman Aşımı"},
+            {"key": "PRE_BRAKE_DELTA", "type": "int", "default": PRE_BRAKE_DELTA,
+             "label": "Ön Fren Δ"},
+            {"key": "MICRO_PULSE_DURATION", "type": "float", "default": MICRO_PULSE_DURATION,
+             "label": "Mikro Nabız Süresi"},
+            {"key": "MICRO_READ_DELAY", "type": "float", "default": MICRO_READ_DELAY,
+             "label": "Mikro Okuma Bekleme"},
+        ],
+    },
+    {
+        "id": "movement",
+        "label": "Yürüme / Dönüş",
+        "entries": [
+            {"key": "ANVIL_WALK_TIME", "type": "float", "default": ANVIL_WALK_TIME,
+             "label": "Anvil'e Yürüme"},
+            {"key": "TURN_LEFT_SEC", "type": "float", "default": TURN_LEFT_SEC,
+             "label": "Sola Dönüş (sn)"},
+            {"key": "TURN_RIGHT_SEC", "type": "float", "default": TURN_RIGHT_SEC,
+             "label": "Sağa Dönüş (sn)"},
+        ],
+    },
+    {
+        "id": "town",
+        "label": "Town",
+        "entries": [
+            {"key": "TOWN_CLICK_POS", "type": "point", "default": TOWN_CLICK_POS,
+             "label": "Town Tık"},
+            {"key": "TOWN_WAIT", "type": "float", "default": TOWN_WAIT,
+             "label": "Town Bekleme"},
+            {"key": "TOWN_MIN_INTERVAL_SEC", "type": "float", "default": TOWN_MIN_INTERVAL_SEC,
+             "label": "Town Minimum Aralık"},
+        ],
+    },
+    {
+        "id": "misc",
+        "label": "Diğer",
+        "entries": [
+            {"key": "SPLASH_CLICK_POS", "type": "point", "default": SPLASH_CLICK_POS,
+             "label": "Splash Tık"},
+            {"key": "HOVER_WAIT_INV", "type": "float", "default": HOVER_WAIT_INV,
+             "label": "Env. Hover Bekleme"},
+            {"key": "HOVER_WAIT_BANK", "type": "float", "default": HOVER_WAIT_BANK,
+             "label": "Banka Hover Bekleme"},
+        ],
+    },
+]
+
+
+_CONFIG_ROOT_KEY = 'user_settings'
+
+
+def _cfg_parse_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'evet', 'yes', 'on')
+    return bool(value)
+
+
+def _cfg_parse_int(value):
+    if value is None or value == '':
+        raise ValueError('boş değer')
+    return int(float(str(value).strip()))
+
+
+def _cfg_parse_float(value):
+    if value is None or value == '':
+        raise ValueError('boş değer')
+    return float(str(value).strip())
+
+
+def _cfg_parse_point(value):
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return (int(float(value[0])), int(float(value[1])))
+    if isinstance(value, dict) and {'x', 'y'} <= set(value.keys()):
+        return (int(float(value['x'])), int(float(value['y'])))
+    if isinstance(value, str):
+        nums = re.findall(r'-?\d+(?:\.\d+)?', value)
+        if len(nums) >= 2:
+            return (int(float(nums[0])), int(float(nums[1])))
+    raise ValueError('nokta formatı yanlış')
+
+
+def _cfg_parse_point_list(value):
+    if isinstance(value, str):
+        chunks = re.split(r'[;|\n]', value)
+        result = []
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                result.append(_cfg_parse_point(chunk))
+            except ValueError:
+                continue
+        if result:
+            return result
+        raise ValueError('nokta listesi boş')
+    result = []
+    iterable = value if isinstance(value, (list, tuple)) else []
+    for item in iterable:
+        try:
+            result.append(_cfg_parse_point(item))
+        except ValueError:
+            continue
+    if result:
+        return result
+    raise ValueError('nokta listesi okunamadı')
+
+
+def _cfg_parse_int_set(value):
+    if isinstance(value, str):
+        nums = re.findall(r'-?\d+', value)
+        return {int(n) for n in nums}
+    if isinstance(value, (list, tuple, set)):
+        return {int(float(v)) for v in value}
+    raise ValueError('sayı kümesi okunamadı')
+
+
+def _cfg_parse_float_list(value):
+    if isinstance(value, str):
+        nums = re.findall(r'-?\d+(?:\.\d+)?', value)
+        if not nums:
+            raise ValueError('liste boş')
+        return tuple(float(n) for n in nums)
+    if isinstance(value, (list, tuple)):
+        return tuple(float(n) for n in value)
+    raise ValueError('liste okunamadı')
+
+
+def _cfg_parse_str_list(value):
+    if isinstance(value, str):
+        parts = [p.strip() for p in re.split(r'[\n,;]', value) if p.strip()]
+        return parts
+    if isinstance(value, (list, tuple)):
+        return [str(p) for p in value]
+    raise ValueError('metin listesi okunamadı')
+
+
+class MacroConfigManager:
+    def __init__(self, sections=None, loader=None, saver=None):
+        self.sections = []
+        self.section_map = {}
+        self.entry_map = {}
+        self.loader = loader
+        self.saver = saver
+        self.data = None
+        self._full_document = None
+        if sections:
+            self.extend_schema(sections)
+
+    # --- Şema yönetimi ---
+    def extend_schema(self, sections):
+        if isinstance(sections, dict):
+            sections = [sections]
+        for sec in sections or []:
+            sid = sec.get('id')
+            if not sid:
+                continue
+            existing = self.section_map.get(sid)
+            if existing is None:
+                new_sec = {
+                    'id': sid,
+                    'label': sec.get('label', sid),
+                    'entries': []
+                }
+                self.sections.append(new_sec)
+                self.section_map[sid] = new_sec
+                existing = new_sec
+            else:
+                existing['label'] = sec.get('label', existing.get('label', sid))
+            for entry in sec.get('entries', []):
+                self._register_entry(existing, entry)
+
+    def _register_entry(self, section, entry):
+        key = entry.get('key')
+        if not key:
+            return
+        stored = {
+            'key': key,
+            'type': entry.get('type', 'str'),
+            'default': entry.get('default'),
+            'label': entry.get('label', key),
+            'help': entry.get('help', ''),
+            'secret': bool(entry.get('secret', False)),
+            'section_id': section['id'],
+        }
+        self.entry_map[key] = stored
+        section['entries'] = [e for e in section['entries'] if e.get('key') != key]
+        section['entries'].append(stored)
+
+    # --- IO kayıtları ---
+    def register_io(self, loader, saver):
+        self.loader = loader
+        self.saver = saver
+
+    # --- Yardımcılar ---
+    def _runtime_defaults(self):
+        defaults = {}
+        for section in self.sections:
+            sid = section['id']
+            defaults[sid] = {}
+            for entry in section['entries']:
+                defaults[sid][entry['key']] = copy.deepcopy(entry.get('default'))
+        return defaults
+
+    def _runtime_to_storage(self, runtime):
+        storage = {}
+        for section in self.sections:
+            sid = section['id']
+            storage[sid] = {}
+            values = runtime.get(sid, {}) if isinstance(runtime, dict) else {}
+            for entry in section['entries']:
+                key = entry['key']
+                storage[sid][key] = self._to_storage(entry, values.get(key, entry.get('default')))
+        return storage
+
+    def _coerce(self, entry, value):
+        typ = entry.get('type')
+        if typ == 'bool':
+            return _cfg_parse_bool(value)
+        if typ == 'int':
+            return _cfg_parse_int(value)
+        if typ == 'float':
+            return _cfg_parse_float(value)
+        if typ == 'point':
+            return _cfg_parse_point(value)
+        if typ == 'point_list':
+            return [tuple(pt) for pt in _cfg_parse_point_list(value)]
+        if typ == 'int_set':
+            return set(_cfg_parse_int_set(value))
+        if typ == 'float_list':
+            return tuple(_cfg_parse_float_list(value))
+        if typ == 'str_list':
+            return list(_cfg_parse_str_list(value))
+        return str(value)
+
+    def _to_storage(self, entry, value):
+        typ = entry.get('type')
+        if typ == 'bool':
+            return bool(value)
+        if typ == 'int':
+            return int(value)
+        if typ == 'float':
+            return float(value)
+        if typ == 'point':
+            try:
+                x, y = value
+            except Exception:
+                x, y = _cfg_parse_point(value)
+            return [int(x), int(y)]
+        if typ == 'point_list':
+            pts = []
+            for item in value or []:
+                try:
+                    x, y = item
+                    pts.append([int(x), int(y)])
+                except Exception:
+                    try:
+                        x, y = _cfg_parse_point(item)
+                        pts.append([int(x), int(y)])
+                    except Exception:
+                        continue
+            return pts
+        if typ == 'int_set':
+            return sorted(int(v) for v in (value or []))
+        if typ == 'float_list':
+            return [float(v) for v in (value or [])]
+        if typ == 'str_list':
+            return [str(v) for v in (value or [])]
+        return str(value) if value is not None else ''
+
+    def _post_apply(self):
+        try:
+            left = globals().get('VALID_X_LEFT', set())
+            right = globals().get('VALID_X_RIGHT', set())
+            globals()['VALID_X'] = set(left) | set(right)
+        except Exception:
+            pass
+        try:
+            globals()['STOP_Y'] = set(globals().get('STOP_Y', []))
+        except Exception:
+            pass
+        try:
+            _normalize_micro_settings()
+        except Exception:
+            pass
+
+    # --- Ana işlemler ---
+    def ensure_loaded(self):
+        if self.data is None:
+            self.load()
+        return self.data is not None
+
+    def load(self):
+        if not callable(self.loader):
+            raise RuntimeError('Config loader tanımlı değil')
+        base = self.loader()
+        if not isinstance(base, dict):
+            base = {}
+        stored = base.get(_CONFIG_ROOT_KEY, {})
+        runtime = self._runtime_defaults()
+        need_save = False
+        for section in self.sections:
+            sid = section['id']
+            values = stored.get(sid, {}) if isinstance(stored, dict) else {}
+            if not isinstance(values, dict):
+                need_save = True
+                continue
+            for entry in section['entries']:
+                key = entry['key']
+                if key not in values:
+                    need_save = True
+                    continue
+                try:
+                    runtime[sid][key] = self._coerce(entry, values[key])
+                except Exception:
+                    need_save = True
+        self.data = runtime
+        self._full_document = base
+        self.apply()
+        if need_save:
+            try:
+                self.persist()
+            except Exception:
+                pass
+        return runtime
+
+    def apply(self):
+        if self.data is None:
+            return
+        for section in self.sections:
+            sid = section['id']
+            values = self.data.get(sid, {})
+            for entry in section['entries']:
+                key = entry['key']
+                globals()[key] = copy.deepcopy(values.get(key, entry.get('default')))
+        self._post_apply()
+
+    def persist(self):
+        if not callable(self.saver):
+            raise RuntimeError('Config saver tanımlı değil')
+        doc = copy.deepcopy(self._full_document) if isinstance(self._full_document, dict) else {}
+        doc[_CONFIG_ROOT_KEY] = self._runtime_to_storage(self.data or self._runtime_defaults())
+        ok = self.saver(doc)
+        if ok:
+            self._full_document = doc
+        return ok
+
+    def update_values(self, mapping, persist=True):
+        if not isinstance(mapping, dict):
+            return False
+        self.ensure_loaded()
+        changed = False
+        for key, raw in mapping.items():
+            entry = self.entry_map.get(key)
+            if entry is None:
+                continue
+            try:
+                value = self._coerce(entry, raw)
+            except Exception as e:
+                raise ValueError(f"{key} değeri okunamadı: {e}") from e
+            sec = entry['section_id']
+            current = self.data.setdefault(sec, {})
+            if current.get(key) != value:
+                current[key] = value
+                changed = True
+        if changed:
+            self.apply()
+            if persist:
+                return self.persist()
+        return True
+
+    def sync_from_globals(self, keys=None, persist=False):
+        self.ensure_loaded()
+        target = set(keys) if keys else None
+        changed = False
+        for entry in self.entry_map.values():
+            key = entry['key']
+            if target is not None and key not in target:
+                continue
+            try:
+                value = self._coerce(entry, globals().get(key, entry.get('default')))
+            except Exception:
+                value = copy.deepcopy(entry.get('default'))
+            sec = entry['section_id']
+            current = self.data.setdefault(sec, {})
+            if current.get(key) != value:
+                current[key] = value
+                changed = True
+        if changed and persist:
+            return self.persist()
+        if changed:
+            self.apply()
+        return True
+
+    # --- UI yardımcıları ---
+    def iter_sections(self):
+        self.ensure_loaded()
+        for section in self.sections:
+            sid = section['id']
+            values = []
+            for entry in section['entries']:
+                key = entry['key']
+                val = copy.deepcopy(self.data.get(sid, {}).get(key, entry.get('default')))
+                values.append((entry, val))
+            yield section, values
+
+    def stringify(self, entry, value):
+        typ = entry.get('type')
+        if typ == 'point':
+            try:
+                x, y = value
+                return f"{x}, {y}"
+            except Exception:
+                return ''
+        if typ == 'point_list':
+            try:
+                return ' | '.join(f"{x},{y}" for x, y in value)
+            except Exception:
+                return ''
+        if typ == 'int_set':
+            return ', '.join(str(int(v)) for v in sorted(value))
+        if typ == 'float_list':
+            return ', '.join(f"{float(v):.3g}" for v in value)
+        if typ == 'str_list':
+            return ', '.join(str(v) for v in value)
+        return str(value)
+
+
+# Yönetici (IO daha sonra bağlanacak)
+CONFIG_MANAGER = MacroConfigManager(_CONFIG_SECTIONS)
+
+
+def reload_macro_config():
+    """Config dosyasını yeniden okuyup uygula."""
+    try:
+        CONFIG_MANAGER.load()
+        return True
+    except Exception as e:
+        print('[CONFIG] reload hata:', e)
+        return False
+
+
+def persist_macro_config(keys=None):
+    """Belirtilen anahtarları (veya tümünü) küresel değişkenlerden kaydet."""
+    try:
+        CONFIG_MANAGER.sync_from_globals(keys=keys, persist=True)
+        return True
+    except Exception as e:
+        print('[CONFIG] save hata:', e)
+        return False
 PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.015;
@@ -3587,6 +4289,14 @@ def save_config(cfg, path=None):
         return False
 
 
+# --- Kapsamlı ayar yöneticisini etkinleştir ---
+try:
+    CONFIG_MANAGER.register_io(lambda: load_config(), lambda doc: save_config(doc))
+    CONFIG_MANAGER.ensure_loaded()
+except Exception as _cfg_err:
+    print('[CONFIG] init error:', _cfg_err)
+
+
 # --- Retry yardımcı ---
 def retry_on_exception(retries=2, delay=0.5, allowed_exceptions=(Exception,), backoff=1.5):
     def deco(fn):
@@ -4366,6 +5076,25 @@ def _MERDIVEN_RUN_GUI():
         def _msg(self, s):
             print("[GUI]", s)
 
+        def open_config_center(self):
+            try:
+                fn = globals().get('open_macro_config_center')
+                if callable(fn):
+                    fn(parent=self.root)
+                else:
+                    self._msg('Ayar merkezi fonksiyonu bulunamadı.')
+            except Exception as e:
+                self._msg(f'[GUI] Ayar merkezi açılamadı: {e}')
+
+        def reload_macro_settings(self):
+            try:
+                if reload_macro_config():
+                    self._msg('Kalıcı ayarlar yeniden yüklendi.')
+                else:
+                    self._msg('Ayarlar yeniden yüklenemedi.')
+            except Exception as e:
+                self._msg(f'[GUI] Ayarlar yeniden yüklenemedi: {e}')
+
         # ---- set_stage hook'u GUI'ye bağla ----
         def _hook_stage(self):
             # Thread-safe: set_stage -> kuyruk, Tk güncellemesi ana thread
@@ -4452,6 +5181,11 @@ def _MERDIVEN_RUN_GUI():
             ttk.Button(f1, text="Ayarları Kaydet", command=self.save).grid(row=r, column=2, sticky="we", padx=2, pady=2)
             ttk.Button(f1, text="Hepsini Kapat", command=self.kill_all).grid(row=r, column=3, sticky="we", padx=2,
                                                                              pady=2);
+            r += 1
+            ttk.Button(f1, text="Ayar Merkezi", command=self.open_config_center).grid(row=r, column=0, columnspan=2,
+                                                                                       sticky="we", padx=2, pady=2)
+            ttk.Button(f1, text="Ayarları Yeniden Yükle", command=self.reload_macro_settings).grid(
+                row=r, column=2, columnspan=2, sticky="we", padx=2, pady=2)
             r += 1
             ttk.Label(f1, text="Kullanıcı Adı:").grid(row=r, column=0, sticky="e");
             ttk.Entry(f1, textvariable=self.v["username"], width=28).grid(row=r, column=1, sticky="w");
@@ -5128,52 +5862,55 @@ def _speed_cfg_path():
 
 
 def load_speed_config():
+    mgr = globals().get('CONFIG_MANAGER')
+    if mgr is None:
+        return False
+    migrated = False
+    legacy_keys = (
+        'UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
+        'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
+        'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
+        'PREC_Y598_CLICK_DELAY', 'PREC_Y598_CLICK_COUNT',
+        'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
+        'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
+        'GUI_AUTO_OPEN_SPEED'
+    )
     try:
         import json, os
         p = _speed_cfg_path()
-        if not os.path.exists(p): return False
-        with open(p, 'r', encoding='utf-8') as f:
-            conf = json.load(f)
-        for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
-                  'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
-                  'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
-                  'PREC_Y598_CLICK_DELAY', 'PREC_Y598_CLICK_COUNT',
-                  'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
-                  'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
-                  'GUI_AUTO_OPEN_SPEED'):
-            if k in conf: globals()[k] = conf[k]
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                legacy = json.load(f) or {}
+            data = {k: legacy.get(k) for k in legacy_keys if k in legacy}
+            if data:
+                mgr.update_values(data, persist=True)
+                migrated = True
+    except Exception as e:
+        print('[GUI] speed_config legacy taşıma hata:', e)
+    try:
+        mgr.ensure_loaded()
+        if migrated:
+            print('[GUI] speed_config eski dosyadan içe aktarıldı.')
         return True
     except Exception as e:
-        print('[GUI] speed_config yüklenemedi:', e);
+        print('[GUI] speed_config yüklenemedi:', e)
         return False
 
 
 def save_speed_config():
-    try:
-        import json, os
-        p = _speed_cfg_path()
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                conf = json.load(f)
-        except Exception:
-            conf = {}
-        for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
-                  'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
-                  'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
-                  'PREC_Y598_CLICK_DELAY', 'PREC_Y598_CLICK_COUNT',
-                  'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
-                  'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
-                  'GUI_AUTO_OPEN_SPEED'):
-            conf[k] = globals().get(k)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, 'w', encoding='utf-8') as f:
-            import json;
-            json.dump(conf, f, indent=2, ensure_ascii=False)
-        print('[GUI] speed_config kaydedildi:', p);
+    keys = (
+        'UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
+        'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
+        'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
+        'PREC_Y598_CLICK_DELAY', 'PREC_Y598_CLICK_COUNT',
+        'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
+        'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
+        'GUI_AUTO_OPEN_SPEED'
+    )
+    if persist_macro_config(keys=keys):
+        print('[GUI] speed_config kaydedildi (kalıcı ayarlar).')
         return True
-    except Exception as e:
-        print('[GUI] speed_config kaydetme hata:', e);
-        return False
+    return False
 
 
 # Varsayılanları güvenle oluştur (globalde yoksa):
@@ -5198,6 +5935,56 @@ YAMA_QC_STD_MIN = float(globals().get('YAMA_QC_STD_MIN', 10.0))
 YAMA_QC_EDGE_MIN = float(globals().get('YAMA_QC_EDGE_MIN', 0.002))
 YAMA_QC_HEADER_RATIO = float(globals().get('YAMA_QC_HEADER_RATIO', 0.28))
 GUI_AUTO_OPEN_SPEED = bool(globals().get('GUI_AUTO_OPEN_SPEED', False))
+
+try:
+    CONFIG_MANAGER.extend_schema({
+        'id': 'speed_extras',
+        'label': 'Hız / Anvil (Gelişmiş)',
+        'entries': [
+            {'key': 'UPG_USE_FAST_MOUSE', 'type': 'bool', 'default': UPG_USE_FAST_MOUSE,
+             'label': 'Hızlı Mouse/Tuş'},
+            {'key': 'UPG_MOUSE_HIZI', 'type': 'float', 'default': UPG_MOUSE_HIZI,
+             'label': 'Mouse Hızı (Anvil)'},
+            {'key': 'UPG_TUS_HIZI', 'type': 'float', 'default': UPG_TUS_HIZI,
+             'label': 'Tuş Hızı (Anvil)'},
+            {'key': 'ANVIL_CONFIRM_WAIT_MS', 'type': 'int', 'default': ANVIL_CONFIRM_WAIT_MS,
+             'label': 'Onay Bekleme (ms)'},
+            {'key': 'ROI_STALE_MS', 'type': 'int', 'default': ROI_STALE_MS,
+             'label': 'ROI Yenile (ms)'},
+            {'key': 'PREC_Y598_TOWN_HARDLOCK', 'type': 'bool', 'default': PREC_Y598_TOWN_HARDLOCK,
+             'label': '598 Town HardLock'},
+            {'key': 'PREC_Y598_DBLCLICK', 'type': 'bool', 'default': PREC_Y598_DBLCLICK,
+             'label': '598 Çift Tık'},
+            {'key': 'PREC_Y598_CLICK_POS', 'type': 'point', 'default': PREC_Y598_CLICK_POS,
+             'label': '598 Tık Noktası'},
+            {'key': 'PREC_Y598_CLICK_DELAY', 'type': 'float', 'default': PREC_Y598_CLICK_DELAY,
+             'label': '598 Tık Gecikmesi'},
+            {'key': 'PREC_Y598_CLICK_COUNT', 'type': 'int', 'default': PREC_Y598_CLICK_COUNT,
+             'label': '598 Tık Sayısı'},
+            {'key': 'ENABLE_YAMA_SLOT_CACHE', 'type': 'bool', 'default': ENABLE_YAMA_SLOT_CACHE,
+             'label': 'Slot Cache'},
+            {'key': 'MAX_CACHE_SIZE_PER_SNAPSHOT', 'type': 'int', 'default': MAX_CACHE_SIZE_PER_SNAPSHOT,
+             'label': 'Cache Boyutu'},
+            {'key': 'YAMA_QC_ENABLE', 'type': 'bool', 'default': YAMA_QC_ENABLE,
+             'label': 'Quick Check'},
+            {'key': 'YAMA_QC_STD_MIN', 'type': 'float', 'default': YAMA_QC_STD_MIN,
+             'label': 'QC Std Min'},
+            {'key': 'YAMA_QC_EDGE_MIN', 'type': 'float', 'default': YAMA_QC_EDGE_MIN,
+             'label': 'QC Kenar Min'},
+            {'key': 'YAMA_QC_HEADER_RATIO', 'type': 'float', 'default': YAMA_QC_HEADER_RATIO,
+             'label': 'QC Header Oranı'},
+            {'key': 'GUI_AUTO_OPEN_SPEED', 'type': 'bool', 'default': GUI_AUTO_OPEN_SPEED,
+             'label': 'Hız Penceresini Otomatik Aç'},
+        ]
+    })
+    CONFIG_MANAGER.sync_from_globals(keys=[
+        'UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI', 'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
+        'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS', 'PREC_Y598_CLICK_DELAY',
+        'PREC_Y598_CLICK_COUNT', 'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT', 'YAMA_QC_ENABLE',
+        'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO', 'GUI_AUTO_OPEN_SPEED'
+    ], persist=True)
+except Exception as _cfg_speed_err:
+    print('[CONFIG] speed schema ekleme hata:', _cfg_speed_err)
 
 
 def run_speed_gui():
@@ -5410,6 +6197,24 @@ ANVIL_HOVER_GUARD = bool(globals().get('ANVIL_HOVER_GUARD', True))  # Aç/Kapa
 ANVIL_MOUSE_PARK_POS = tuple(globals().get('ANVIL_MOUSE_PARK_POS', (5, 5)))  # Park X,Y
 ANVIL_HOVER_CLEAR_SEC = float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.035))  # Bekleme (sn)
 
+try:
+    CONFIG_MANAGER.extend_schema({
+        'id': 'hover_guard',
+        'label': 'Hover Guard',
+        'entries': [
+            {'key': 'ANVIL_HOVER_GUARD', 'type': 'bool', 'default': ANVIL_HOVER_GUARD,
+             'label': 'Hover Guard Aktif'},
+            {'key': 'ANVIL_MOUSE_PARK_POS', 'type': 'point', 'default': ANVIL_MOUSE_PARK_POS,
+             'label': 'Park Noktası'},
+            {'key': 'ANVIL_HOVER_CLEAR_SEC', 'type': 'float', 'default': ANVIL_HOVER_CLEAR_SEC,
+             'label': 'Park Bekleme (sn)'},
+        ]
+    })
+    CONFIG_MANAGER.sync_from_globals(keys=['ANVIL_HOVER_GUARD', 'ANVIL_MOUSE_PARK_POS', 'ANVIL_HOVER_CLEAR_SEC'],
+                                     persist=True)
+except Exception as _cfg_hover_err:
+    print('[CONFIG] hover schema ekleme hata:', _cfg_hover_err)
+
 
 # [YAMA] Confirm sonrası fareyi kısa süre park ederek tooltip/animasyonu kes
 def hover_guard():
@@ -5440,50 +6245,34 @@ def _yama_speed_cfg_path():
 
 
 def yama_load_extra_cfg():
-    import json, os
-    p = _yama_speed_cfg_path()
-    if not os.path.exists(p): return False
-    try:
-        with open(p, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
-        if 'ANVIL_HOVER_GUARD' in cfg: globals()['ANVIL_HOVER_GUARD'] = bool(cfg['ANVIL_HOVER_GUARD'])
-        if 'ANVIL_MOUSE_PARK_POS' in cfg:
-            try:
-                xx, yy = cfg['ANVIL_MOUSE_PARK_POS'][:2]
-                globals()['ANVIL_MOUSE_PARK_POS'] = (int(xx), int(yy))
-            except:
-                pass
-        if 'ANVIL_HOVER_CLEAR_SEC' in cfg: globals()['ANVIL_HOVER_CLEAR_SEC'] = float(cfg['ANVIL_HOVER_CLEAR_SEC'])
-        if 'ROI_STALE_MS' in cfg: globals()['ROI_STALE_MS'] = int(cfg['ROI_STALE_MS'])
-        return True
-    except Exception as e:
-        print('[YAMA CFG] load hata:', e);
+    mgr = globals().get('CONFIG_MANAGER')
+    if mgr is None:
         return False
+    migrated = False
+    try:
+        import json, os
+        p = _yama_speed_cfg_path()
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                cfg = json.load(f) or {}
+            data = {k: cfg.get(k) for k in ('ANVIL_HOVER_GUARD', 'ANVIL_MOUSE_PARK_POS',
+                                            'ANVIL_HOVER_CLEAR_SEC', 'ROI_STALE_MS') if k in cfg}
+            if data:
+                mgr.update_values(data, persist=True)
+                migrated = True
+    except Exception as e:
+        print('[YAMA CFG] legacy yükleme hata:', e)
+    if migrated:
+        print('[YAMA CFG] eski speed_config içeri aktarıldı.')
+    return True
 
 
 def yama_save_extra_cfg():
-    import json, os
-    p = _yama_speed_cfg_path()
-    try:
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-        except Exception:
-            cfg = {}
-        cfg.update({
-            'ANVIL_HOVER_GUARD': bool(globals().get('ANVIL_HOVER_GUARD', True)),
-            'ANVIL_MOUSE_PARK_POS': list(globals().get('ANVIL_MOUSE_PARK_POS', (5, 5))),
-            'ANVIL_HOVER_CLEAR_SEC': float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.035)),
-            'ROI_STALE_MS': int(globals().get('ROI_STALE_MS', 120)),
-        })
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-        print('[YAMA CFG] kaydedildi:', p);
+    keys = ['ANVIL_HOVER_GUARD', 'ANVIL_MOUSE_PARK_POS', 'ANVIL_HOVER_CLEAR_SEC', 'ROI_STALE_MS']
+    if persist_macro_config(keys=keys):
+        print('[YAMA CFG] ayarlar kaydedildi (kalıcı ayarlar).')
         return True
-    except Exception as e:
-        print('[YAMA CFG] save hata:', e);
-        return False
+    return False
 
 
 # [YAMA] +N hover hızlı mod ayarları
@@ -5630,6 +6419,131 @@ def _y_safe_import_tk():
         return tk, ttk, messagebox
     except Exception as e:
         return None, None, None
+
+
+def open_macro_config_center(parent=None):
+    tk, ttk, messagebox = _y_safe_import_tk()
+    mgr = globals().get('CONFIG_MANAGER')
+    if tk is None or mgr is None:
+        print('[CONFIG] Tk veya ConfigManager bulunamadı.')
+        return False
+    try:
+        mgr.ensure_loaded()
+    except Exception as e:
+        print('[CONFIG] yükleme hata:', e)
+        return False
+
+    win = tk.Toplevel(parent) if parent else tk.Toplevel()
+    if parent is not None:
+        try:
+            win.transient(parent)
+        except Exception:
+            pass
+    win.title('Merdiven Ayar Merkezi')
+    win.geometry('760x620')
+
+    nb = ttk.Notebook(win)
+    nb.pack(fill='both', expand=True, padx=6, pady=6)
+
+    controls = []  # (entry, var, kind)
+
+    def refresh_fields():
+        for entry, var, kind in controls:
+            sec = entry['section_id']
+            current = mgr.data.get(sec, {}).get(entry['key'], entry.get('default'))
+            if kind == 'bool':
+                var.set(bool(current))
+            else:
+                var.set(mgr.stringify(entry, current))
+
+    for section, values in mgr.iter_sections():
+        tab = ttk.Frame(nb)
+        nb.add(tab, text=section.get('label', section['id']))
+        canvas = tk.Canvas(tab, highlightthickness=0)
+        vs = ttk.Scrollbar(tab, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vs.set)
+        inner = ttk.Frame(canvas)
+        inner.columnconfigure(1, weight=1)
+        frame_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        def _cfg_scroll(event, canv=canvas):
+            canv.configure(scrollregion=canv.bbox('all'))
+
+        inner.bind('<Configure>', _cfg_scroll)
+        canvas.bind('<Configure>', lambda e, canv=canvas, fid=frame_id: canv.itemconfigure(fid, width=e.width))
+        canvas.pack(side='left', fill='both', expand=True)
+        vs.pack(side='right', fill='y')
+
+        for row, (entry, value) in enumerate(values):
+            ttk.Label(inner, text=entry.get('label', entry['key'])).grid(row=row, column=0, sticky='w', padx=4, pady=3)
+            if entry.get('type') == 'bool':
+                var = tk.BooleanVar(value=bool(value))
+                widget = ttk.Checkbutton(inner, variable=var)
+                widget.grid(row=row, column=1, sticky='w', padx=4, pady=3)
+                controls.append((entry, var, 'bool'))
+            else:
+                var = tk.StringVar(value=mgr.stringify(entry, value))
+                entry_widget = ttk.Entry(inner, textvariable=var, width=32)
+                if entry.get('secret'):
+                    entry_widget.configure(show='*')
+                entry_widget.grid(row=row, column=1, sticky='we', padx=4, pady=3)
+                controls.append((entry, var, 'text'))
+            help_text = entry.get('help')
+            if help_text:
+                ttk.Label(inner, text=help_text, wraplength=260, foreground='#555555').grid(
+                    row=row, column=2, sticky='w', padx=4, pady=3)
+
+    btn_frame = ttk.Frame(win)
+    btn_frame.pack(fill='x', padx=8, pady=8)
+
+    def do_save():
+        try:
+            updates = {}
+            for entry, var, kind in controls:
+                updates[entry['key']] = var.get() if kind != 'bool' else bool(var.get())
+            mgr.update_values(updates, persist=True)
+            refresh_fields()
+            if messagebox:
+                try:
+                    messagebox.showinfo('Başarılı', 'Ayarlar kaydedildi.')
+                except Exception:
+                    pass
+        except ValueError as e:
+            if messagebox:
+                try:
+                    messagebox.showerror('Hata', str(e))
+                except Exception:
+                    pass
+            else:
+                print('[CONFIG] kaydetme hata:', e)
+        except Exception as e:
+            if messagebox:
+                try:
+                    messagebox.showerror('Hata', str(e))
+                except Exception:
+                    pass
+            else:
+                print('[CONFIG] kaydetme hata:', e)
+
+    def do_reset():
+        for entry, var, kind in controls:
+            default_val = entry.get('default')
+            if kind == 'bool':
+                var.set(bool(default_val))
+            else:
+                var.set(mgr.stringify(entry, default_val))
+
+    ttk.Button(btn_frame, text='Kaydet', command=do_save).pack(side='left')
+    ttk.Button(btn_frame, text='Varsayılanlara Dön', command=do_reset).pack(side='left', padx=6)
+    ttk.Button(btn_frame, text='Yeniden Yükle', command=refresh_fields).pack(side='left')
+    ttk.Button(btn_frame, text='Kapat', command=win.destroy).pack(side='right')
+
+    refresh_fields()
+    try:
+        win.focus_set()
+    except Exception:
+        pass
+    return True
 
 def _y_coerce_tuple(val):
     # '(x,y)' veya 'x,y' veya [x,y] → (int,int)
