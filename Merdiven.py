@@ -1568,37 +1568,67 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 
 def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
     print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
+    # 0) Temiz başlangıç: oyundan çık ve yeniden gir
+    try:
+        if w is not None:
+            exit_game_fast(w)
+    except Exception:
+        pass
+    w = relaunch_and_login_to_ingame()
+    if not w:
+        print("[SCROLL][MID] Relaunch başarısız.");
+        return False
+
+    # 1) X=812 olana kadar town ile hizalan
+    ensure_ui_closed()
+    tries = 0
     while True:
         wait_if_paused();
         watchdog_enforce();
-        x, _y = read_coordinates(w)
-        if x == 812: break
         send_town_command();
-        time.sleep(0.5)
+        time.sleep(0.2)
+        x, _y = read_coordinates(w)
+        if x == 812:
+            print("[SCROLL][MID] X=812 yakalandı.");
+            break
+        tries += 1
+        if tries >= 25:
+            print("[SCROLL][MID] X=812 yakalanamadı (25 deneme). VALID_X hizasına geçiliyor.")
+            town_until_valid_x(w)
+            break
+
+    # 2) W ile merdiven → Y=605
     go_w_to_y(w, 605, timeout=20.0)
+
+    # 3) NPC'den scroll satın al
     press_key(SC_B);
     release_key(SC_B);
-    time.sleep(0.2);
-    mouse_move(535, 520);
-    mouse_click("right");
+    time.sleep(0.2)
+    mouse_move(535, 520)
+    mouse_click("right")
     time.sleep(0.3)
-    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH, threshold=NPC_OPEN_MATCH_THRESHOLD,
-                            timeout=NPC_OPEN_FIND_TIMEOUT, scales=NPC_OPEN_SCALES)
-    mouse_move(*SCROLL_VENDOR_MID_POS);
-    mouse_click("right");
+    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH,
+                            threshold=NPC_OPEN_MATCH_THRESHOLD,
+                            timeout=NPC_OPEN_FIND_TIMEOUT,
+                            scales=NPC_OPEN_SCALES)
+    mouse_move(*SCROLL_VENDOR_MID_POS)
+    mouse_click("right")
     time.sleep(0.2)
-    for ch in str(adet): keyboard.write(ch); time.sleep(0.05)
-    mouse_move(764, 381);
-    mouse_click("left");
+    for ch in str(adet):
+        keyboard.write(ch)
+        time.sleep(0.05)
+    mouse_move(764, 381)
+    mouse_click("left")
     time.sleep(0.2)
-    mouse_move(905, 486);
-    mouse_click("left");
+    mouse_move(905, 486)
+    mouse_click("left")
     time.sleep(0.2)
-    mouse_move(722, 582);
-    mouse_click("left");
+    mouse_move(722, 582)
+    mouse_click("left")
     time.sleep(0.3)
-    print("[SCROLL][MID] alındı → çıkış");
-    exit_game_fast(w);
+
+    print("[SCROLL][MID] alındı → çıkış")
+    exit_game_fast(w)
     return True
 
 
