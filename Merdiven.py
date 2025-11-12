@@ -555,6 +555,8 @@ def maybe_autotune(force=False):
 
 
 # ================== MOD & DURUM ==================
+
+AUTO_UNPAUSE_ON_CRITICAL = True
 MODE = "NORMAL";
 BANK_FULL_FLAG = False;
 ITEMS_DEPLETED_FLAG = False;
@@ -1403,8 +1405,8 @@ def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos
             print(f"{prefix} X=812 yakalandı.")
             break
         tries += 1
-        if tries >= 25:
-            print(f"{prefix} X=812 yakalanamadı (25 deneme). VALID_X hizasına geçiliyor.")
+        if tries >= 100:
+            print(f"{prefix} X=812 yakalanamadı (100 deneme). VALID_X hizasına geçiliyor.")
             town_until_valid_x(w)
             break
 
@@ -1449,54 +1451,8 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 
 
 def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
     return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
-
-
-def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
-    """Orta seviye kaydırma (mid scroll) stoğunu NPC'den yeniden doldurur."""
-
-    print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
-    # "SCROLL_BUY_MID" sahne etiketi GUI'de kullanıcıya "Orta Scroll Satın Alma"
-    # adımının başladığını gösterir. Böylece makro orta seviye kağıtları toplamaya
-    # geçtiğinde hangi aşamada olduğunu Türkçe anlatımla takip edebilirsiniz.
-    set_stage("SCROLL_BUY_MID");
-    if not _is_window_valid(w):
-        w = bring_game_window_to_front();
-        if not _is_window_valid(w):
-            print("[SCROLL][MID] Oyun penceresi bulunamadı.");
-            return False
-    while True:
-        wait_if_paused();
-        watchdog_enforce();
-        x, _y = read_coordinates(w)
-        if x == 812: break
-        send_town_command();
-        time.sleep(0.5)
-    go_w_to_y(w, 605, timeout=20.0)
-    press_key(SC_B);
-    release_key(SC_B);
-    time.sleep(0.2);
-    mouse_move(535, 520);
-    mouse_click("right");
-    time.sleep(0.3)
-    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH, threshold=NPC_OPEN_MATCH_THRESHOLD,
-                            timeout=NPC_OPEN_FIND_TIMEOUT, scales=NPC_OPEN_SCALES)
-    mouse_move(*SCROLL_VENDOR_MID_POS);
-    mouse_click("right");
-    time.sleep(0.2)
-    for ch in str(adet): keyboard.write(ch); time.sleep(0.05)
-    mouse_move(764, 381);
-    mouse_click("left");
-    time.sleep(0.2)
-    mouse_move(905, 486);
-    mouse_click("left");
-    time.sleep(0.2)
-    mouse_move(722, 582);
-    mouse_click("left");
-    time.sleep(0.3)
-    print("[SCROLL][MID] alındı → çıkış");
-    exit_game_fast(w);
-    return True
 
 
 # ================== Görüntü/Template Yardımcıları ==================
@@ -6007,3 +5963,7 @@ except Exception as _e:
     print("[YAMA][GUI] Hook hata:", _e)
 
 # <<< [YAMA:GUI_NPC_AND_OTHERS]
+
+def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
+    return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
