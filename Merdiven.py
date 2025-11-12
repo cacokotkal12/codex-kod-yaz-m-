@@ -1517,11 +1517,18 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 
     # 1) X=812 olana dek town
     ensure_ui_closed()
+    globals()['TOWN_HARD_LOCK'] = False
+    _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_low_stage).')
     tries = 0
     while True:
         wait_if_paused();
         watchdog_enforce()
-        send_town_command();
+        town_ok = send_town_command();
+        if town_ok is False and globals().get('TOWN_HARD_LOCK', False):
+            globals()['TOWN_HARD_LOCK'] = False
+            _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_low_stage_loop).')
+            time.sleep(0.1)
+            continue
         time.sleep(0.2)
         x, _y = read_coordinates(w)
         if x == 812:
@@ -1581,11 +1588,18 @@ def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
 
     # 1) X=812 olana kadar town ile hizalan
     ensure_ui_closed()
+    globals()['TOWN_HARD_LOCK'] = False
+    _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_mid_stage).')
     tries = 0
     while True:
         wait_if_paused();
         watchdog_enforce();
-        send_town_command();
+        town_ok = send_town_command();
+        if town_ok is False and globals().get('TOWN_HARD_LOCK', False):
+            globals()['TOWN_HARD_LOCK'] = False
+            _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_mid_stage_loop).')
+            time.sleep(0.1)
+            continue
         time.sleep(0.2)
         x, _y = read_coordinates(w)
         if x == 812:
