@@ -67,7 +67,8 @@ def _read_y_now():
 # [PATCH_Y_LOCK_END]
 
 import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
-    sys, atexit, traceback, logging, functools
+    sys, atexit, traceback, logging, functools, ast, copy
+from typing import Any, Callable, Dict, Optional, Sequence
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -282,6 +283,16 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
+
+
+def _refresh_valid_x():
+    try:
+        globals()['VALID_X'] = set(globals().get('VALID_X_LEFT', set())) | set(globals().get('VALID_X_RIGHT', set()))
+    except Exception as _e:
+        print('[Config] VALID_X güncellenemedi:', _e)
+
+
+_refresh_valid_x()
 # ---- Envanter / Banka Grid ----
 INV_LEFT, INV_TOP, INV_RIGHT, INV_BOTTOM = 664, 449, 1007, 644
 UPG_INV_LEFT, UPG_INV_TOP, UPG_INV_RIGHT, UPG_INV_BOTTOM = 650, 434, 996, 632
@@ -362,21 +373,30 @@ PRESS_MIN = 0.035  # S/W mikro basış minimum (sn)
 PRESS_MAX = 0.090  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
-# --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
-try:
-    # süreleri makul aralığa kırp
-    PRESS_MIN = float(PRESS_MIN);
-    PRESS_MAX = float(PRESS_MAX)
-    if PRESS_MIN > PRESS_MAX: PRESS_MIN, PRESS_MAX = PRESS_MAX, PRESS_MIN
-    if PRESS_MIN < 0.01: PRESS_MIN = 0.01
-    if PRESS_MAX > 0.20: PRESS_MAX = 0.20
-    # adım ve timeout sınırları
-    MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
-    if MAX_STEPS > 2000: MAX_STEPS = 2000
-    STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
-    if STUCK_TIMEOUT > 60: STUCK_TIMEOUT = 60
-except Exception as _e:
-    print('[MikroAdim] sabit denetimi uyarı:', _e)
+
+
+def _ensure_press_bounds():
+    try:
+        global PRESS_MIN, PRESS_MAX, MAX_STEPS, STUCK_TIMEOUT
+        PRESS_MIN = float(PRESS_MIN)
+        PRESS_MAX = float(PRESS_MAX)
+        if PRESS_MIN > PRESS_MAX:
+            PRESS_MIN, PRESS_MAX = PRESS_MAX, PRESS_MIN
+        if PRESS_MIN < 0.01:
+            PRESS_MIN = 0.01
+        if PRESS_MAX > 0.20:
+            PRESS_MAX = 0.20
+        MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
+        if MAX_STEPS > 2000:
+            MAX_STEPS = 2000
+        STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
+        if STUCK_TIMEOUT > 60:
+            STUCK_TIMEOUT = 60
+    except Exception as _e:
+        print('[MikroAdim] sabit denetimi uyarı:', _e)
+
+
+_ensure_press_bounds()
 
 PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
@@ -415,6 +435,237 @@ SCROLL_SEARCH_ANYWHERE = True  # True: scroll'u UPG/INV içinde her yerde ara
 SCROLL_SEARCH_REGIONS = ("UPG", "INV")  # istersen ("UPG", "INV") yapabilirsin
 # ================== AYAR (en üste, diğer sabitlerin yanına) ==================
 ON_TEMPLATE_TIMEOUT_RESTART = True  # True: npc_acma.png vb. zaman aşımında town yerine oyunu kapatıp yeniden başlat
+
+
+_CONFIG_RUNTIME_ONLY = {
+    'BANK_FULL_FLAG',
+    'GUI_ABORT',
+    'GLOBAL_CYCLE',
+    'MODE',
+    'NEXT_PLUS7_CHECK_AT',
+    'PLUS7_COUNT',
+    'PLUS8_COUNT',
+    'TOWN_LOCKED',
+    'VALID_X',
+    'ITEMS_DEPLETED_FLAG',
+}
+_CONFIG_SECRET = {'LOGIN_PASSWORD'}
+_CONFIG_MANUAL_INCLUDE = {'tus_hizi', 'mouse_hizi', 'jitter_px'}
+_CONFIG_CHOICES = {
+    'BUY_MODE': ['LINEN', 'FABRIC'],
+    'SPEED_PROFILE': ['FAST', 'BALANCED', 'SAFE'],
+    'AUTO_SPEED_PROFILE': ['FAST', 'BALANCED', 'SAFE'],
+}
+_CONFIG_TRANSFORMS: Dict[str, Callable[[Any], Any]] = {
+    'BUY_MODE': lambda v: str(v).upper(),
+    'SPEED_PROFILE': lambda v: str(v).upper(),
+    'AUTO_SPEED_PROFILE': lambda v: str(v).upper(),
+}
+_CONFIG_POST_HOOKS: Dict[str, Callable[[], None]] = {name: _ensure_press_bounds for name in ('PRESS_MIN', 'PRESS_MAX',
+                                                                                               'MAX_STEPS',
+                                                                                               'STUCK_TIMEOUT')}
+for _name in ('VALID_X_LEFT', 'VALID_X_RIGHT'):
+    _CONFIG_POST_HOOKS[_name] = _refresh_valid_x
+
+_CONFIG_REGISTRY: Dict[str, Dict[str, Any]] = {}
+_CONFIG_REGISTRY_INITIALIZED = False
+
+
+def _literal_eval_safe(raw: str) -> Any:
+    try:
+        return ast.literal_eval(raw)
+    except Exception:
+        return raw
+
+
+def ensure_config_registry(force: bool = False) -> Dict[str, Dict[str, Any]]:
+    global _CONFIG_REGISTRY_INITIALIZED
+    if _CONFIG_REGISTRY_INITIALIZED and not force:
+        return _CONFIG_REGISTRY
+
+    _CONFIG_REGISTRY.clear()
+    simple_types = (int, float, str, bool, tuple, list, dict, set, frozenset)
+    g = globals()
+    include = set(_CONFIG_MANUAL_INCLUDE)
+
+    for name, value in list(g.items()):
+        if name.startswith('_'):
+            continue
+        if name in _CONFIG_RUNTIME_ONLY:
+            continue
+        if not (name.isupper() or name in include):
+            continue
+        if isinstance(value, simple_types):
+            meta: Dict[str, Any] = {
+                'default': copy.deepcopy(value),
+                'dtype': type(value),
+                'secret': name in _CONFIG_SECRET,
+                'choices': _CONFIG_CHOICES.get(name),
+            }
+            transform = _CONFIG_TRANSFORMS.get(name)
+            if transform:
+                meta['transform'] = transform
+            hook = _CONFIG_POST_HOOKS.get(name)
+            if hook:
+                meta['hook'] = hook
+            _CONFIG_REGISTRY[name] = meta
+
+    _CONFIG_REGISTRY_INITIALIZED = True
+    return _CONFIG_REGISTRY
+
+
+def refresh_config_registry() -> Dict[str, Dict[str, Any]]:
+    return ensure_config_registry(force=True)
+
+
+def get_config_registry() -> Dict[str, Dict[str, Any]]:
+    return ensure_config_registry()
+
+
+def get_config_default(name: str) -> Any:
+    meta = get_config_registry().get(name)
+    if not meta:
+        raise KeyError(name)
+    return copy.deepcopy(meta['default'])
+
+
+def parse_config_value(name: str, raw: Any) -> Any:
+    meta = get_config_registry().get(name)
+    if meta is None:
+        if isinstance(raw, str):
+            return _literal_eval_safe(raw)
+        return raw
+
+    dtype = meta.get('dtype', type(raw))
+    value: Any = raw
+
+    if dtype is bool:
+        if isinstance(raw, str):
+            value = raw.strip().lower() in ('1', 'true', 'yes', 'on')
+        else:
+            value = bool(raw)
+    elif dtype is int and not isinstance(raw, bool):
+        if isinstance(raw, str):
+            try:
+                value = int(raw.strip())
+            except ValueError:
+                value = int(float(raw.strip()))
+        else:
+            value = int(raw)
+    elif dtype is float:
+        value = float(raw)
+    elif dtype is str:
+        value = str(raw)
+    elif dtype in (tuple, list, set, frozenset):
+        if isinstance(raw, str):
+            parsed = _literal_eval_safe(raw)
+            if isinstance(parsed, str):
+                parsed = [seg.strip() for seg in raw.split(',') if seg.strip()]
+        else:
+            parsed = raw
+        if dtype is tuple:
+            value = tuple(parsed if isinstance(parsed, (list, tuple, set, frozenset)) else [parsed])
+        elif dtype is list:
+            value = list(parsed if isinstance(parsed, (list, tuple, set, frozenset)) else [parsed])
+        elif dtype is set:
+            value = set(parsed if isinstance(parsed, (list, tuple, set, frozenset)) else [parsed])
+        else:
+            value = frozenset(parsed if isinstance(parsed, (list, tuple, set, frozenset)) else [parsed])
+    elif dtype is dict:
+        if isinstance(raw, str):
+            parsed = _literal_eval_safe(raw)
+            value = parsed if isinstance(parsed, dict) else {}
+        elif isinstance(raw, dict):
+            value = raw
+        else:
+            try:
+                value = dict(raw)
+            except Exception:
+                value = {}
+    else:
+        if isinstance(raw, str):
+            value = _literal_eval_safe(raw)
+        else:
+            value = raw
+
+    choices = meta.get('choices')
+    if choices:
+        choice_map = {str(c): c for c in choices}
+        if value in choices:
+            pass
+        elif isinstance(value, str) and value in choice_map:
+            value = choice_map[value]
+        elif str(value) in choice_map:
+            value = choice_map[str(value)]
+        else:
+            value = choices[0]
+
+    validator = meta.get('validator')
+    if callable(validator):
+        value = validator(value)
+
+    return value
+
+
+def set_config_value(name: str, value: Any) -> Any:
+    meta = get_config_registry().get(name)
+    if meta is None:
+        globals()[name] = value
+        return value
+
+    transform = meta.get('transform')
+    if callable(transform):
+        value = transform(value)
+
+    choices = meta.get('choices')
+    if choices and value not in choices:
+        choice_map = {str(c): c for c in choices}
+        if str(value) in choice_map:
+            value = choice_map[str(value)]
+        else:
+            value = choices[0]
+
+    globals()[name] = value
+
+    hook = meta.get('hook')
+    if callable(hook):
+        try:
+            hook()
+        except Exception as _e:
+            print(f'[Config] {name} sonrası güncelleme hatası:', _e)
+
+    return value
+
+
+def format_config_value(name: str, value: Any) -> str:
+    meta = get_config_registry().get(name)
+    if meta is None:
+        return str(value)
+
+    dtype = meta.get('dtype')
+    if dtype is bool:
+        return 'True' if bool(value) else 'False'
+    if dtype in (tuple, list, set, frozenset):
+        seq = value
+        if isinstance(seq, (set, frozenset)):
+            try:
+                seq = sorted(seq)
+            except Exception:
+                seq = list(seq)
+        if dtype is tuple:
+            return repr(tuple(seq if isinstance(seq, (list, tuple)) else [seq]))
+        if dtype is list:
+            return repr(list(seq if isinstance(seq, (list, tuple)) else [seq]))
+        if dtype is set:
+            return repr(set(seq if isinstance(seq, (list, tuple, set, frozenset)) else [seq]))
+        return repr(frozenset(seq if isinstance(seq, (list, tuple, set, frozenset)) else [seq]))
+    if dtype is dict:
+        return repr(value)
+    return str(value)
+
+
+def is_runtime_config(name: str) -> bool:
+    return name in _CONFIG_RUNTIME_ONLY
 
 
 def find_scroll_pos_anywhere(required: str, regions=SCROLL_SEARCH_REGIONS):
@@ -555,6 +806,8 @@ def maybe_autotune(force=False):
 
 
 # ================== MOD & DURUM ==================
+
+AUTO_UNPAUSE_ON_CRITICAL = True
 MODE = "NORMAL";
 BANK_FULL_FLAG = False;
 ITEMS_DEPLETED_FLAG = False;
@@ -1377,116 +1630,80 @@ def wait_for_required_scroll(required: str) -> bool:
 
 
 # ================== LOW/MID Scroll Alma Stage ==================
-def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
-    print(f"[SCROLL] LOW alma stage, hedef adet={adet}")
+def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos=(535, 520)):
+    print(f"{prefix} alma stage, hedef adet={adet}")
 
-    # 0) Temiz başlat: oyundan çık + yeniden gir
     try:
         if w is not None:
             exit_game_fast(w)
     except Exception:
         pass
+
     w = relaunch_and_login_to_ingame()
     if not w:
-        print("[SCROLL] Relaunch başarısız.");
+        print(f"{prefix} Relaunch başarısız.")
         return False
 
-    # 1) X=812 olana dek town
     ensure_ui_closed()
     tries = 0
     while True:
-        wait_if_paused();
+        wait_if_paused()
         watchdog_enforce()
-        send_town_command();
+        send_town_command()
         time.sleep(0.2)
         x, _y = read_coordinates(w)
         if x == 812:
-            print("[SCROLL] X=812 yakalandı.");
+            print(f"{prefix} X=812 yakalandı.")
             break
         tries += 1
-        if tries >= 25:  # güvenlik: sonsuza gitmesin
-            print("[SCROLL] X=812 yakalanamadı (25 deneme). VALID_X hizasına geçiliyor.")
-            town_until_valid_x(w)  # 811/812/813’ten biri
+        if tries >= 100:
+            print(f"{prefix} X=812 yakalanamadı (100 deneme). VALID_X hizasına geçiliyor.")
+            town_until_valid_x(w)
             break
 
-    # 2) W ile merdiven → Y=605
     go_w_to_y(w, 605, timeout=20.0)
 
-    # 3) Vendor’dan adet girip onayla
-    press_key(SC_B);
-    release_key(SC_B);
+    press_key(SC_B)
+    release_key(SC_B)
     time.sleep(0.2)
-    mouse_move(535, 520);
-    mouse_click("right");
+    mouse_move(*npc_pos)
+    mouse_click("right")
     time.sleep(0.3)
-    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH,
-                            threshold=NPC_OPEN_MATCH_THRESHOLD,
-                            timeout=NPC_OPEN_FIND_TIMEOUT,
-                            scales=NPC_OPEN_SCALES)
-    mouse_move(737, 183);
-    mouse_click("right");
+    wait_and_click_template(
+        w,
+        NPC_OPEN_TEXT_TEMPLATE_PATH,
+        threshold=NPC_OPEN_MATCH_THRESHOLD,
+        timeout=NPC_OPEN_FIND_TIMEOUT,
+        scales=NPC_OPEN_SCALES,
+    )
+    mouse_move(*vendor_pos)
+    mouse_click("right")
     time.sleep(0.2)
-    for ch in str(adet): keyboard.write(ch); time.sleep(0.05)
-    mouse_move(764, 381);
-    mouse_click("left");
+    for ch in str(adet):
+        keyboard.write(ch)
+        time.sleep(0.05)
+    mouse_move(764, 381)
+    mouse_click("left")
     time.sleep(0.2)
-    mouse_move(905, 486);
-    mouse_click("left");
+    mouse_move(905, 486)
+    mouse_click("left")
     time.sleep(0.2)
-    mouse_move(722, 582);
-    mouse_click("left");
+    mouse_move(722, 582)
+    mouse_click("left")
     time.sleep(0.3)
 
-    print("[SCROLL] LOW alındı → çıkış")
+    print(f"{prefix} alındı → çıkış")
     exit_game_fast(w)
     return True
 
 
-def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
-    """Orta seviye kaydırma (mid scroll) stoğunu NPC'den yeniden doldurur."""
+def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
+    return _run_scroll_purchase_flow(w, adet, (737, 183), prefix="[SCROLL] LOW")
 
-    print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
-    # "SCROLL_BUY_MID" sahne etiketi GUI'de kullanıcıya "Orta Scroll Satın Alma"
-    # adımının başladığını gösterir. Böylece makro orta seviye kağıtları toplamaya
-    # geçtiğinde hangi aşamada olduğunu Türkçe anlatımla takip edebilirsiniz.
-    set_stage("SCROLL_BUY_MID");
-    if not _is_window_valid(w):
-        w = bring_game_window_to_front();
-        if not _is_window_valid(w):
-            print("[SCROLL][MID] Oyun penceresi bulunamadı.");
-            return False
-    while True:
-        wait_if_paused();
-        watchdog_enforce();
-        x, _y = read_coordinates(w)
-        if x == 812: break
-        send_town_command();
-        time.sleep(0.5)
-    go_w_to_y(w, 605, timeout=20.0)
-    press_key(SC_B);
-    release_key(SC_B);
-    time.sleep(0.2);
-    mouse_move(535, 520);
-    mouse_click("right");
-    time.sleep(0.3)
-    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH, threshold=NPC_OPEN_MATCH_THRESHOLD,
-                            timeout=NPC_OPEN_FIND_TIMEOUT, scales=NPC_OPEN_SCALES)
-    mouse_move(*SCROLL_VENDOR_MID_POS);
-    mouse_click("right");
-    time.sleep(0.2)
-    for ch in str(adet): keyboard.write(ch); time.sleep(0.05)
-    mouse_move(764, 381);
-    mouse_click("left");
-    time.sleep(0.2)
-    mouse_move(905, 486);
-    mouse_click("left");
-    time.sleep(0.2)
-    mouse_move(722, 582);
-    mouse_click("left");
-    time.sleep(0.3)
-    print("[SCROLL][MID] alındı → çıkış");
-    exit_game_fast(w);
-    return True
+
+def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
+    return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
 
 
 # ================== Görüntü/Template Yardımcıları ==================
@@ -4371,6 +4588,7 @@ def _MERDIVEN_RUN_GUI():
             self.root = root;
             root.title("Merdiven GUI");
             root.geometry("1020x680")
+            ensure_config_registry()
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
@@ -4584,17 +4802,34 @@ def _MERDIVEN_RUN_GUI():
 
         # ---- Gelişmiş alan listesi ----
         def _is_editable(self, name, val):
-            return name.isupper() and (not name.startswith("_")) and isinstance(val, (int, float, bool, str))
+            if is_runtime_config(name):
+                return False
+            return isinstance(val, (int, float, bool, str, tuple, list, dict, set, frozenset))
 
         def _adv_items(self):
+            ensure_config_registry()
+            registry = get_config_registry()
             items = []
+            if registry:
+                for name, meta in registry.items():
+                    if meta.get('runtime'):
+                        continue
+                    try:
+                        val = getattr(m, name)
+                    except AttributeError:
+                        val = copy.deepcopy(meta.get('default'))
+                    items.append((name, val, meta))
+                items.sort(key=lambda x: x[0])
+                return items
+
             for k in dir(m):
                 try:
                     v = getattr(m, k)
-                    if self._is_editable(k, v): items.append((k, v))
-                except:
+                    if self._is_editable(k, v):
+                        items.append((k, v, {}))
+                except Exception:
                     pass
-            items.sort(key=lambda x: x[0]);
+            items.sort(key=lambda x: x[0])
             return items
 
         def _build_adv(self):
@@ -4602,10 +4837,10 @@ def _MERDIVEN_RUN_GUI():
             self.adv_rows = []
             F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
             grouped = {}
-            for name, val in self._adv_items():
+            for name, val, meta in self._adv_items():
                 if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
                     continue
-                grouped.setdefault(_adv_group_of(name), []).append((name, val))
+                grouped.setdefault(_adv_group_of(name), []).append((name, val, meta))
 
             if not grouped:
                 ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
@@ -4630,18 +4865,34 @@ def _MERDIVEN_RUN_GUI():
                 frame.pack(fill="x", padx=6, pady=4, anchor="n")
                 frame.columnconfigure(1, weight=1)
 
-                for row, (name, val) in enumerate(entries):
+                for row, (name, val, meta) in enumerate(entries):
                     ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
-                    if isinstance(val, bool):
-                        var = tk.StringVar(value=str(val))
-                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
+                    dtype = (meta or {}).get('dtype')
+                    choices = (meta or {}).get('choices')
+                    secret = bool((meta or {}).get('secret'))
+                    formatted = format_config_value(name, val)
+
+                    if choices:
+                        choice_values = [format_config_value(name, c) for c in choices]
+                        var = tk.StringVar(value=formatted if formatted in choice_values else choice_values[0])
+                        widget = ttk.Combobox(frame, values=choice_values, textvariable=var, width=12,
+                                              state="readonly")
+                    elif dtype is bool or isinstance(val, bool):
+                        var = tk.StringVar(value='True' if bool(val) else 'False')
+                        widget = ttk.Combobox(frame, values=['True', 'False'], textvariable=var, width=8,
                                               state="readonly")
                     else:
-                        var = tk.StringVar(value=str(val))
-                        widget = ttk.Entry(frame, textvariable=var, width=28)
+                        var = tk.StringVar(value=formatted)
+                        widget = ttk.Entry(frame, textvariable=var, width=32)
+                        if secret:
+                            try:
+                                widget.configure(show='*')
+                            except Exception:
+                                pass
+
                     widget.grid(row=row, column=1, sticky="we", padx=3)
                     ttk.Button(frame, text="Uygula",
-                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
+                               command=lambda n=name, vr=var, mt=meta: self._apply_one_adv(n, vr.get(), mt)
                                ).grid(row=row, column=2, sticky="w", padx=2)
                     try:
                         info_btn = ttk.Button(frame, width=2, text="i")
@@ -4649,7 +4900,7 @@ def _MERDIVEN_RUN_GUI():
                         _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
                     except Exception:
                         pass
-                    self.adv_rows.append((name, var))
+                    self.adv_rows.append((name, var, meta or {}))
 
             self.adv_container.update_idletasks()
             try:
@@ -4657,37 +4908,62 @@ def _MERDIVEN_RUN_GUI():
             except:
                 pass
 
-        def _apply_one_adv(self, name, val_raw):
-            import ast
+        def _apply_one_adv(self, name, val_raw, meta=None):
             try:
-                try:
-                    val = ast.literal_eval(val_raw)
-                except:
-                    val = val_raw
-                setattr(m, name, val);
-                self._msg(f"{name} = {val!r} uygulandı.")
-                self.save()  # tek değişkeni de kalıcı yap
+                value = parse_config_value(name, val_raw)
+                set_config_value(name, value)
+                formatted = format_config_value(name, getattr(m, name, value))
+                for row_name, var, row_meta in getattr(self, 'adv_rows', []):
+                    if row_name == name:
+                        try:
+                            if (row_meta or {}).get('choices'):
+                                options = [format_config_value(name, c) for c in (row_meta or {}).get('choices', [])]
+                                if formatted in options:
+                                    var.set(formatted)
+                                elif options:
+                                    var.set(options[0])
+                                else:
+                                    var.set(formatted)
+                            else:
+                                var.set(formatted)
+                        except Exception:
+                            pass
+                        break
+                self._msg(f"{name} = {formatted!s} uygulandı.")
+                self.save(apply=False)
             except Exception as e:
                 self._msg(f"{name} ayarlanamadı: {e}")
 
         def _apply_all_adv(self):
             import json, os
+            ensure_config_registry()
             path = self._cfg()
-            # Şema garantisi
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                if not isinstance(data, dict): data = {}
+                if not isinstance(data, dict):
+                    data = {}
             except Exception:
                 data = {}
-            if 'gui' not in data or not isinstance(data.get('gui'), dict): data['gui'] = {}
-            if 'advanced' not in data or not isinstance(data.get('advanced'), dict): data['advanced'] = {}
+
+            if 'gui' not in data or not isinstance(data.get('gui'), dict):
+                data['gui'] = {}
+            if 'advanced' not in data or not isinstance(data.get('advanced'), dict):
+                data['advanced'] = {}
+
             adv = data['advanced']
-            # Değerleri topla
-            for name, var in getattr(self, 'adv_rows', []):
-                try: adv[name] = var.get()
-                except Exception: pass
-            # Atomik kaydet
+            for name, var, meta in getattr(self, 'adv_rows', []):
+                raw = var.get()
+                try:
+                    value = parse_config_value(name, raw)
+                    set_config_value(name, value)
+                    formatted = format_config_value(name, getattr(m, name, value))
+                    adv[name] = formatted
+                    if formatted != raw:
+                        var.set(formatted)
+                except Exception as e:
+                    self._msg(f"{name} ayarlanamadı: {e}")
+
             tmp = path + '.tmp'
             try:
                 with open(tmp, 'w', encoding='utf-8') as f:
@@ -4697,14 +4973,11 @@ def _MERDIVEN_RUN_GUI():
             except Exception as e:
                 self._msg(f'[GUI] Kaydetme hatası: {e}')
                 try:
-                    if os.path.exists(tmp): os.remove(tmp)
-                except: pass
-            # Uygula
-            try:
-                self.apply_core()
-                self._msg('Tüm gelişmiş ayarlar uygulandı.')
-            except Exception as e:
-                self._msg(f'[GUI] apply_core hatası: {e}')
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+            self._msg('Tüm gelişmiş ayarlar uygulandı.')
         def start(self):
             if getattr(self, "thr", None) and self.thr.is_alive(): self._msg("Zaten çalışıyor."); return
             self.apply_core()
@@ -4763,11 +5036,12 @@ def _MERDIVEN_RUN_GUI():
 
         def _load_json(self):
             import json, os
+            ensure_config_registry()
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
                 with open(self._cfg(), "r", encoding="utf-8") as f:
                     j = json.load(f)
-            except:
+            except Exception:
                 j = {}
             for k, val in (j.get("gui", {}) or {}).items():
                 if k in self.v:
@@ -4784,28 +5058,35 @@ def _MERDIVEN_RUN_GUI():
             # advanced → modüle uygula
             for name, raw in (j.get("advanced", {}) or {}).items():
                 try:
-                    import ast
-                    try:
-                        val = ast.literal_eval(raw)
-                    except:
-                        val = raw
-                    setattr(m, name, val)
-                except:
+                    value = parse_config_value(name, raw)
+                    set_config_value(name, value)
+                except Exception:
                     pass
             self._build_adv()
 
         def apply_core(self):
+            ensure_config_registry()
             # login
-            if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
-            if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
+            try:
+                set_config_value('LOGIN_USERNAME', self.v["username"].get())
+            except Exception:
+                if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
+            try:
+                set_config_value('LOGIN_PASSWORD', self.v["password"].get())
+            except Exception:
+                if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
+                set_config_value('BUY_MODE', mode)
+            except Exception:
+                setattr(m, "BUY_MODE", mode)
+            try:
                 if hasattr(m, "_set_buy_mode"):
                     m._set_buy_mode(mode)
-                else:
-                    setattr(m, "BUY_MODE", mode)
-                # kalıcı dosya
+            except Exception:
+                pass
+            try:
                 p = PERSIST_PATH('config_buy_mode.json')
                 with open(p, "w", encoding="utf-8") as f:
                     json.dump({"BUY_MODE": mode}, f, ensure_ascii=False, indent=2)
@@ -4814,15 +5095,26 @@ def _MERDIVEN_RUN_GUI():
             for name, key in [("BUY_TURNS", "buy_turns"), ("SCROLL_ALIM_ADET", "scroll_low"),
                               ("SCROLL_MID_ALIM_ADET", "scroll_mid"), ("BASMA_HAKKI", "basma_hakki")]:
                 try:
-                    cur = getattr(m, name, 0)
                     val = self.v[key].get()
-                    setattr(m, name, type(cur)(val) if not isinstance(cur, bool) else bool(val))
+                    set_config_value(name, val)
                 except Exception:
                     setattr(m, name, self.v[key].get())
             # hız + fren
-            if hasattr(m, "SPEED_PROFILE"): m.SPEED_PROFILE = self.v["speed_profile"].get().upper()
-            if hasattr(m, "PRESS_MIN"): m.PRESS_MIN = float(self.v["press_min"].get())
-            if hasattr(m, "PRESS_MAX"): m.PRESS_MAX = float(self.v["press_max"].get())
+            try:
+                set_config_value('SPEED_PROFILE', self.v["speed_profile"].get())
+            except Exception:
+                if hasattr(m, "SPEED_PROFILE"):
+                    m.SPEED_PROFILE = self.v["speed_profile"].get().upper()
+            try:
+                set_config_value('PRESS_MIN', float(self.v["press_min"].get()))
+            except Exception:
+                if hasattr(m, "PRESS_MIN"):
+                    m.PRESS_MIN = float(self.v["press_min"].get())
+            try:
+                set_config_value('PRESS_MAX', float(self.v["press_max"].get()))
+            except Exception:
+                if hasattr(m, "PRESS_MAX"):
+                    m.PRESS_MAX = float(self.v["press_max"].get())
             try:
                 d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
                 d.update({"FAST": int(self.v["brake_fast"].get()), "BALANCED": int(self.v["brake_bal"].get()),
@@ -4831,33 +5123,49 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
 
-        def save(self):
+        def save(self, apply=True):
             import json, os
+            ensure_config_registry()
             path = self._cfg()
-            data = {"gui": {}, "advanced": {}}
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if not isinstance(data, dict): data={"gui":{},"advanced":{}}
-                if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"]={}
-                if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"]={}
+                if not isinstance(data, dict):
+                    data = {"gui": {}, "advanced": {}}
             except Exception:
                 data = {"gui": {}, "advanced": {}}
+
+            if "gui" not in data or not isinstance(data.get("gui"), dict):
+                data["gui"] = {}
+            if "advanced" not in data or not isinstance(data.get("advanced"), dict):
+                data["advanced"] = {}
+
             for k, var in self.v.items():
-                try: data["gui"][k] = var.get()
-                except Exception: pass
-            adv = data.get("advanced")
-            if not isinstance(adv, dict): adv={}
-            data["advanced"] = adv
-            for name, var in self.adv_rows:
-                try: adv[name] = var.get()
-                except Exception: pass
+                try:
+                    data["gui"][k] = var.get()
+                except Exception:
+                    pass
+
+            adv = data["advanced"]
+            for name, var, meta in getattr(self, 'adv_rows', []):
+                raw = var.get()
+                try:
+                    value = parse_config_value(name, raw)
+                    set_config_value(name, value)
+                    formatted = format_config_value(name, getattr(m, name, value))
+                    adv[name] = formatted
+                    if formatted != raw:
+                        var.set(formatted)
+                except Exception as e:
+                    self._msg(f"{name} kaydedilemedi: {e}")
+
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
             self._msg(f"Ayarlar kaydedildi: {path}")
-            self.apply_core()
+            if apply:
+                self.apply_core()
 
 
         def _tick(self):
@@ -5997,3 +6305,7 @@ except Exception as _e:
     print("[YAMA][GUI] Hook hata:", _e)
 
 # <<< [YAMA:GUI_NPC_AND_OTHERS]
+
+def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
+    return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
