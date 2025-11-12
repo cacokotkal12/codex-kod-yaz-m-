@@ -68,6 +68,9 @@ def _read_y_now():
 
 import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
     sys, atexit, traceback, logging, functools
+import copy
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -114,6 +117,242 @@ try:
     import mss
 except Exception:
     mss = None
+
+# ====================== KONFİGÜRASYON ŞEMASI ======================
+
+
+@dataclass
+class ConfigField:
+    name: str
+    default: Any
+    value_type: type
+    label: Optional[str] = None
+    description: Optional[str] = None
+    category: str = "Genel"
+    persist: bool = True
+    read_only: bool = False
+    choices: Optional[Sequence] = None
+    parser: Optional[Callable[[Any], Any]] = None
+    validator: Optional[Callable[[Any], Any]] = None
+    apply_func: Optional[Callable[[Any, Any], None]] = None
+
+    def clone_default(self):
+        return copy.deepcopy(self.default)
+
+    def current_value(self, module=None):
+        module = module or sys.modules[__name__]
+        return copy.deepcopy(getattr(module, self.name, self.clone_default()))
+
+    def _coerce_basic(self, value):
+        target = self.value_type
+        if isinstance(value, str):
+            text = value.strip()
+            if target is bool:
+                lowered = text.lower()
+                if lowered in ("1", "true", "yes", "on", "evet"):
+                    return True
+                if lowered in ("0", "false", "no", "off", "hayir", "hayır"):
+                    return False
+            try:
+                import ast
+                value = ast.literal_eval(text)
+            except Exception:
+                value = text
+        if target in (int, float):
+            try:
+                return target(value)
+            except Exception:
+                return target(self.default)
+        if target is bool:
+            return bool(value)
+        if target is tuple and isinstance(value, list):
+            return tuple(value)
+        if target is list and isinstance(value, tuple):
+            return list(value)
+        if target is set:
+            if isinstance(value, set):
+                return set(value)
+            if isinstance(value, (list, tuple)):
+                return set(value)
+            return {value}
+        if target is dict and not isinstance(value, dict):
+            raise ValueError(f"{self.name} requires dict, got {type(value)}")
+        return value
+
+    def normalize(self, raw):
+        if self.parser:
+            try:
+                value = self.parser(raw)
+            except Exception:
+                value = self.clone_default()
+        else:
+            try:
+                value = self._coerce_basic(raw)
+            except Exception:
+                value = self.clone_default()
+        if self.choices:
+            matched = None
+            value_text = str(value).upper()
+            for choice in self.choices:
+                if str(choice).upper() == value_text:
+                    matched = choice
+                    break
+            if matched is None:
+                matched = self.choices[0]
+            value = matched
+        if self.validator:
+            try:
+                value = self.validator(value)
+            except Exception:
+                value = self.clone_default()
+        return value
+
+    def format_for_display(self, module=None):
+        value = self.current_value(module)
+        if isinstance(value, (list, tuple, set, dict)):
+            return repr(value)
+        if isinstance(value, bool):
+            return "True" if value else "False"
+        return str(value)
+
+    def to_storage(self, module=None):
+        value = self.current_value(module)
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, set):
+            try:
+                return sorted(value)
+            except Exception:
+                return list(value)
+        if isinstance(value, dict):
+            return {k: value[k] for k in value}
+        return value
+
+    def apply(self, value, module=None):
+        module = module or sys.modules[__name__]
+        if self.apply_func:
+            try:
+                self.apply_func(value, module)
+                return
+            except Exception:
+                pass
+        setattr(module, self.name, value)
+
+
+class ConfigRegistry:
+    def __init__(self):
+        self._fields: Dict[str, ConfigField] = {}
+        self._include_lowercase = {"tus_hizi", "mouse_hizi", "jitter_px"}
+        self._runtime_only = {
+            "BANK_FULL_FLAG",
+            "GLOBAL_CYCLE",
+            "ITEMS_DEPLETED_FLAG",
+            "MODE",
+            "TOWN_LOCKED",
+        }
+        self._category_rules: Sequence = ()
+
+    def should_track(self, name, value):
+        if name.startswith("_"):
+            return False
+        if name in self._runtime_only:
+            return False
+        if callable(value):
+            return False
+        if isinstance(value, type):
+            return False
+        if name.isupper() or name in self._include_lowercase:
+            return isinstance(value, (int, float, str, bool, tuple, list, dict, set))
+        return False
+
+    def register_namespace(self, namespace):
+        for name, value in namespace.items():
+            if not self.should_track(name, value):
+                continue
+            if name in self._fields:
+                continue
+            self._fields[name] = ConfigField(
+                name=name,
+                default=copy.deepcopy(value),
+                value_type=type(value),
+            )
+
+    def update_metadata(self, name, **metadata):
+        field = self._fields.get(name)
+        if not field:
+            return
+        for key, val in metadata.items():
+            setattr(field, key, val)
+
+    def apply_labels(self, mapping: Dict[str, str]):
+        for name, label in mapping.items():
+            self.update_metadata(name, label=label)
+
+    def apply_descriptions(self, mapping: Dict[str, str]):
+        for name, desc in mapping.items():
+            self.update_metadata(name, description=desc)
+
+    def set_category_rules(self, rules: Sequence):
+        self._category_rules = rules or ()
+        for field in self._fields.values():
+            self.update_metadata(field.name, category=self._categorize(field.name))
+
+    def _categorize(self, name: str) -> str:
+        for grp_name, rule in self._category_rules:
+            names = rule.get("names", ())
+            prefixes = rule.get("prefixes", ())
+            if name in names:
+                return grp_name
+            for pref in prefixes:
+                if name.startswith(pref):
+                    return grp_name
+        return "Genel"
+
+    def iter_fields(self, persist_only=True):
+        for field in self._fields.values():
+            if persist_only and not field.persist:
+                continue
+            yield field
+
+    def apply_from_storage(self, storage: Dict[str, Any], module=None):
+        module = module or sys.modules[__name__]
+        applied = {}
+        for field in self.iter_fields(persist_only=True):
+            raw = storage.get(field.name, field.clone_default()) if storage else field.clone_default()
+            value = field.normalize(raw)
+            field.apply(value, module)
+            applied[field.name] = value
+        return applied
+
+    def export_current(self, module=None) -> Dict[str, Any]:
+        module = module or sys.modules[__name__]
+        data = {}
+        for field in self.iter_fields(persist_only=True):
+            data[field.name] = field.to_storage(module)
+        return data
+
+    def get_field(self, name: str) -> Optional[ConfigField]:
+        return self._fields.get(name)
+
+
+_CONFIG_REGISTRY = ConfigRegistry()
+
+
+def _apply_buy_mode_field(value, module):
+    mode = str(value).upper()
+    setter = getattr(module, '_set_buy_mode', None)
+    if callable(setter):
+        setter(mode)
+    else:
+        setattr(module, 'BUY_MODE', mode)
+
+
+def _apply_speed_profile(value, module):
+    setattr(module, 'SPEED_PROFILE', str(value).upper())
+
+
+def _apply_auto_speed_profile(value, module):
+    setattr(module, 'AUTO_SPEED_PROFILE', str(value).upper())
 
 # ====================== BOOST: GENEL AYARLAR ======================
 LOG_DIR = "logs";
@@ -362,21 +601,27 @@ PRESS_MIN = 0.035  # S/W mikro basış minimum (sn)
 PRESS_MAX = 0.090  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
-# --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
-try:
-    # süreleri makul aralığa kırp
-    PRESS_MIN = float(PRESS_MIN);
-    PRESS_MAX = float(PRESS_MAX)
-    if PRESS_MIN > PRESS_MAX: PRESS_MIN, PRESS_MAX = PRESS_MAX, PRESS_MIN
-    if PRESS_MIN < 0.01: PRESS_MIN = 0.01
-    if PRESS_MAX > 0.20: PRESS_MAX = 0.20
-    # adım ve timeout sınırları
-    MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
-    if MAX_STEPS > 2000: MAX_STEPS = 2000
-    STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
-    if STUCK_TIMEOUT > 60: STUCK_TIMEOUT = 60
-except Exception as _e:
-    print('[MikroAdim] sabit denetimi uyarı:', _e)
+
+
+def _normalize_micro_settings():
+    """PRESS_*/MAX_STEPS/STUCK_TIMEOUT için güvenli aralıkları uygula."""
+    global PRESS_MIN, PRESS_MAX, MAX_STEPS, STUCK_TIMEOUT
+    try:
+        PRESS_MIN = float(PRESS_MIN)
+        PRESS_MAX = float(PRESS_MAX)
+        if PRESS_MIN > PRESS_MAX:
+            PRESS_MIN, PRESS_MAX = PRESS_MAX, PRESS_MIN
+        PRESS_MIN = max(0.01, min(PRESS_MIN, 0.20))
+        PRESS_MAX = max(PRESS_MIN, min(PRESS_MAX, 0.20))
+        MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
+        MAX_STEPS = min(MAX_STEPS, 2000)
+        STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
+        STUCK_TIMEOUT = min(STUCK_TIMEOUT, 60)
+    except Exception as _e:
+        print('[MikroAdim] sabit denetimi uyarı:', _e)
+
+
+_normalize_micro_settings()
 
 PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
@@ -415,6 +660,17 @@ SCROLL_SEARCH_ANYWHERE = True  # True: scroll'u UPG/INV içinde her yerde ara
 SCROLL_SEARCH_REGIONS = ("UPG", "INV")  # istersen ("UPG", "INV") yapabilirsin
 # ================== AYAR (en üste, diğer sabitlerin yanına) ==================
 ON_TEMPLATE_TIMEOUT_RESTART = True  # True: npc_acma.png vb. zaman aşımında town yerine oyunu kapatıp yeniden başlat
+
+
+# --- Şema kayıt: kullanıcı ayarlarının varsayılanlarını yakala ---
+_CONFIG_REGISTRY.register_namespace(globals())
+_CONFIG_REGISTRY.update_metadata('BUY_MODE', choices=('FABRIC', 'LINEN'), apply_func=_apply_buy_mode_field)
+_CONFIG_REGISTRY.update_metadata('SPEED_PROFILE', choices=('FAST', 'BALANCED', 'SAFE'), apply_func=_apply_speed_profile)
+_CONFIG_REGISTRY.update_metadata('AUTO_SPEED_PROFILE', choices=('FAST', 'BALANCED', 'SAFE'), apply_func=_apply_auto_speed_profile)
+_CONFIG_REGISTRY.update_metadata('PRESS_MIN', parser=float)
+_CONFIG_REGISTRY.update_metadata('PRESS_MAX', parser=float)
+_CONFIG_REGISTRY.update_metadata('MAX_STEPS', parser=int)
+_CONFIG_REGISTRY.update_metadata('STUCK_TIMEOUT', parser=int)
 
 
 def find_scroll_pos_anywhere(required: str, regions=SCROLL_SEARCH_REGIONS):
@@ -3587,6 +3843,38 @@ def save_config(cfg, path=None):
         return False
 
 
+def _ensure_config_globals(cfg: Dict[str, Any]):
+    if not isinstance(cfg, dict):
+        cfg = {}
+    globals_section = cfg.get('globals')
+    if not isinstance(globals_section, dict):
+        globals_section = {}
+        cfg['globals'] = globals_section
+    return globals_section
+
+
+def apply_persisted_globals(cfg=None):
+    if cfg is None:
+        cfg = load_config()
+    globals_section = _ensure_config_globals(cfg)
+    _CONFIG_REGISTRY.apply_from_storage(globals_section)
+    _normalize_micro_settings()
+    return cfg
+
+
+def persist_current_globals(cfg=None):
+    if cfg is None:
+        cfg = load_config()
+    globals_section = _ensure_config_globals(cfg)
+    globals_section.update(_CONFIG_REGISTRY.export_current())
+    save_config(cfg)
+    try:
+        globals()['_GLOBAL_PATCH_CFG'] = cfg
+    except Exception:
+        pass
+    return cfg
+
+
 # --- Retry yardımcı ---
 def retry_on_exception(retries=2, delay=0.5, allowed_exceptions=(Exception,), backoff=1.5):
     def deco(fn):
@@ -3726,6 +4014,7 @@ def _wrap_buy_items():
 # --- Başlat: config/load, dir, fixes ---
 try:
     _GLOBAL_PATCH_CFG = load_config()
+    _GLOBAL_PATCH_CFG = apply_persisted_globals(_GLOBAL_PATCH_CFG)
 except Exception:
     _GLOBAL_PATCH_CFG = {}
 try:
@@ -3805,6 +4094,9 @@ _GLOBAL_PATCH_UTILS = {'load_config': load_config, 'save_config': save_config, '
 # Bu blok YAMAİCİN.PY ile otomatik eklendi. Kısa, stabil, tek dosya EXE uyumlu.
 # Başlat/Durdur/Kaydet/Hepsini Kapat + "Gelişmiş" sekmesiyle TÜM büyük harfli değişkenleri düzenler.
 _TR = {
+    'tus_hizi': 'tuş basma aralığı (sn)',
+    'mouse_hizi': 'mouse hareket hızı (sn)',
+    'jitter_px': 'mouse jitter (px)',
     'ANVIL_CONFIRM_WAIT_MS': 'anvil onay bekleme (ms)',
     'ANVIL_HOVER_CLEAR_SEC': 'anvil hover temizleme (sn)',
     'ANVIL_HOVER_GUARD': 'anvil hover koruması',
@@ -3947,6 +4239,8 @@ _TR = {
     'PLUS8_TEMPLATE_TIMEOUT': '+8 şablon zaman aşımı'
 }
 
+_CONFIG_REGISTRY.apply_labels(_TR)
+
 
 # === TR yardım sözlüğü ve Tooltip ===
 # === TR yardım sözlüğü ve Tooltip ===
@@ -3989,6 +4283,8 @@ _TR_HELP.update({
     'TOOLTIP_ROI_H': 'Tooltip ROI yüksekliği.',
     # … sende olan diğer anahtarlar aynı şekilde devam edecek …
 })
+
+_CONFIG_REGISTRY.apply_descriptions(_TR_HELP)
 
 _ADV_CATEGORY_RULES = (
     ("Oyuna Giriş", dict(
@@ -4242,6 +4538,8 @@ _ADV_CATEGORY_RULES = (
         ),
     )),
 )
+
+_CONFIG_REGISTRY.set_category_rules(_ADV_CATEGORY_RULES)
 
 
 def _build_adv_grouping():
@@ -4549,29 +4847,24 @@ def _MERDIVEN_RUN_GUI():
                 for x in self.stage_log[-30:]: self.lb.insert("end", x)
 
         # ---- Gelişmiş alan listesi ----
-        def _is_editable(self, name, val):
-            return name.isupper() and (not name.startswith("_")) and isinstance(val, (int, float, bool, str))
-
-        def _adv_items(self):
-            items = []
-            for k in dir(m):
-                try:
-                    v = getattr(m, k)
-                    if self._is_editable(k, v): items.append((k, v))
-                except:
-                    pass
-            items.sort(key=lambda x: x[0]);
-            return items
-
         def _build_adv(self):
-            for w in self.adv_container.winfo_children(): w.destroy()
+            import tkinter as tk
+            for w in self.adv_container.winfo_children():
+                w.destroy()
             self.adv_rows = []
-            F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
+            search = (self.filter.get().strip().lower() if hasattr(self, "filter") else "")
+            fields = list(_CONFIG_REGISTRY.iter_fields())
+
+            if search:
+                def _match(field: ConfigField) -> bool:
+                    parts = [field.name, field.label or '', field.description or '']
+                    return any(search in str(part).lower() for part in parts if part)
+
+                fields = [field for field in fields if _match(field)]
+
             grouped = {}
-            for name, val in self._adv_items():
-                if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
-                    continue
-                grouped.setdefault(_adv_group_of(name), []).append((name, val))
+            for field in fields:
+                grouped.setdefault(_adv_group_of(field.name), []).append(field)
 
             if not grouped:
                 ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
@@ -4590,87 +4883,74 @@ def _MERDIVEN_RUN_GUI():
 
             for grp_name in sorted(grouped.keys(), key=_grp_key):
                 entries = grouped[grp_name]
-                entries.sort(key=lambda item: _tr_name(item[0]).upper())
+                entries.sort(key=lambda field: _tr_name(field.name).upper())
                 title = grp_name or 'Genel'
                 frame = ttk.LabelFrame(self.adv_container, text=title)
                 frame.pack(fill="x", padx=6, pady=4, anchor="n")
                 frame.columnconfigure(1, weight=1)
 
-                for row, (name, val) in enumerate(entries):
-                    ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
-                    if isinstance(val, bool):
-                        var = tk.StringVar(value=str(val))
-                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
+                for row, field in enumerate(entries):
+                    ttk.Label(frame, text=_tr_name(field.name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+                    current_value = field.current_value(m)
+                    if field.choices:
+                        values = [str(choice) for choice in field.choices]
+                        cur = str(current_value if current_value in field.choices else values[0]) if values else ''
+                        var = tk.StringVar(value=cur)
+                        widget = ttk.Combobox(frame, values=values, textvariable=var, width=18,
+                                              state="readonly")
+                    elif field.value_type is bool:
+                        var = tk.StringVar(value="True" if bool(current_value) else "False")
+                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=10,
                                               state="readonly")
                     else:
-                        var = tk.StringVar(value=str(val))
+                        var = tk.StringVar(value=field.format_for_display(m))
                         widget = ttk.Entry(frame, textvariable=var, width=28)
                     widget.grid(row=row, column=1, sticky="we", padx=3)
-                    ttk.Button(frame, text="Uygula",
-                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
+                    btn_state = "disabled" if field.read_only else "normal"
+                    ttk.Button(frame, text="Uygula", state=btn_state,
+                               command=lambda f=field, vr=var: self._apply_one_adv(f, vr.get())
                                ).grid(row=row, column=2, sticky="w", padx=2)
+                    if field.read_only:
+                        try:
+                            widget.state(['disabled'])
+                        except Exception:
+                            widget.configure(state='disabled')
                     try:
                         info_btn = ttk.Button(frame, width=2, text="i")
                         info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
-                        _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
+                        _Tooltip(info_btn, _TR_HELP.get(field.name, "Açıklama yok"))
                     except Exception:
                         pass
-                    self.adv_rows.append((name, var))
+                    self.adv_rows.append((field, var))
 
             self.adv_container.update_idletasks()
             try:
                 self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
-            except:
+            except Exception:
                 pass
 
-        def _apply_one_adv(self, name, val_raw):
-            import ast
+        def _apply_one_adv(self, field: ConfigField, val_raw: str):
             try:
-                try:
-                    val = ast.literal_eval(val_raw)
-                except:
-                    val = val_raw
-                setattr(m, name, val);
-                self._msg(f"{name} = {val!r} uygulandı.")
-                self.save()  # tek değişkeni de kalıcı yap
+                value = field.normalize(val_raw)
+                field.apply(value, m)
+                self._msg(f"{field.name} = {value!r} uygulandı.")
+                self.save()
             except Exception as e:
-                self._msg(f"{name} ayarlanamadı: {e}")
+                self._msg(f"{field.name} ayarlanamadı: {e}")
 
         def _apply_all_adv(self):
-            import json, os
-            path = self._cfg()
-            # Şema garantisi
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {}
-            except Exception:
-                data = {}
-            if 'gui' not in data or not isinstance(data.get('gui'), dict): data['gui'] = {}
-            if 'advanced' not in data or not isinstance(data.get('advanced'), dict): data['advanced'] = {}
-            adv = data['advanced']
-            # Değerleri topla
-            for name, var in getattr(self, 'adv_rows', []):
-                try: adv[name] = var.get()
-                except Exception: pass
-            # Atomik kaydet
-            tmp = path + '.tmp'
-            try:
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
-                self._msg(f'Ayarlar kaydedildi: {path}')
-            except Exception as e:
-                self._msg(f'[GUI] Kaydetme hatası: {e}')
+            errors = []
+            for field, var in getattr(self, 'adv_rows', []):
                 try:
-                    if os.path.exists(tmp): os.remove(tmp)
-                except: pass
-            # Uygula
-            try:
-                self.apply_core()
+                    value = field.normalize(var.get())
+                    field.apply(value, m)
+                except Exception as e:
+                    errors.append(f"{field.name}: {e}")
+            self.save()
+            if errors:
+                self._msg('Bazı alanlar uygulanamadı: ' + '; '.join(errors))
+            else:
                 self._msg('Tüm gelişmiş ayarlar uygulandı.')
-            except Exception as e:
-                self._msg(f'[GUI] apply_core hatası: {e}')
         def start(self):
             if getattr(self, "thr", None) and self.thr.is_alive(): self._msg("Zaten çalışıyor."); return
             self.apply_core()
@@ -4747,16 +5027,26 @@ def _MERDIVEN_RUN_GUI():
                             self.v[k].set(str(val))
                     except:
                         pass
-            # advanced → modüle uygula
-            for name, raw in (j.get("advanced", {}) or {}).items():
-                try:
-                    import ast
+            cfg = apply_persisted_globals(j)
+            try:
+                globals()['_GLOBAL_PATCH_CFG'] = cfg
+            except Exception:
+                pass
+            legacy_adv = (j.get("advanced", {}) or {})
+            globals_section = (cfg.get('globals') if isinstance(cfg, dict) else {}) or {}
+            if legacy_adv and not globals_section:
+                for name, raw in legacy_adv.items():
+                    field = _CONFIG_REGISTRY.get_field(name)
+                    if field is None:
+                        continue
                     try:
-                        val = ast.literal_eval(raw)
-                    except:
-                        val = raw
-                    setattr(m, name, val)
-                except:
+                        value = field.normalize(raw)
+                        field.apply(value, m)
+                    except Exception:
+                        continue
+                try:
+                    persist_current_globals(cfg)
+                except Exception:
                     pass
             self._build_adv()
 
@@ -4798,32 +5088,31 @@ def _MERDIVEN_RUN_GUI():
                 pass
 
         def save(self):
-            import json, os
+            import json
             path = self._cfg()
-            data = {"gui": {}, "advanced": {}}
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if not isinstance(data, dict): data={"gui":{},"advanced":{}}
-                if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"]={}
-                if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"]={}
+                if not isinstance(data, dict):
+                    data = {}
             except Exception:
-                data = {"gui": {}, "advanced": {}}
+                data = {}
+            data.setdefault("gui", {})
+            data.setdefault("advanced", {})
             for k, var in self.v.items():
-                try: data["gui"][k] = var.get()
-                except Exception: pass
-            adv = data.get("advanced")
-            if not isinstance(adv, dict): adv={}
-            data["advanced"] = adv
-            for name, var in self.adv_rows:
-                try: adv[name] = var.get()
-                except Exception: pass
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-            self._msg(f"Ayarlar kaydedildi: {path}")
+                try:
+                    data["gui"][k] = var.get()
+                except Exception:
+                    pass
+            for field, var in getattr(self, 'adv_rows', []):
+                try:
+                    data["advanced"][field.name] = var.get()
+                except Exception:
+                    pass
             self.apply_core()
+            _normalize_micro_settings()
+            persist_current_globals(data)
+            self._msg(f"Ayarlar kaydedildi: {path}")
 
 
         def _tick(self):
