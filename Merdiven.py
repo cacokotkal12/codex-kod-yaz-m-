@@ -4878,7 +4878,16 @@ def _MERDIVEN_RUN_GUI():
 
         # ---- Gelişmiş alan listesi ----
         def _is_editable(self, name, val):
-            return name.isupper() and (not name.startswith("_")) and isinstance(val, (int, float, bool, str))
+            if name.startswith("_"):
+                return False
+            if callable(val):
+                return False
+            import types
+            if isinstance(val, types.ModuleType):
+                return False
+            if isinstance(val, (int, float, bool, str, list, tuple, dict, set, type(None))):
+                return True
+            return False
 
         def _adv_items(self):
             items = []
