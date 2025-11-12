@@ -67,8 +67,7 @@ def _read_y_now():
 # [PATCH_Y_LOCK_END]
 
 import time, re, os, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, random, \
-    sys, atexit, traceback, logging
-from collections import OrderedDict
+    sys, atexit, traceback, logging, functools
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -95,6 +94,20 @@ def PERSIST_PATH(name):
     base = os.path.join(os.getenv('APPDATA') or os.path.expanduser('~'), 'Merdiven')
     os.makedirs(base, exist_ok=True)
     return os.path.join(base, name)
+
+
+def _MERDIVEN_CFG_PATH():
+    """Ayar dosyası için tekil ve yazılabilir yol döndür."""
+    import os
+    try:
+        path = PERSIST_PATH('merdiven_config.json')
+    except Exception:
+        path = os.path.join(os.path.expanduser('~'), 'merdiven_config.json')
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    return path
 
 
 try:
@@ -139,6 +152,38 @@ _logger.addHandler(_handler)
 def log(msg, lvl="info"): getattr(_logger, lvl, _logger.info)(msg)
 
 
+_ORIG_SLEEP = time.sleep
+_KEYBOARD_IS_PRESSED_ORIG = getattr(keyboard, "is_pressed", None)
+
+
+def _abort_requested() -> bool:
+    if globals().get("GUI_ABORT", False):
+        return True
+    if _KEYBOARD_IS_PRESSED_ORIG is not None:
+        try:
+            if _KEYBOARD_IS_PRESSED_ORIG("f12"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _sleep_abortable(seconds: float):
+    if seconds <= 0:
+        return _ORIG_SLEEP(seconds)
+    end = time.time() + float(seconds)
+    while True:
+        if _abort_requested():
+            break
+        remaining = end - time.time()
+        if remaining <= 0:
+            break
+        _ORIG_SLEEP(remaining if remaining < 0.12 else 0.12)
+
+
+time.sleep = _sleep_abortable
+
+
 def _grab_full_bgr():
     try:
         if mss is not None:
@@ -150,6 +195,15 @@ def _grab_full_bgr():
         pass
     im = ImageGrab.grab();
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
+
+
+class GUIAbort(RuntimeError):
+    """GUI'den gelen anlık durdurma isteği."""
+
+
+def _raise_gui_abort(msg: str = "GUI durdurma isteği"):
+    exc = globals().get("GUIAbort", GUIAbort)
+    raise exc(msg)
 
 
 def dump_crash(e: Exception, stage: str = "UNKNOWN"):
@@ -167,9 +221,12 @@ def dump_crash(e: Exception, stage: str = "UNKNOWN"):
 
 def crashguard(stage=""):
     def deco(fn):
+        @functools.wraps(fn)
         def wrap(*a, **kw):
             try:
                 return fn(*a, **kw)
+            except GUIAbort:
+                raise
             except Exception as e:
                 dump_crash(e, stage or fn.__name__); raise
 
@@ -187,6 +244,8 @@ def with_retry(name="", attempts=4, delay=0.6):
                     if r not in (None, False):
                         if i > 1: log(f"[RETRY] {name or fn.__name__} deneme={i} OK", "warning")
                         return r
+                except GUIAbort:
+                    raise
                 except Exception as e:
                     log(f"[RETRY] {name or fn.__name__} hata={e} deneme={i}", "warning")
                 time.sleep(delay)
@@ -202,234 +261,107 @@ def with_retry(name="", attempts=4, delay=0.6):
 def _bye(): log("[EXIT] program sonlandı")
 
 
-# ============================== AYAR GRUPLARI ALTYAPISI ==============================
-class ConfigGroup:
-    """Konfigürasyon değişkenlerini mantıksal başlıklar altında toplar."""
-
-    __slots__ = ("title", "defaults")
-
-    def __init__(self, title: str, **values):
-        self.title = title
-        self.defaults = OrderedDict(values)
-
-    def apply(self):
-        g = globals()
-        for key, value in list(self.defaults.items()):
-            resolved = value() if callable(value) else value
-            self.defaults[key] = resolved
-            g[key] = resolved
-
-    def current_items(self):
-        g = globals()
-        for key in self.defaults:
-            yield key, g.get(key)
-
-
-CONFIG_GROUPS = OrderedDict()
-
-
-def register_group(name: str, title: str, **values) -> ConfigGroup:
-    """Grubu kaydedip değerleri global değişkenlere yazar."""
-
-    group = ConfigGroup(title, **values)
-    group.apply()
-    CONFIG_GROUPS[name] = group
-    return group
-
-
-def iter_config_groups():
-    """Gruplanmış ayarları (ad, başlık, güncel değerler) şeklinde döndür."""
-
-    for key, group in CONFIG_GROUPS.items():
-        yield key, group.title, list(group.current_items())
-
-
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
-register_group(
-    "input",
-    "Hız / Tıklama / Jitter",
-    tus_hizi=0.050,
-    mouse_hizi=0.1,
-    jitter_px=0,
-)
+tus_hizi = 0.050;
+mouse_hizi = 0.1;
+jitter_px = 0
 # ---- OCR / Tesseract ----
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
 # ---- Watchdog ----
-register_group(
-    "watchdog",
-    "Watchdog",
-    WATCHDOG_TIMEOUT=120,
-    F_WAIT_TIMEOUT_SECONDS=30.0,
-)
+WATCHDOG_TIMEOUT = 120;
+F_WAIT_TIMEOUT_SECONDS = 30.0
 # ---- Banka +8 otomatik başlatma ----
-register_group(
-    "bank_auto",
-    "Banka +8 otomatik başlatma",
-    AUTO_BANK_PLUS8=True,  # True: 30 sn sonra otomatik +8 döngüsüne gir
-    AUTO_BANK_PLUS8_DELAY=30.0,  # saniye; istersen değeri değiştir
-)
+AUTO_BANK_PLUS8 = True  # True: 30 sn sonra otomatik +8 döngüsüne gir
+AUTO_BANK_PLUS8_DELAY = 30.0  # saniye; istersen değeri değiştir
 # ---- Merdiven Başlangıç Koord. ----
-register_group(
-    "stairs",
-    "Merdiven Başlangıç Koord.",
-    VALID_X_LEFT={811, 812, 813},
-    VALID_X_RIGHT={819, 820, 821},
-    VALID_X=lambda: globals()["VALID_X_LEFT"] | globals()["VALID_X_RIGHT"],
-    STOP_Y={598},
-    STAIRS_TOP_Y=598,
-)
+VALID_X_LEFT = {811, 812, 813};
+VALID_X_RIGHT = {819, 820, 821};
+VALID_X = VALID_X_LEFT | VALID_X_RIGHT
+STOP_Y = {598};
+STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
-register_group(
-    "inventory",
-    "Envanter / Banka Grid",
-    INV_LEFT=664,
-    INV_TOP=449,
-    INV_RIGHT=1007,
-    INV_BOTTOM=644,
-    UPG_INV_LEFT=650,
-    UPG_INV_TOP=434,
-    UPG_INV_RIGHT=996,
-    UPG_INV_BOTTOM=632,
-    BANK_INV_LEFT=648,
-    BANK_INV_TOP=423,
-    BANK_INV_RIGHT=996,
-    BANK_INV_BOTTOM=621,
-    SLOT_COLS=7,
-    SLOT_ROWS=4,
-)
+INV_LEFT, INV_TOP, INV_RIGHT, INV_BOTTOM = 664, 449, 1007, 644
+UPG_INV_LEFT, UPG_INV_TOP, UPG_INV_RIGHT, UPG_INV_BOTTOM = 650, 434, 996, 632
+BANK_INV_LEFT, BANK_INV_TOP, BANK_INV_RIGHT, BANK_INV_BOTTOM = 648, 423, 996, 621
+SLOT_COLS, SLOT_ROWS = 7, 4
 # ---- Banka Sağ Üst Panel (6x4) ----
-register_group(
-    "bank_panel",
-    "Banka Sağ Üst Panel",
-    BANK_PANEL_LEFT=665,
-    BANK_PANEL_TOP=156,
-    BANK_PANEL_RIGHT=980,
-    BANK_PANEL_BOTTOM=363,
-    BANK_PANEL_COLS=6,
-    BANK_PANEL_ROWS=4,
-)
+BANK_PANEL_LEFT, BANK_PANEL_TOP, BANK_PANEL_RIGHT, BANK_PANEL_BOTTOM = 665, 156, 980, 363
+BANK_PANEL_COLS, BANK_PANEL_ROWS = 6, 4
 # ---- Boş Slot Tespiti ----
-register_group(
-    "empty_slot",
-    "Boş Slot Tespiti",
-    EMPTY_SLOT_TEMPLATE_PATH="empty_slot.png",
-    EMPTY_SLOT_MATCH_THRESHOLD=0.85,
-    FALLBACK_MEAN_THRESHOLD=55.0,
-    FALLBACK_EDGE_DENSITY_THRESHOLD=0.030,
-    EMPTY_SLOT_THRESHOLD=24,
-    DEBUG_SAVE=False,
-)
+EMPTY_SLOT_TEMPLATE_PATH = "empty_slot.png"
+EMPTY_SLOT_MATCH_THRESHOLD = 0.85;
+FALLBACK_MEAN_THRESHOLD = 55.0;
+FALLBACK_EDGE_DENSITY_THRESHOLD = 0.030
+EMPTY_SLOT_THRESHOLD = 24;
+DEBUG_SAVE = False
 # ---- UPG / Basma Param. ----
-register_group(
-    "upgrade",
-    "UPG / Basma Param.",
-    BASMA_HAKKI=31,
-    SCROLL_POS=(671, 459),
-    UPGRADE_BTN_POS=(747, 358),
-    CONFIRM_BTN_POS=(737, 479),
-    UPG_STEP_DELAY=0.05,
-    SCROLL_FIND_ROI_W=128,
-    SCROLL_FIND_ROI_H=128,
-)
+BASMA_HAKKI = 31
+SCROLL_POS = (671, 459);
+UPGRADE_BTN_POS = (747, 358);
+CONFIRM_BTN_POS = (737, 479)
+UPG_STEP_DELAY = 0.05
+SCROLL_FIND_ROI_W = 128;
+SCROLL_FIND_ROI_H = 128
 # ---- Anvil/Scroll Yeniden Açma ----
-register_group(
-    "scroll_panel",
-    "Anvil/Scroll Yeniden Açma",
-    SCROLL_PANEL_REOPEN_MAX=10,
-    SCROLL_PANEL_REOPEN_DELAY=0.1,
-)
+SCROLL_PANEL_REOPEN_MAX = 10;
+SCROLL_PANEL_REOPEN_DELAY = 0.1
 # ---- Scroll Alma Ayarları ----
-register_group(
-    "scroll_purchase",
-    "Scroll Alma Ayarları",
-    SCROLL_ALIM_ADET=3000,
-    SCROLL_MID_ALIM_ADET=199,
-    SCROLL_VENDOR_MID_POS=(737, 233),
-)
+SCROLL_ALIM_ADET = 3000;
+SCROLL_MID_ALIM_ADET = 199;
+SCROLL_VENDOR_MID_POS = (737, 233)
 # ---- NPC / Storage ----
-register_group(
-    "npc_storage",
-    "NPC / Storage",
-    TARGET_NPC_X=768,
-    TARGET_Y_AFTER_TURN=648,
-    NPC_CONTEXT_RIGHTCLICK_POS=(535, 520),
-    NPC_OPEN_TEXT_TEMPLATE_PATH="npc_acma.png",
-    NPC_OPEN_MATCH_THRESHOLD=0.68,
-    NPC_OPEN_FIND_TIMEOUT=5.0,
-    NPC_OPEN_SCALES=(0.85, 0.9, 1.0, 1.1, 1.2),
-    USE_STORAGE_TEMPLATE_PATHS=["use_storage.png", "use_stroge.png"],
-    USE_STORAGE_MATCH_THRESHOLD=0.78,
-    USE_STORAGE_FIND_TIMEOUT=6.0,
-    USE_STORAGE_SCALES=(0.85, 0.9, 1.0, 1.1, 1.2),
-)
+TARGET_NPC_X = 768;
+TARGET_Y_AFTER_TURN = 648
+NPC_CONTEXT_RIGHTCLICK_POS = (535, 520)
+NPC_OPEN_TEXT_TEMPLATE_PATH = "npc_acma.png";
+NPC_OPEN_MATCH_THRESHOLD = 0.68;
+NPC_OPEN_FIND_TIMEOUT = 5.0
+NPC_OPEN_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
+USE_STORAGE_TEMPLATE_PATHS = ["use_storage.png", "use_stroge.png"];
+USE_STORAGE_MATCH_THRESHOLD = 0.78;
+USE_STORAGE_FIND_TIMEOUT = 6.0
+USE_STORAGE_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
 # ---- Banka Sayfa Düğmeleri ----
-register_group(
-    "bank_nav",
-    "Banka Sayfa Düğmeleri",
-    BANK_NEXT_PAGE_POS=(731, 389),
-    BANK_PREV_PAGE_POS=(668, 389),
-    BANK_PAGE_CLICK_DELAY=0.12,
-)
+BANK_NEXT_PAGE_POS = (731, 389);
+BANK_PREV_PAGE_POS = (668, 389);
+BANK_PAGE_CLICK_DELAY = 0.12
 # ---- Game Start (Launcher sonrası) ----
-register_group(
-    "game_start",
-    "Game Start (Launcher sonrası)",
-    GAME_START_TEMPLATE_PATH="oyun_start.png",
-    GAME_START_MATCH_THRESHOLD=0.70,
-    GAME_START_FIND_TIMEOUT=8.0,
-    GAME_START_SCALES=(0.85, 0.9, 1.0, 1.1, 1.2),
-    TEMPLATE_EXTRA_CLICK_POS=(931, 602),
-)
+GAME_START_TEMPLATE_PATH = "oyun_start.png";
+GAME_START_MATCH_THRESHOLD = 0.70;
+GAME_START_FIND_TIMEOUT = 8.0;
+GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
+TEMPLATE_EXTRA_CLICK_POS = (931, 602)
 # ---- Launcher ----
-register_group(
-    "launcher",
-    "Launcher",
-    LAUNCHER_EXE=r"C:\\NTTGame\\KnightOnlineEn\\Launcher.exe",
-    LAUNCHER_START_CLICK_POS=(974, 726),
-    WINDOW_TITLE_KEYWORD="Knight Online",
-    WINDOW_APPEAR_TIMEOUT=120.0,
-)
+LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
+LAUNCHER_START_CLICK_POS = (974, 726)
+WINDOW_TITLE_KEYWORD = "Knight Online";
+WINDOW_APPEAR_TIMEOUT = 120.0
 # ---- Login Bilgileri ve Tıklama Koord. ----
-register_group(
-    "login",
-    "Oyuna giriş",
-    LOGIN_USERNAME=lambda: os.getenv("KO_USER", "cacokotkal12"),
-    LOGIN_PASSWORD=lambda: os.getenv("KO_PASS", "Vaz14999999jS@1"),
-    LOGIN_USERNAME_CLICK_POS=(579, 326),
-    LOGIN_PASSWORD_CLICK_POS=(579, 378),
-    SERVER_OPEN_POS=(455, 231),
-    SERVER_CHOICES=[(671, 254), (676, 281)],
-)
+LOGIN_USERNAME = os.getenv("KO_USER", "cacokotkal12");
+LOGIN_PASSWORD = os.getenv("KO_PASS", "Vaz14999999jS@1")
+# Bu alanları kendi ekranına göre ayarla (gerekirse TAB ile de ilerliyor):
+LOGIN_USERNAME_CLICK_POS = (579, 326)  # kullanıcı adı alanı
+LOGIN_PASSWORD_CLICK_POS = (579, 378)  # şifre alanı
+SERVER_OPEN_POS = (455, 231)  # server list drop-down
+SERVER_CHOICES = [(671, 254), (676, 281)]  # listeden seçimlerden biri
 # ---- HP Bar / In-Game Teyit ----
-register_group(
-    "ingame_hp",
-    "HP Bar / In-Game Teyit",
-    HP_POINTS=[(185, 68), (218, 74)],
-    HP_RED_MIN=120.0,
-    HP_RED_DELTA=35.0,
-)
+HP_POINTS = [(185, 68), (218, 74)];
+HP_RED_MIN = 120.0;
+HP_RED_DELTA = 35.0
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
-register_group(
-    "precision",
-    "Hassas X hedefi",
-    X_TOLERANCE=1,  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
-    X_BAND_CONSEC=2,  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-    X_TOL_READ_DELAY=0.02,  # X okuma aralığı (sn)
-    X_TOL_TIMEOUT=20.0,  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
-)
+X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
+X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
+X_TOL_READ_DELAY = 0.02  # X okuma aralığı (sn)
+X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
-register_group(
-    "micro_steps",
-    "598→597 Mikro ayar",
-    PRESS_MIN=0.035,  # S/W mikro basış minimum (sn)
-    PRESS_MAX=0.090,  # S/W mikro basış maksimum (sn)
-    MAX_STEPS=400,  # 598→597 düzeltmede en fazla adım
-    STUCK_TIMEOUT=10,  # (sn) değişim olmazsa güvenlik bırakma
-)
+PRESS_MIN = 0.035  # S/W mikro basış minimum (sn)
+PRESS_MAX = 0.090  # S/W mikro basış maksimum (sn)
+MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
+STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
 try:
     # süreleri makul aralığa kırp
@@ -446,88 +378,43 @@ try:
 except Exception as _e:
     print('[MikroAdim] sabit denetimi uyarı:', _e)
 
-register_group(
-    "micro_control",
-    "Mikro adım kontrol",
-    PRE_BRAKE_DELTA=2,
-    MICRO_PULSE_DURATION=0.100,
-    MICRO_READ_DELAY=0.015,
-    TARGET_STABLE_HITS=10,
-)
+PRE_BRAKE_DELTA = 2;
+MICRO_PULSE_DURATION = 0.100;
+MICRO_READ_DELAY = 0.015;
+TARGET_STABLE_HITS = 10
 # ---- Yürüme / Dönüş ----
-register_group(
-    "movement",
-    "Yürüme / Dönüş",
-    NPC_GIDIS_SURESI=5.0,
-    NPC_SEEK_TIMEOUT=20.0,
-    Y_SEEK_TIMEOUT=20.0,
-    TURN_LEFT_SEC=1.443,
-    TURN_RIGHT_SEC=1.44,
-)
-# ---- Anvil ----
-register_group(
-    "anvil",
-    "Anvil",
-    ANVIL_WALK_TIME=2.5,
-    ANVIL_CONFIRM_WAIT_MS=45,
-    ANVIL_HOVER_CLEAR_SEC=0.035,
-    ANVIL_HOVER_GUARD=True,
-    ANVIL_MOUSE_PARK_POS=(5, 5),
-)
+ANVIL_WALK_TIME = 2.5;
+NPC_GIDIS_SURESI = 5.0;
+NPC_SEEK_TIMEOUT = 20.0;
+Y_SEEK_TIMEOUT = 20.0
+TURN_LEFT_SEC = 1.443;
+TURN_RIGHT_SEC = 1.44
 # ---- Town ----
-register_group(
-    "town",
-    "Town",
-    TOWN_CLICK_POS=(775, 775),
-    TOWN_WAIT=2.5,
-)
+TOWN_CLICK_POS = (775, 775);
+TOWN_WAIT = 2.5
 # ---- Splash/Login yardımcı tık ----
-register_group(
-    "splash",
-    "Splash/Login yardımcı tık",
-    SPLASH_CLICK_POS=(700, 550),
-)
+SPLASH_CLICK_POS = (700, 550)
 # ---- Tooltip OCR
-register_group(
-    "tooltip",
-    "Tooltip OCR",
-    HOVER_WAIT_INV=0.080,
-    HOVER_WAIT_BANK=0.20,
-    TOOLTIP_ROI_W=640,
-    TOOLTIP_ROI_H=480,
-    TOOLTIP_OFFSET_Y=40,
-    TOOLTIP_FALLBACK_BBOX=(290, 95, 1007, 662),
-)
+
+HOVER_WAIT_INV = 0.080;
+HOVER_WAIT_BANK = 0.20;
+TOOLTIP_ROI_W, TOOLTIP_ROI_H = 640, 480;
+TOOLTIP_OFFSET_Y = 40;
+TOOLTIP_FALLBACK_BBOX = (290, 95, 1007, 662)
 # ---- +N (7/8) Şablon Yolları ----
-register_group(
-    "plus_templates",
-    "+N (7/8) Şablon Yolları",
-    PLUS7_TEMPLATE_PATHS=["plus7.png", "plus7_var2.png"],
-    PLUS8_TEMPLATE_PATHS=["plus8.png"],
-)
-# ---- Scroll Takası Şablon & Ayarları ----
-register_group(
-    "scroll_swap",
-    "Scroll Takası",
-    SCROLL_LOW_TEMPLATE_PATHS=["scroll_low.png", "scroll_low2.png"],
-    SCROLL_MID_TEMPLATE_PATHS=["scroll_mid.png", "scroll_mid2.png"],
-    SCROLL_MATCH_THRESHOLD=0.70,
-    SCROLL_SCALES=(0.80, 0.90, 1.00, 1.10, 1.20),
-    SCROLL_SWAP_MAX_STACKS=8,
-)
+PLUS7_TEMPLATE_PATHS = ["plus7.png", "plus7_var2.png"];
+PLUS8_TEMPLATE_PATHS = ["plus8.png"]
+# ---- Scroll Takası Şablon & Ayarlcacokotkal12 ar ----
+SCROLL_LOW_TEMPLATE_PATHS = ["scroll_low.png", "scroll_low2.png"]
+SCROLL_MID_TEMPLATE_PATHS = ["scroll_mid.png", "scroll_mid2.png"]
+SCROLL_MATCH_THRESHOLD = 0.70;
+SCROLL_SCALES = (0.80, 0.90, 1.00, 1.10, 1.20);
+SCROLL_SWAP_MAX_STACKS = 8
 # ---- Scroll arama (sabit nokta yerine tüm UPG/INV içinde) ----
-register_group(
-    "scroll_search",
-    "Scroll arama",
-    SCROLL_SEARCH_ANYWHERE=True,  # True: scroll'u UPG/INV içinde her yerde ara
-    SCROLL_SEARCH_REGIONS=("UPG", "INV"),  # istersen ("UPG", "INV") yapabilirsin
-)
+SCROLL_SEARCH_ANYWHERE = True  # True: scroll'u UPG/INV içinde her yerde ara
+SCROLL_SEARCH_REGIONS = ("UPG", "INV")  # istersen ("UPG", "INV") yapabilirsin
 # ================== AYAR (en üste, diğer sabitlerin yanına) ==================
-register_group(
-    "timeouts",
-    "Zaman aşımı davranışları",
-    ON_TEMPLATE_TIMEOUT_RESTART=True,  # True: npc_acma.png vb. zaman aşımında town yerine oyunu kapatıp yeniden başlat
-)
+ON_TEMPLATE_TIMEOUT_RESTART = True  # True: npc_acma.png vb. zaman aşımında town yerine oyunu kapatıp yeniden başlat
 
 
 def find_scroll_pos_anywhere(required: str, regions=SCROLL_SEARCH_REGIONS):
@@ -571,41 +458,22 @@ def click_scroll_anywhere(required: str, regions=SCROLL_SEARCH_REGIONS) -> bool:
 
 
 # ---- NPC'den alış şablonu ----
-register_group(
-    "npc_buy",
-    "NPC'den alış",
-    NPC_BUY_STEPS=[
-        ((687, 237), 2, "right"),
-        ((737, 237), 2, "right"),
-        ((787, 237), 3, "right"),
-        ((837, 237), 3, "right"),
-        ((887, 237), 4, "right"),
-        ((912, 498), 1, "left"),
-        ((729, 584), 1, "left"),
-    ],
-    NPC_BUY_TURN_COUNT=2,
-    NPC_MENU_PAGE2_POS=(968, 328),
-)
+NPC_BUY_STEPS = [((687, 237), 2, "right"), ((737, 237), 2, "right"), ((787, 237), 3, "right"), ((837, 237), 3, "right"),
+                 ((887, 237), 4, "right"), ((912, 498), 1, "left"), ((729, 584), 1, "left")]
+NPC_BUY_TURN_COUNT = 2;
+NPC_MENU_PAGE2_POS = (968, 328)
 # ---- NPC sonrası Anvil rotası ----
-register_group(
-    "npc_postbuy",
-    "NPC sonrası Anvil rotası",
-    NPC_POSTBUY_FIRST_A_DURATION=3.1,
-    NPC_POSTBUY_TARGET_X1=795,
-    NPC_POSTBUY_A_WHILE_W_DURATION=0.08,
-    NPC_POSTBUY_TARGET_X2=814,
-    NPC_POSTBUY_SECOND_A_DURATION=1.4,
-    NPC_POSTBUY_FINAL_W_DURATION=4.0,
-    NPC_POSTBUY_SEEK_TIMEOUT=20.0,
-)
+NPC_POSTBUY_FIRST_A_DURATION = 3.1;
+NPC_POSTBUY_TARGET_X1 = 795;
+NPC_POSTBUY_A_WHILE_W_DURATION = 0.08;
+NPC_POSTBUY_TARGET_X2 = 814
+NPC_POSTBUY_SECOND_A_DURATION = 1.4;
+NPC_POSTBUY_FINAL_W_DURATION = 4.0;
+NPC_POSTBUY_SEEK_TIMEOUT = 20.0
 # ---- +7 taraması tur planı ----
-register_group(
-    "plus7_cycle",
-    "+7 taraması tur planı",
-    PLUS7_START_FROM_TURN_AFTER_PURCHASE=4,
-    GLOBAL_CYCLE=1,
-    NEXT_PLUS7_CHECK_AT=1,
-)
+PLUS7_START_FROM_TURN_AFTER_PURCHASE = 4;
+GLOBAL_CYCLE = 1;
+NEXT_PLUS7_CHECK_AT = 1
 # ---- NPC Onay (shop kimliği) ----
 NPC_CONFIRM_TEMPLATE_PATH = "npc_onay.png";
 NPC_CONFIRM_RECT = (713, 51, 911, 84);
@@ -738,6 +606,8 @@ def set_stage(name: str):
 
 def watchdog_enforce():
     global _stage_enter_ts
+    if _abort_requested():
+        raise GUIAbort("GUI durdurma isteği")
     if bool(ctypes.windll.user32.GetKeyState(0x14) & 1): _stage_enter_ts = time.time(); return
     if (time.time() - _stage_enter_ts) > WATCHDOG_TIMEOUT: raise WatchdogTimeout(
         f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
@@ -800,14 +670,20 @@ def is_capslock_on(): return bool(ctypes.windll.user32.GetKeyState(VK_CAPITAL) &
 def wait_if_paused():
     told = False
     while is_capslock_on():
+        if _abort_requested():
+            _raise_gui_abort()
         if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
-        time.sleep(0.1);
+        _ORIG_SLEEP(0.1);
         watchdog_enforce()
+    if _abort_requested():
+        _raise_gui_abort()
+    return True
 
 
 def pause_point():
-    wait_if_paused();
-    if _kb_pressed('f12'): return False
+    wait_if_paused()
+    if _abort_requested():
+        _raise_gui_abort()
     return True
 
 
@@ -1501,131 +1377,53 @@ def wait_for_required_scroll(required: str) -> bool:
 
 
 # ================== LOW/MID Scroll Alma Stage ==================
-def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
-    print(f"[SCROLL] LOW alma stage, hedef adet={adet}")
+def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos=(535, 520)):
+    print(f"{prefix} alma stage, hedef adet={adet}")
 
-    # 0) Temiz başlat: oyundan çık + yeniden gir
     try:
         if w is not None:
             exit_game_fast(w)
     except Exception:
         pass
+
     w = relaunch_and_login_to_ingame()
     if not w:
-        print("[SCROLL] Relaunch başarısız.");
+        print(f"{prefix} Relaunch başarısız.")
         return False
 
-    # 1) X=812 olana dek town
     ensure_ui_closed()
-    globals()['TOWN_HARD_LOCK'] = False
-    _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_low_stage).')
     tries = 0
     while True:
-        wait_if_paused();
+        wait_if_paused()
         watchdog_enforce()
-        town_ok = send_town_command();
-        if town_ok is False and globals().get('TOWN_HARD_LOCK', False):
-            globals()['TOWN_HARD_LOCK'] = False
-            _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_low_stage_loop).')
-            time.sleep(0.1)
-            continue
+        send_town_command()
         time.sleep(0.2)
         x, _y = read_coordinates(w)
         if x == 812:
-            print("[SCROLL] X=812 yakalandı.");
-            break
-        tries += 1
-        if tries >= 25:  # güvenlik: sonsuza gitmesin
-            print("[SCROLL] X=812 yakalanamadı (25 deneme). VALID_X hizasına geçiliyor.")
-            town_until_valid_x(w)  # 811/812/813’ten biri
-            break
-
-    # 2) W ile merdiven → Y=605
-    go_w_to_y(w, 605, timeout=20.0)
-
-    # 3) Vendor’dan adet girip onayla
-    press_key(SC_B);
-    release_key(SC_B);
-    time.sleep(0.2)
-    mouse_move(535, 520);
-    mouse_click("right");
-    time.sleep(0.3)
-    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH,
-                            threshold=NPC_OPEN_MATCH_THRESHOLD,
-                            timeout=NPC_OPEN_FIND_TIMEOUT,
-                            scales=NPC_OPEN_SCALES)
-    mouse_move(737, 183);
-    mouse_click("right");
-    time.sleep(0.2)
-    for ch in str(adet): keyboard.write(ch); time.sleep(0.05)
-    mouse_move(764, 381);
-    mouse_click("left");
-    time.sleep(0.2)
-    mouse_move(905, 486);
-    mouse_click("left");
-    time.sleep(0.2)
-    mouse_move(722, 582);
-    mouse_click("left");
-    time.sleep(0.3)
-
-    print("[SCROLL] LOW alındı → çıkış")
-    exit_game_fast(w)
-    return True
-
-
-def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
-    print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
-    # 0) Temiz başlangıç: oyundan çık ve yeniden gir
-    try:
-        if w is not None:
-            exit_game_fast(w)
-    except Exception:
-        pass
-    w = relaunch_and_login_to_ingame()
-    if not w:
-        print("[SCROLL][MID] Relaunch başarısız.");
-        return False
-
-    # 1) X=812 olana kadar town ile hizalan
-    ensure_ui_closed()
-    globals()['TOWN_HARD_LOCK'] = False
-    _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_mid_stage).')
-    tries = 0
-    while True:
-        wait_if_paused();
-        watchdog_enforce();
-        town_ok = send_town_command();
-        if town_ok is False and globals().get('TOWN_HARD_LOCK', False):
-            globals()['TOWN_HARD_LOCK'] = False
-            _town_log_once('[TOWN] HardLock manuel kapatıldı (scroll_mid_stage_loop).')
-            time.sleep(0.1)
-            continue
-        time.sleep(0.2)
-        x, _y = read_coordinates(w)
-        if x == 812:
-            print("[SCROLL][MID] X=812 yakalandı.");
+            print(f"{prefix} X=812 yakalandı.")
             break
         tries += 1
         if tries >= 25:
-            print("[SCROLL][MID] X=812 yakalanamadı (25 deneme). VALID_X hizasına geçiliyor.")
+            print(f"{prefix} X=812 yakalanamadı (25 deneme). VALID_X hizasına geçiliyor.")
             town_until_valid_x(w)
             break
 
-    # 2) W ile merdiven → Y=605
     go_w_to_y(w, 605, timeout=20.0)
 
-    # 3) NPC'den scroll satın al
-    press_key(SC_B);
-    release_key(SC_B);
+    press_key(SC_B)
+    release_key(SC_B)
     time.sleep(0.2)
-    mouse_move(535, 520)
+    mouse_move(*npc_pos)
     mouse_click("right")
     time.sleep(0.3)
-    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH,
-                            threshold=NPC_OPEN_MATCH_THRESHOLD,
-                            timeout=NPC_OPEN_FIND_TIMEOUT,
-                            scales=NPC_OPEN_SCALES)
-    mouse_move(*SCROLL_VENDOR_MID_POS)
+    wait_and_click_template(
+        w,
+        NPC_OPEN_TEXT_TEMPLATE_PATH,
+        threshold=NPC_OPEN_MATCH_THRESHOLD,
+        timeout=NPC_OPEN_FIND_TIMEOUT,
+        scales=NPC_OPEN_SCALES,
+    )
+    mouse_move(*vendor_pos)
     mouse_click("right")
     time.sleep(0.2)
     for ch in str(adet):
@@ -1641,8 +1439,63 @@ def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
     mouse_click("left")
     time.sleep(0.3)
 
-    print("[SCROLL][MID] alındı → çıkış")
+    print(f"{prefix} alındı → çıkış")
     exit_game_fast(w)
+    return True
+
+
+def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
+    return _run_scroll_purchase_flow(w, adet, (737, 183), prefix="[SCROLL] LOW")
+
+
+def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
+
+
+def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    """Orta seviye kaydırma (mid scroll) stoğunu NPC'den yeniden doldurur."""
+
+    print(f"[SCROLL][MID] alma stage, hedef adet={adet}")
+    # "SCROLL_BUY_MID" sahne etiketi GUI'de kullanıcıya "Orta Scroll Satın Alma"
+    # adımının başladığını gösterir. Böylece makro orta seviye kağıtları toplamaya
+    # geçtiğinde hangi aşamada olduğunu Türkçe anlatımla takip edebilirsiniz.
+    set_stage("SCROLL_BUY_MID");
+    if not _is_window_valid(w):
+        w = bring_game_window_to_front();
+        if not _is_window_valid(w):
+            print("[SCROLL][MID] Oyun penceresi bulunamadı.");
+            return False
+    while True:
+        wait_if_paused();
+        watchdog_enforce();
+        x, _y = read_coordinates(w)
+        if x == 812: break
+        send_town_command();
+        time.sleep(0.5)
+    go_w_to_y(w, 605, timeout=20.0)
+    press_key(SC_B);
+    release_key(SC_B);
+    time.sleep(0.2);
+    mouse_move(535, 520);
+    mouse_click("right");
+    time.sleep(0.3)
+    wait_and_click_template(w, NPC_OPEN_TEXT_TEMPLATE_PATH, threshold=NPC_OPEN_MATCH_THRESHOLD,
+                            timeout=NPC_OPEN_FIND_TIMEOUT, scales=NPC_OPEN_SCALES)
+    mouse_move(*SCROLL_VENDOR_MID_POS);
+    mouse_click("right");
+    time.sleep(0.2)
+    for ch in str(adet): keyboard.write(ch); time.sleep(0.05)
+    mouse_move(764, 381);
+    mouse_click("left");
+    time.sleep(0.2)
+    mouse_move(905, 486);
+    mouse_click("left");
+    time.sleep(0.2)
+    mouse_move(722, 582);
+    mouse_click("left");
+    time.sleep(0.3)
+    print("[SCROLL][MID] alındı → çıkış");
+    exit_game_fast(w);
     return True
 
 
@@ -2812,6 +2665,14 @@ def perform_upgrade_on_slot(col, row, click_region, scroll_required=None, *, win
                     if tries < SCROLL_PANEL_REOPEN_MAX:
                         time.sleep(0.10)
                         continue
+                    if scroll_required == "MID":
+                        # Orta scroll panelini yeniden açma denemeleri tükendi.
+                        # Bu noktada NPC'ye gidip taze orta scroll stoklamak için
+                        # "Orta Scroll Satın Alma" sahnesini çağırıyoruz.
+                        print("[SCROLL] MID arama hakkı bitti → MID satın alma stage’i tetikleniyor.")
+                        scroll_alma_stage_mid(win, adet=SCROLL_MID_ALIM_ADET)
+                        REQUEST_RELAUNCH = True
+                        return "EXIT_LOOP"
                     print(f"[SCROLL] {scroll_required} yok → FALLBACK sabit nokta deneniyor: {SCROLL_POS}")
                     found_xy = SCROLL_POS
 
@@ -3287,93 +3148,97 @@ def main():
     print(f"[AYAR] +7 taraması NPC alışından {PLUS7_START_FROM_TURN_AFTER_PURCHASE}. tur sonra aktif.")
     print(f"[AYAR] Başlangıç: GLOBAL_CYCLE={GLOBAL_CYCLE}, NEXT_PLUS7_CHECK_AT={NEXT_PLUS7_CHECK_AT}")
     if AUTO_SPEED_PROFILE: _apply_profile("BALANCED"); maybe_autotune(True)
-    while True:
-        w = None
-        try:
-            print(">>> AŞAMA 1: Launcher ile başlat");
+    try:
+        while True:
+            w = None
             set_stage("BOOT");
-            w = launch_via_launcher_and_wait()
-            if not w: print("Başlatma başarısız. LAUNCHER_EXE/START koordinatı kontrol."); raise WatchdogTimeout(
-                "Oyun penceresi yok.")
-            with key_tempo(0.5):
-                set_stage("SPLASH_PASS");
-                time.sleep(0.5)
-                for _ in range(2): time.sleep(1.5); mouse_move(*SPLASH_CLICK_POS); mouse_click("left"); time.sleep(0.5)
-                safe_press_enter_if_not_ingame(w);
-                print(">>> Splash geçildi. Login.")
-                set_stage("LOGIN_INPUT");
-                time.sleep(0.5);
-                perform_login_inputs(w);
-                print("[LOGIN] Kimlik bilgileri girildi.")
-                set_stage("SERVER_LIST");
-                time.sleep(0.8)
-                for _ in range(2): mouse_move(*SERVER_OPEN_POS); mouse_click("left"); time.sleep(0.15)
-                print("[SERVER] Server listesi açıldı.")
-                set_stage("SERVER_SELECT");
-                time.sleep(1)
-                server_xy = random.choice(SERVER_CHOICES)
-                for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
-                print(f"[SERVER] Rastgele server: {server_xy}")
-                set_stage("SERVER_POST_SELECT");
-                press_key(SC_ENTER);
-                release_key(SC_ENTER);
-                time.sleep(1.5)
-                ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
-                if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
-                    "oyun_start.png tıklanamadı.")
-                time.sleep(1);
-                press_key(SC_ENTER);
-                release_key(SC_ENTER);
-                time.sleep(1)
-                ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
-                                                  allow_periodic_enter=False)
-                if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
-            set_stage("INGAME_TOWN");
-            ensure_ui_closed();
-            send_town_command();
-            _town_log_once("[TOWN] Bir kez town atıldı.")
-            press_key(SC_O);
-            release_key(SC_O);
-            time.sleep(0.1);
-            _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
-            maybe_autotune(True)
-            set_stage("RUN_WORKFLOW");
-            cycle_done, _purchased = run_stairs_and_workflow(w)
-            if cycle_done:
-                set_stage("CYCLE_EXIT_RESTART");
-                print("[CYCLE] Tur tamamlandı → KO kapatılıp baştan.")
-                try:
-                    exit_game_fast(w)
-                except Exception as e:
-                    print(f"[CYCLE] Çıkış hata: {e}")
-                time.sleep(1.0);
-                GLOBAL_CYCLE += 1;
-                print(f"[CYCLE] Yeni tur: {GLOBAL_CYCLE}. Planlı +7 ≥ {NEXT_PLUS7_CHECK_AT}.");
-                continue
-            else:
-                print("[CYCLE] Tamamlanmadan sonlandı (F12 veya hata).")
-                if _kb_pressed('f12'): print("[CYCLE] F12 tespit edildi, makro çıkıyor."); break
-                print("[RESTART] Hata sonrası temiz başlatma...")
+            try:
+                print(">>> AŞAMA 1: Launcher ile başlat");
+                w = launch_via_launcher_and_wait()
+                if not w:
+                    print("Başlatma başarısız. LAUNCHER_EXE/START koordinatı kontrol.")
+                    raise WatchdogTimeout("Oyun penceresi yok.")
+                with key_tempo(0.5):
+                    set_stage("SPLASH_PASS");
+                    time.sleep(0.5)
+                    for _ in range(2): time.sleep(1.5); mouse_move(*SPLASH_CLICK_POS); mouse_click("left"); time.sleep(0.5)
+                    safe_press_enter_if_not_ingame(w);
+                    print(">>> Splash geçildi. Login.")
+                    set_stage("LOGIN_INPUT");
+                    time.sleep(0.5);
+                    perform_login_inputs(w);
+                    print("[LOGIN] Kimlik bilgileri girildi.")
+                    set_stage("SERVER_LIST");
+                    time.sleep(0.8)
+                    for _ in range(2): mouse_move(*SERVER_OPEN_POS); mouse_click("left"); time.sleep(0.15)
+                    print("[SERVER] Server listesi açıldı.")
+                    set_stage("SERVER_SELECT");
+                    time.sleep(1)
+                    server_xy = random.choice(SERVER_CHOICES)
+                    for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
+                    print(f"[SERVER] Rastgele server: {server_xy}")
+                    set_stage("SERVER_POST_SELECT");
+                    press_key(SC_ENTER);
+                    release_key(SC_ENTER);
+                    time.sleep(1.5)
+                    ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
+                    if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
+                        "oyun_start.png tıklanamadı.")
+                    time.sleep(1);
+                    press_key(SC_ENTER);
+                    release_key(SC_ENTER);
+                    time.sleep(1)
+                    ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
+                                                      allow_periodic_enter=False)
+                    if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
+                set_stage("INGAME_TOWN");
+                ensure_ui_closed();
+                send_town_command();
+                _town_log_once("[TOWN] Bir kez town atıldı.")
+                press_key(SC_O);
+                release_key(SC_O);
+                time.sleep(0.1);
+                _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
+                maybe_autotune(True)
+                set_stage("RUN_WORKFLOW");
+                cycle_done, _purchased = run_stairs_and_workflow(w)
+                if cycle_done:
+                    set_stage("CYCLE_EXIT_RESTART");
+                    print("[CYCLE] Tur tamamlandı → KO kapatılıp baştan.")
+                    try:
+                        exit_game_fast(w)
+                    except Exception as e:
+                        print(f"[CYCLE] Çıkış hata: {e}")
+                    time.sleep(1.0);
+                    GLOBAL_CYCLE += 1;
+                    print(f"[CYCLE] Yeni tur: {GLOBAL_CYCLE}. Planlı +7 ≥ {NEXT_PLUS7_CHECK_AT}.");
+                    continue
+                else:
+                    print("[CYCLE] Tamamlanmadan sonlandı (F12 veya hata).")
+                    if _kb_pressed('f12'): print("[CYCLE] F12 tespit edildi, makro çıkıyor."); break
+                    print("[RESTART] Hata sonrası temiz başlatma...")
+                    try:
+                        if w is not None:
+                            exit_game_fast(w)
+                        else:
+                            close_all_game_instances()
+                    except Exception as e:
+                        print(f"[RESTART] Kapatma hata: {e}")
+                    time.sleep(2.0);
+                    continue
+            except WatchdogTimeout as e:
+                print(f"[WATCHDOG] {e} → Oyun yeniden başlatılıyor...")
                 try:
                     if w is not None:
                         exit_game_fast(w)
                     else:
                         close_all_game_instances()
-                except Exception as e:
-                    print(f"[RESTART] Kapatma hata: {e}")
-                time.sleep(2.0);
+                except Exception as ee:
+                    print(f"[WATCHDOG] Kapatma sırasında hata: {ee}")
+                time.sleep(3.0);
                 continue
-        except WatchdogTimeout as e:
-            print(f"[WATCHDOG] {e} → Oyun yeniden başlatılıyor...")
-            try:
-                if w is not None:
-                    exit_game_fast(w)
-                else:
-                    close_all_game_instances()
-            except Exception as ee:
-                print(f"[WATCHDOG] Kapatma sırasında hata: {ee}")
-            time.sleep(3.0);
-            continue
+    except GUIAbort:
+        print("[MAIN] GUI durdurma isteği alındı; çıkılıyor.")
 
 
 # ===================== MİKRO ADIM DÜZELTME FONKSİYONLARI (v2) =====================
@@ -3599,18 +3464,34 @@ def _check_hotkeys_for_buy_mode():
 
 def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
     told = False
+    abort_fn = globals().get("_abort_requested")
+    AbortExc = globals().get("GUIAbort", GUIAbort)
+
+    def _ensure_not_aborted():
+        if abort_fn and abort_fn():
+            raise AbortExc("GUI durdurma isteği")
+
     try:
-        is_caps = globals().get("is_capslock_on");
+        is_caps = globals().get("is_capslock_on")
         wdog = globals().get("watchdog_enforce")
-        if not is_caps or not wdog: return
+        if not is_caps or not wdog:
+            _ensure_not_aborted()
+            return True
         while is_caps():
-            if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
-            _check_hotkeys_for_buy_mode();
-            time.sleep(0.1);
+            _ensure_not_aborted()
+            if not told:
+                print("[PAUSE] CapsLock AÇIK. Devam için kapat.")
+                told = True
+            _check_hotkeys_for_buy_mode()
+            time.sleep(0.1)
             wdog()
         _check_hotkeys_for_buy_mode()
+        _ensure_not_aborted()
+    except AbortExc:
+        raise
     except Exception:
-        pass
+        _ensure_not_aborted()
+    return True
 
 
 def go_to_npc_from_top(w):  # moda göre sayfa seçimi
@@ -3709,11 +3590,14 @@ from functools import wraps
 
 
 # --- Config yükle/kaydet ---
-def load_config(path='merdiven_config.json', defaults=None):
+def load_config(path=None, defaults=None):
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
     if defaults is None:
         defaults = json.loads(
             r'''{"timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm 7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         if not os.path.exists(path):
             with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
             return defaults
@@ -3734,8 +3618,11 @@ def load_config(path='merdiven_config.json', defaults=None):
         return defaults
 
 
-def save_config(cfg, path='merdiven_config.json'):
+def save_config(cfg, path=None):
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
         return True
@@ -3755,6 +3642,8 @@ def retry_on_exception(retries=2, delay=0.5, allowed_exceptions=(Exception,), ba
                 try:
                     return fn(*a, **k)
                 except allowed_exceptions as e:
+                    if isinstance(e, GUIAbort):
+                        raise
                     if r <= 0: raise
                     time.sleep(d);
                     d *= backoff;
@@ -3959,22 +3848,6 @@ _GLOBAL_PATCH_UTILS = {'load_config': load_config, 'save_config': save_config, '
 # ========================== [ENTEGRE GUI BLOĞU] ==========================
 # Bu blok YAMAİCİN.PY ile otomatik eklendi. Kısa, stabil, tek dosya EXE uyumlu.
 # Başlat/Durdur/Kaydet/Hepsini Kapat + "Gelişmiş" sekmesiyle TÜM büyük harfli değişkenleri düzenler.
-def _MERDIVEN_CFG_PATH():
-    # Config yolu: EXE klasörü; yazılamazsa %APPDATA%\Merdiven
-    import os, sys
-    base = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(
-        os.path.dirname(__file__))
-    p = PERSIST_PATH('merdiven_config.json')
-    try:
-        os.makedirs(base, exist_ok=True)
-        open(p, "a", encoding="utf-8").close()
-        return p
-    except Exception:
-        app = os.path.join(os.getenv("APPDATA") or base, "Merdiven")
-        os.makedirs(app, exist_ok=True)
-        return PERSIST_PATH('merdiven_config.json')
-
-
 _TR = {
     'ANVIL_CONFIRM_WAIT_MS': 'anvil onay bekleme (ms)',
     'ANVIL_HOVER_CLEAR_SEC': 'anvil hover temizleme (sn)',
@@ -4161,85 +4034,297 @@ _TR_HELP.update({
     # … sende olan diğer anahtarlar aynı şekilde devam edecek …
 })
 
-_ADV_GROUP = dict(globals().get('_ADV_GROUP', {}))
-_ADV_GROUP.update({
-    # Kategoriler (filtre için) — mevcut eşleştirmelerin tamamını aynen koru
-    'ANVIL_CONFIRM_WAIT_MS': 'Anvil',
-    'ANVIL_HOVER_CLEAR_SEC': 'Anvil',
-    'ANVIL_HOVER_GUARD': 'Anvil',
-    'ANVIL_WALK_TIME': 'Anvil',
-    'AUTO_BANK_PLUS8': 'Banka',
-    'AUTO_BANK_PLUS8_DELAY': 'Banka',
-    'BANK_OPEN': 'Banka',
-    'BANK_PAGE_CLICK_DELAY': 'Banka',
-    'BANK_PANEL_ROWS': 'Banka',
-    'BANK_PANEL_COLS': 'Banka',
-    'BANK_INV_LEFT': 'Banka',
-    'BANK_INV_TOP': 'Banka',
-    'BANK_INV_RIGHT': 'Banka',
-    'BANK_INV_BOTTOM': 'Banka',
-    'SPEED_PROFILE': 'Hız',
-    'AUTO_SPEED_PROFILE': 'Hız',
-    'AUTO_TUNE_INTERVAL': 'Hız',
-    'PRESS_MIN': 'Hız',
-    'PRESS_MAX': 'Hız',
-    'PRE_BRAKE_DELTA': 'Hız',
-    'ROI_STALE_MS': 'OCR/ROI',
-    'UPG_ROI_STALE_MS': 'OCR/ROI',
-    'EMPTY_SLOT_TEMPLATE_PATH': 'OCR/ROI',
-    'EMPTY_SLOT_MATCH_THRESHOLD': 'OCR/ROI',
-    'FALLBACK_MEAN_THRESHOLD': 'OCR/ROI',
-    'FALLBACK_EDGE_DENSITY_THRESHOLD': 'OCR/ROI',
-    'EMPTY_SLOT_THRESHOLD': 'OCR/ROI',
-    'ENABLE_YAMA_SLOT_CACHE': 'OCR/ROI',
-    'MAX_CACHE_SIZE_PER_SNAPSHOT': 'OCR/ROI',
-    'TOOLTIP_GRAB_WITH_MSS': 'OCR/ROI',
-    'TOOLTIP_OFFSET_Y': 'OCR/ROI',
-    'TOOLTIP_ROI_W': 'OCR/ROI',
-    'TOOLTIP_ROI_H': 'OCR/ROI',
-    'BUY_MODE': 'NPC/598',
-    'BUY_TURNS': 'NPC/598',
-    # … sende olan diğer eşleştirmeler aynı şekilde devam edecek …
-})
-
-# Yaygın önekler için kategori atamalarını otomatik tamamla
-for _prefix, _group in (
-    ("LOGIN_", "Oyuna Giriş"),
-    ("SERVER_", "Oyuna Giriş"),
-    ("SPLASH_", "Oyuna Giriş"),
-    ("LAUNCHER_", "Launcher"),
-    ("ANVIL_", "Anvil"),
-    ("NPC_", "NPC/598"),
-    ("SCROLL_", "Scroll"),
-    ("BANK_", "Banka"),
-    ("TOWN_", "Town"),
-    ("AUTO_", "Otomasyon"),
-):
-    for _name in list(globals()):
-        if _name.startswith(_prefix) and _name.isupper():
-            _ADV_GROUP.setdefault(_name, _group)
-
-_ADV_GROUP_ORDER_DEFAULT = (
-    'Oyuna Giriş',
-    'Launcher',
-    'Anvil',
-    'NPC/598',
-    'Scroll',
-    'Banka',
-    'Town',
-    'Hız',
-    'OCR/ROI',
-    'Otomasyon',
-    'Tümü',
+_ADV_CATEGORY_RULES = (
+    ("Oyuna Giriş", dict(
+        names=(
+            'LOGIN_USERNAME',
+            'LOGIN_PASSWORD',
+            'LOGIN_USERNAME_CLICK_POS',
+            'LOGIN_PASSWORD_CLICK_POS',
+        ),
+        prefixes=(
+            'LOGIN_',
+            'SERVER_',
+            'SPLASH_',
+        ),
+    )),
+    ("Launcher", dict(
+        names=(
+            'WINDOW_TITLE_KEYWORD',
+            'WINDOW_APPEAR_TIMEOUT',
+            'GAME_START_TEMPLATE_PATH',
+            'GAME_START_MATCH_THRESHOLD',
+            'GAME_START_FIND_TIMEOUT',
+            'GAME_START_SCALES',
+            'TEMPLATE_EXTRA_CLICK_POS',
+            'REQUEST_RELAUNCH',
+        ),
+        prefixes=(
+            'WINDOW_',
+            'GAME_START_',
+            'LAUNCHER_',
+            'TEMPLATE_',
+        ),
+    )),
+    ("Anvil", dict(
+        prefixes=(
+            'ANVIL_',
+        ),
+    )),
+    ("NPC/598", dict(
+        names=(
+            'BUY_MODE',
+            'BUY_TURNS',
+            'FABRIC_STEPS',
+            'LINEN_STEPS',
+            'NPC_GIDIS_SURESI',
+            'NPC_SEEK_TIMEOUT',
+            'NPC_POSTBUY_FIRST_A_DURATION',
+            'NPC_POSTBUY_SECOND_A_DURATION',
+            'NPC_POSTBUY_A_WHILE_W_DURATION',
+            'NPC_POSTBUY_FINAL_W_DURATION',
+            'NPC_POSTBUY_TARGET_X1',
+            'NPC_POSTBUY_TARGET_X2',
+            'NPC_POSTBUY_SEEK_TIMEOUT',
+            'NPC_MENU_PAGE2_POS',
+        ),
+        prefixes=(
+            'NPC_',
+            'BUY_',
+            'USE_STORAGE',
+            'FABRIC_',
+            'LINEN_',
+        ),
+    )),
+    ("Scroll", dict(
+        names=(
+            'SCROLL_ALIM_ADET',
+            'SCROLL_MID_ALIM_ADET',
+        ),
+        prefixes=(
+            'SCROLL_',
+        ),
+    )),
+    ("Banka", dict(
+        names=(
+            'AUTO_BANK_PLUS8',
+            'AUTO_BANK_PLUS8_DELAY',
+            'BANK_OPEN',
+            'BANK_PAGE_CLICK_DELAY',
+            'BANK_PANEL_ROWS',
+            'BANK_PANEL_COLS',
+            'BANK_INV_LEFT',
+            'BANK_INV_TOP',
+            'BANK_INV_RIGHT',
+            'BANK_INV_BOTTOM',
+            'BANK_FULL_FLAG',
+        ),
+        prefixes=(
+            'AUTO_BANK_',
+            'BANK_',
+            'INV_',
+            'SLOT_',
+        ),
+    )),
+    ("598 Takip", dict(
+        names=(
+            'TARGET_NPC_X',
+            'TARGET_STABLE_HITS',
+            'TARGET_Y_AFTER_TURN',
+            'STAIRS_TOP_Y',
+            'X_TOLERANCE',
+            'X_BAND_CONSEC',
+            'X_TOL_TIMEOUT',
+            'X_TOL_READ_DELAY',
+            'Y_SEEK_TIMEOUT',
+        ),
+        prefixes=(
+            'TARGET_',
+            'STAIRS_',
+            'VALID_',
+            'TURN_',
+            'X_',
+            'Y_',
+            'PREC_',
+        ),
+    )),
+    ("Town", dict(
+        names=(
+            'TOWN_CLICK_POS',
+            'TOWN_WAIT',
+            'TOWN_MIN_INTERVAL_SEC',
+            'TOWN_LOCKED',
+            'TOWN_HARD_LOCK',
+        ),
+        prefixes=(
+            'TOWN_',
+        ),
+    )),
+    ("Hız", dict(
+        names=(
+            'SPEED_PROFILE',
+            'AUTO_SPEED_PROFILE',
+            'AUTO_TUNE_INTERVAL',
+            'PRESS_MIN',
+            'PRESS_MAX',
+            'PRE_BRAKE_DELTA',
+            'MAX_STEPS',
+            'STUCK_TIMEOUT',
+        ),
+        prefixes=(
+            'AUTO_SPEED_',
+            'AUTO_TUNE_',
+            'SPEED_',
+            'PRESS_',
+            'MICRO_',
+            'PRE_BRAKE_',
+        ),
+    )),
+    ("Upgrade", dict(
+        prefixes=(
+            'UPGRADE_',
+            'UPG_',
+            'CONFIRM_',
+            'YAMA_QC_',
+        ),
+    )),
+    ("OCR/ROI", dict(
+        names=(
+            'ROI_STALE_MS',
+            'UPG_ROI_STALE_MS',
+            'EMPTY_SLOT_TEMPLATE_PATH',
+            'EMPTY_SLOT_MATCH_THRESHOLD',
+            'FALLBACK_MEAN_THRESHOLD',
+            'FALLBACK_EDGE_DENSITY_THRESHOLD',
+            'EMPTY_SLOT_THRESHOLD',
+            'ENABLE_YAMA_SLOT_CACHE',
+            'MAX_CACHE_SIZE_PER_SNAPSHOT',
+            'TOOLTIP_GRAB_WITH_MSS',
+            'TOOLTIP_OFFSET_Y',
+            'TOOLTIP_ROI_W',
+            'TOOLTIP_ROI_H',
+        ),
+        prefixes=(
+            'HOVER_WAIT_',
+            'TOOLTIP_',
+            'ROI_',
+            'EMPTY_',
+            'FALLBACK_',
+        ),
+    )),
+    ('+7/+8', dict(
+        names=(
+            'FORCE_PLUS7_ONCE',
+            'BASMA_HAKKI',
+            'WRAP_SLOTS',
+        ),
+        prefixes=(
+            'PLUS7_',
+            'PLUS8_',
+            'PLUSN_',
+            'WRAP_',
+            'YAMA_QC_',
+        ),
+    )),
+    ("Günlükleme", dict(
+        prefixes=(
+            'LOG_',
+            'CRASH_',
+        ),
+    )),
+    ("Genel İzleme", dict(
+        names=(
+            'HP_POTION_THRESHOLD',
+            'HP_POTION_TARGET',
+            'HP_LOW_SLEEP',
+            'GLOBAL_CYCLE',
+            'GLOBAL_LOOP_SLEEP',
+            'NEXT_PLUS7_CHECK_AT',
+            'MODE',
+        ),
+        prefixes=(
+            'HP_',
+            'GLOBAL_',
+        ),
+    )),
+    ("Otomasyon", dict(
+        names=(
+            'AUTO_LOGIN',
+            'AUTO_RELAUNCH',
+            'AUTO_TOWN',
+            'AUTO_EXIT_ON_EMPTY',
+            'AUTO_SCROLL',
+            'AUTO_BANK',
+            'AUTO_SMART_TOWN',
+            'AUTO_REPAIR',
+            'WATCHDOG_TIMEOUT',
+            'WATCHDOG_RELAUNCH_WAIT',
+            'F_WAIT_AFTER_LOGIN',
+            'F_WAIT_AFTER_FAIL',
+            'GUI_AUTO_OPEN_SPEED',
+            'DEBUG_SAVE',
+            'ON_TEMPLATE_TIMEOUT_RESTART',
+            'ITEMS_DEPLETED_FLAG',
+        ),
+        prefixes=(
+            'AUTO_',
+            'WATCHDOG_',
+            'F_WAIT_',
+            'GUI_',
+            'DEBUG_',
+        ),
+    )),
+    ("Girdi/WinAPI", dict(
+        prefixes=(
+            'SC_',
+            'VK_',
+            'KEYEVENTF_',
+            'MOUSEEVENTF_',
+            'TH32CS_',
+            'CF_',
+            'GMEM_',
+        ),
+    )),
 )
-ADVANCED_GROUP_ORDER = tuple(globals().get('ADVANCED_GROUP_ORDER', _ADV_GROUP_ORDER_DEFAULT))
+
+
+def _build_adv_grouping():
+    base = dict(globals().get('_ADV_GROUP', {}))
+    prefix_rules = list(globals().get('_ADV_PREFIX_GROUPS', ()))
+    order = list(globals().get('_ADV_GROUP_ORDER', ()))
+    seen_prefixes = {p for p, _ in prefix_rules}
+
+    for category, rule in _ADV_CATEGORY_RULES:
+        if category not in order:
+            order.append(category)
+        for name in rule.get('names', ()):  # type: ignore[arg-type]
+            base.setdefault(name, category)
+        for prefix in rule.get('prefixes', ()):  # type: ignore[arg-type]
+            if prefix not in seen_prefixes:
+                prefix_rules.append((prefix, category))
+                seen_prefixes.add(prefix)
+
+    if 'Genel' not in order:
+        order.append('Genel')
+
+    return base, tuple(order), tuple(prefix_rules)
+
+
+_ADV_GROUP, _ADV_GROUP_ORDER, _ADV_PREFIX_GROUPS = _build_adv_grouping()
+
 
 def _norm_txt(s: str) -> str:
     try: return str(s).casefold()
     except: return str(s).lower()
 
 def _adv_group_of(name: str) -> str:
-    return _ADV_GROUP.get(name, "Tümü")
+    grp = _ADV_GROUP.get(name)
+    if grp:
+        return grp
+    for prefix, fallback in _ADV_PREFIX_GROUPS:
+        if name.startswith(prefix):
+            return fallback
+    return 'Genel'
 
 class _Tooltip:
     # Basit hover tooltip (arka plan işlevsel; gerekirse messagebox fallback kullanılabilir)
@@ -4378,6 +4463,23 @@ def _MERDIVEN_RUN_GUI():
 
                 m._kb_pressed = _kb
 
+            if hasattr(keyboard, "is_pressed"):
+                orig = getattr(m, "_GUI_ORIG_IS_PRESSED", None) or _KEYBOARD_IS_PRESSED_ORIG or keyboard.is_pressed
+
+                def _gui_is_pressed(key):
+                    try:
+                        if str(key).lower() == "f12" and getattr(m, "GUI_ABORT", False):
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        return orig(key)
+                    except Exception:
+                        return False
+
+                m._GUI_ORIG_IS_PRESSED = orig
+                keyboard.is_pressed = _gui_is_pressed
+
         # ---- UI kur ----
         def _build(self):
             nb = ttk.Notebook(self.root);
@@ -4496,73 +4598,73 @@ def _MERDIVEN_RUN_GUI():
 
         def _adv_items(self):
             items = []
-            order_map = getattr(self, '_adv_group_order_map', None)
-            if order_map is None:
-                order_map = {g: i for i, g in enumerate(ADVANCED_GROUP_ORDER)}
-                self._adv_group_order_map = order_map
             for k in dir(m):
                 try:
                     v = getattr(m, k)
-                    if self._is_editable(k, v):
-                        grp = _adv_group_of(k)
-                        items.append((grp, k, v))
-                except Exception:
+                    if self._is_editable(k, v): items.append((k, v))
+                except:
                     pass
-            items.sort(key=lambda x: (order_map.get(x[0], len(order_map)), x[0] or '', x[1]))
+            items.sort(key=lambda x: x[0]);
             return items
 
         def _build_adv(self):
-            for w in self.adv_container.winfo_children():
-                w.destroy()
+            for w in self.adv_container.winfo_children(): w.destroy()
             self.adv_rows = []
             F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
-            row = 0
-            last_group = None
-            shown = 0
-            for group, name, val in self._adv_items():
-                search_blob = f"{name} {_TR.get(name, '')}".upper()
-                if F and F not in search_blob:
+            grouped = {}
+            for name, val in self._adv_items():
+                if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
                     continue
-                if group != last_group:
-                    heading = group or "Tümü"
-                    pad_top = (10 if shown else 4)
-                    ttk.Label(self.adv_container, text=heading, font=("Segoe UI", 10, "bold")) \
-                        .grid(row=row, column=0, columnspan=4, sticky="w", pady=(pad_top, 2))
-                    row += 1
-                    last_group = group
-                ttk.Label(self.adv_container, text=_tr_name(name)) \
-                    .grid(row=row, column=0, sticky="w", padx=(12, 0))
-                if isinstance(val, bool):
-                    var = tk.StringVar(value=str(val))
-                    w = ttk.Combobox(self.adv_container, values=["True", "False"], textvariable=var, width=8,
-                                     state="readonly")
-                else:
-                    var = tk.StringVar(value=str(val))
-                    w = ttk.Entry(self.adv_container, textvariable=var, width=28)
-                w.grid(row=row, column=1, sticky="w", padx=3)
-                ttk.Button(self.adv_container, text="Uygula",
-                           command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
-                           ).grid(row=row, column=2, sticky="w")
+                grouped.setdefault(_adv_group_of(name), []).append((name, val))
 
+            if not grouped:
+                ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
+                self.adv_container.update_idletasks()
                 try:
-                    _ib = ttk.Button(self.adv_container, width=2, text="i")
-                    _ib.grid(row=row, column=3, padx=2, pady=1, sticky="w")
-                    _Tooltip(_ib, _TR_HELP.get(name, "Açıklama yok"))
+                    self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
                 except Exception:
                     pass
+                return
 
-                self.adv_rows.append((name, var))
-                row += 1
-                shown += 1
+            def _grp_key(grp_name: str):
+                try:
+                    return (_ADV_GROUP_ORDER.index(grp_name), grp_name)
+                except ValueError:
+                    return (len(_ADV_GROUP_ORDER), grp_name)
 
-            if not shown:
-                ttk.Label(self.adv_container, text="Sonuç bulunamadı.") \
-                    .grid(row=0, column=0, sticky="w", padx=4, pady=4)
+            for grp_name in sorted(grouped.keys(), key=_grp_key):
+                entries = grouped[grp_name]
+                entries.sort(key=lambda item: _tr_name(item[0]).upper())
+                title = grp_name or 'Genel'
+                frame = ttk.LabelFrame(self.adv_container, text=title)
+                frame.pack(fill="x", padx=6, pady=4, anchor="n")
+                frame.columnconfigure(1, weight=1)
+
+                for row, (name, val) in enumerate(entries):
+                    ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+                    if isinstance(val, bool):
+                        var = tk.StringVar(value=str(val))
+                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
+                                              state="readonly")
+                    else:
+                        var = tk.StringVar(value=str(val))
+                        widget = ttk.Entry(frame, textvariable=var, width=28)
+                    widget.grid(row=row, column=1, sticky="we", padx=3)
+                    ttk.Button(frame, text="Uygula",
+                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
+                               ).grid(row=row, column=2, sticky="w", padx=2)
+                    try:
+                        info_btn = ttk.Button(frame, width=2, text="i")
+                        info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
+                        _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
+                    except Exception:
+                        pass
+                    self.adv_rows.append((name, var))
 
             self.adv_container.update_idletasks()
             try:
                 self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
-            except Exception:
+            except:
                 pass
 
         def _apply_one_adv(self, name, val_raw):
@@ -4622,14 +4724,34 @@ def _MERDIVEN_RUN_GUI():
 
         def _run(self):
             try:
-                self.stage.set("Başlatılıyor..."); m.main(); self.stage.set("Bitti/sonlandı.")
+                self.stage.set("Başlatılıyor...");
+                try:
+                    m.main()
+                except getattr(m, "GUIAbort", GUIAbort):
+                    self.stage.set("Kullanıcı tarafından durduruldu.")
+                    self._msg("Makro kullanıcı isteğiyle durdu.")
+                else:
+                    if getattr(m, "GUI_ABORT", False):
+                        self.stage.set("Kullanıcı tarafından durduruldu.")
+                        self._msg("Makro kullanıcı isteğiyle durdu.")
+                    else:
+                        self.stage.set("Bitti/sonlandı.")
             except Exception as e:
                 self.stage.set(f"Hata: {e}"); self._msg(f"main() hata: {e}")
+            finally:
+                self.root.after(0, self._sync_thread_state)
 
         def stop(self):
             self._msg("Durdur (F12 sanalı)...");
             m.GUI_ABORT = True;
             self.stage.set("Durduruluyor (F12)...")
+
+        def _sync_thread_state(self):
+            thr = getattr(self, "thr", None)
+            if thr and thr.is_alive():
+                self.root.after(200, self._sync_thread_state)
+            else:
+                self.thr = None
 
         def kill_all(self):
             self.stop()
