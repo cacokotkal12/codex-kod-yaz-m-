@@ -5867,10 +5867,6 @@ def _grab_tooltip_roi_near_mouse_fast(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_RO
         return None
 
 
-if __name__ == "__main__":
-    _MERDIVEN_GUI_ENTRY(auto_open=True)
-
-
 # >>> [YAMA:GUI_DEFAULTS]
 
 try:
@@ -6403,3 +6399,7 @@ except Exception as _e:
 def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
     # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
     return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
+
+
+if __name__ == "__main__":
+    _MERDIVEN_GUI_ENTRY(auto_open=True)
