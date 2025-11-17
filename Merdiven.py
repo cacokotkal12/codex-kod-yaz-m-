@@ -418,6 +418,18 @@ PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.015;
 TARGET_STABLE_HITS = 10
+# ---- Koordinat Hızlandırma (Şablon Okuma) ----
+COORD_USE_TEMPLATE = True  # True: OCR'den önce hafif şablon eşleme denensin
+COORD_TEMPLATE_SCALE = 2  # ROI'yi bu katsayı ile büyüt (daha net kenarlar)
+COORD_TEMPLATE_THRESHOLD = 0.70  # matchTemplate skor eşiği
+COORD_TEMPLATE_GAP_FACTOR = 0.70  # haneler arası boşluk (genişlik * faktör) → yeni sayı başlat
+COORD_TEMPLATE_MAX_DIGITS = 6  # her eksen için en fazla kaç hane okunur
+# ---- Y Fren (W basılıyken Y ile ağır adım) ----
+USE_Y_SLOW_BRAKE = True  # True: Y hedeflerinde fren bölgesinde Y basılı tutarak ağır ilerle
+Y_SLOW_KEY = 'y'  # ağır adım tuşu
+Y_SLOW_STABLE_HITS = 6  # hedefe oturmuş sayılmak için ardışık kaç okuma
+Y_SLOW_MAX_TIME = 6.0  # fren bölgesinde maksimum bekleme süresi (sn)
+SKIP_598_BACKOFF_WITH_Y = True  # Y fren aktifse 598→597 mikro S geri adımlarını atla
 # ---- Yürüme / Dönüş ----
 ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
@@ -659,6 +671,7 @@ SC_W = 0x11;
 SC_A = 0x1E;
 SC_S = 0x1F;
 SC_D = 0x20;
+SC_Y = 0x15;
 SC_I = 0x17;
 SC_H = 0x23;
 SC_ENTER = 0x1C;
@@ -1212,8 +1225,111 @@ def perform_login_inputs(w):
 
 # ---- NOT: Aşağıdaki büyük bloklar (OCR, template, upgrade, hover OCR, storage, rota, relaunch+main) Parça 2'de. ----
 # ================== OCR / INV / UPG Yardımcıları ==================
-def read_coordinates(window):
-    """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
+_COORD_TEMPLATES = None
+
+
+def _ensure_coord_templates():
+    global _COORD_TEMPLATES
+    if _COORD_TEMPLATES is not None:
+        return _COORD_TEMPLATES
+    tmpls = {}
+    try:
+        for d in range(10):
+            canvas = np.zeros((24, 16), dtype=np.uint8)
+            cv2.putText(canvas, str(d), (1, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, 255, 2, cv2.LINE_AA)
+            tmpls[str(d)] = canvas
+    except Exception as e:
+        print('[COORD_TMPL] Şablon üretimi hata:', e)
+    _COORD_TEMPLATES = tmpls
+    return tmpls
+
+
+def _capture_coord_roi(window, scale=1):
+    left, top = window.left, window.top;
+    bbox = (left + 104, top + 102, left + 160, top + 120)
+    img = ImageGrab.grab(bbox);
+    gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+    if scale and scale != 1:
+        gray = cv2.resize(gray, (gray.shape[1] * scale, gray.shape[0] * scale), interpolation=cv2.INTER_LINEAR)
+    gray = cv2.medianBlur(gray, 3);
+    gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    return gray
+
+
+def _nms_boxes(boxes, thr=0.2):
+    def _iou(b1, b2):
+        x1, y1, w1, h1, *_ = b1;
+        x2, y2, w2, h2, *_ = b2;
+        xa = max(x1, x2); ya = max(y1, y2); xb = min(x1 + w1, x2 + w2); yb = min(y1 + h1, y2 + h2)
+        inter = max(0, xb - xa) * max(0, yb - ya)
+        union = (w1 * h1) + (w2 * h2) - inter
+        return 0.0 if union == 0 else inter / union
+
+    kept = []
+    for b in sorted(boxes, key=lambda x: x[-1], reverse=True):
+        if all(_iou(b, k) < thr for k in kept):
+            kept.append(b)
+    return kept
+
+
+def _match_digits_with_templates(gray):
+    tmpls = _ensure_coord_templates()
+    if not tmpls or gray.size == 0:
+        return []
+    matches = []
+    thr = float(globals().get('COORD_TEMPLATE_THRESHOLD', 0.70))
+    for digit, tmpl in tmpls.items():
+        try:
+            res = cv2.matchTemplate(gray, tmpl, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(res >= thr)
+            for pt in zip(*loc[::-1]):
+                score = float(res[pt[1], pt[0]])
+                matches.append((pt[0], pt[1], tmpl.shape[1], tmpl.shape[0], digit, score))
+        except Exception:
+            continue
+    return _nms_boxes(matches)
+
+
+def _boxes_to_numbers(matches):
+    if not matches:
+        return []
+    matches = sorted(matches, key=lambda m: (m[1], m[0]))  # üstten alta, soldan sağa
+    widths = [m[2] for m in matches];
+    avg_w = float(np.mean(widths)) if widths else 8.0
+    gap_thr = avg_w * float(globals().get('COORD_TEMPLATE_GAP_FACTOR', 0.7))
+
+    numbers = [];
+    cur = "";
+    prev_end = None
+    for x, _y, w, _h, digit, _s in matches:
+        if prev_end is not None and (x - prev_end) > gap_thr:
+            if cur:
+                numbers.append(cur)
+            cur = ""
+        cur += digit
+        prev_end = x + w
+        if len(cur) >= int(globals().get('COORD_TEMPLATE_MAX_DIGITS', 6)):
+            numbers.append(cur);
+            cur = ""; prev_end = None
+    if cur:
+        numbers.append(cur)
+    return numbers
+
+
+def _read_coordinates_template(window):
+    try:
+        gray = _capture_coord_roi(window, scale=int(globals().get('COORD_TEMPLATE_SCALE', 2)))
+        matches = _match_digits_with_templates(gray)
+        groups = _boxes_to_numbers(matches)
+        nums = [int(g) for g in groups if g.isdigit()]
+        if len(nums) >= 2:
+            return int(nums[0]), int(nums[1])
+    except Exception as e:
+        print('[COORD_TMPL] okuma hata:', e)
+    return None, None
+
+
+def _read_coordinates_tesseract(window):
     left, top = window.left, window.top;
     bbox = (left + 104, top + 102, left + 160, top + 120)
     img = ImageGrab.grab(bbox);
@@ -1230,6 +1346,15 @@ def read_coordinates(window):
     nums = [p for p in parts if p.isdigit()]
     if len(nums) >= 2: return int(nums[0]), int(nums[1])
     return None, None
+
+
+def read_coordinates(window):
+    """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den hızlı şablon veya OCR ile okur."""
+    if globals().get('COORD_USE_TEMPLATE', False):
+        x, y = _read_coordinates_template(window)
+        if x is not None and y is not None:
+            return x, y
+    return _read_coordinates_tesseract(window)
 
 
 def get_region_bounds(region):
@@ -2150,6 +2275,11 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
     t0 = time.time();
+    use_y_slow = (axis == 'y') and bool(globals().get('USE_Y_SLOW_BRAKE', False));
+    y_slow_key = str(globals().get('Y_SLOW_KEY', 'y'))
+    y_slow_hits = int(globals().get('Y_SLOW_STABLE_HITS', settle_hits))
+    y_slow_timeout = float(globals().get('Y_SLOW_MAX_TIME', timeout))
+
     press_key(SC_W)
     try:
         while True:
@@ -2162,7 +2292,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
     finally:
-        release_key(SC_W)
+        if not use_y_slow:
+            release_key(SC_W)
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
@@ -2172,32 +2303,66 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     def is_overshoot(c, t):
         return (c > t) if direction == +1 else (c < t)
 
-    stable = 0;
-    seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
-    while (time.time() - t0) <= timeout:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'): return False
-        cur = _read_axis(w, axis)
-        if cur is None: time.sleep(MICRO_READ_DELAY); continue
-        if cur == target:
-            stable += 1
-            if stable >= settle_hits: print(f"[PREC] {axis.upper()} hedef {target} yakalandı."); return True
-            time.sleep(MICRO_READ_DELAY);
-            continue
-        else:
-            stable = 0
-        if needs_nudge(cur, target):
-            for dp in seq:
-                with key_tempo(0.0):
-                    press_key(SC_W); time.sleep(max(0.002, dp)); release_key(SC_W)
+    if use_y_slow:
+        stable = 0;
+        brake_start = time.time()
+        y_slow_sc = int(globals().get('SC_Y', 0x15))
+        y_toggle_mode = bool(globals().get('Y_SLOW_TOGGLE_MODE', True))
+        y_toggle_delay = float(globals().get('Y_SLOW_TOGGLE_DELAY', 0.05))
+        print(f"[PREC] Y fren: W {'+toggle ' if y_toggle_mode else '+'}{y_slow_key} ağır adım ile hedefe yaklaşılıyor")
+        try:
+            if y_toggle_mode:
+                micro_tap(y_slow_sc, y_toggle_delay)
+            else:
+                keyboard.press(y_slow_key)
+            while (time.time() - brake_start) <= y_slow_timeout:
+                wait_if_paused();
+                watchdog_enforce()
+                if _kb_pressed('f12'): return False
+                cur = _read_axis(w, axis)
+                if cur is None: time.sleep(MICRO_READ_DELAY); continue
+                if cur == target:
+                    stable += 1
+                    if stable >= y_slow_hits:
+                        print(f"[PREC] {axis.upper()} ağır fren ile {target} yakalandı."); return True
+                else:
+                    stable = 0
+                if is_overshoot(cur, target):
+                    print(f"[PREC] Y fren overshoot: cur={cur} target={target}"); break
+                time.sleep(MICRO_READ_DELAY)
+        finally:
+            if y_toggle_mode:
+                micro_tap(y_slow_sc, y_toggle_delay)
+            else:
+                keyboard.release(y_slow_key)
+            release_key(SC_W)
+    else:
+        stable = 0;
+        seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
+        while (time.time() - t0) <= timeout:
+            wait_if_paused();
+            watchdog_enforce()
+            if _kb_pressed('f12'): return False
+            cur = _read_axis(w, axis)
+            if cur is None: time.sleep(MICRO_READ_DELAY); continue
+            if cur == target:
+                stable += 1
+                if stable >= settle_hits: print(f"[PREC] {axis.upper()} hedef {target} yakalandı."); return True
                 time.sleep(MICRO_READ_DELAY);
-                after = _read_axis(w, axis)
-                if after != cur: break
-        elif is_overshoot(cur, target):
-            print(f"[PREC] overshoot: cur={cur} target={target}"); time.sleep(MICRO_READ_DELAY)
-        else:
-            time.sleep(MICRO_READ_DELAY)
+                continue
+            else:
+                stable = 0
+            if needs_nudge(cur, target):
+                for dp in seq:
+                    with key_tempo(0.0):
+                        press_key(SC_W); time.sleep(max(0.002, dp)); release_key(SC_W)
+                    time.sleep(MICRO_READ_DELAY);
+                    after = _read_axis(w, axis)
+                    if after != cur: break
+            elif is_overshoot(cur, target):
+                print(f"[PREC] overshoot: cur={cur} target={target}"); time.sleep(MICRO_READ_DELAY)
+            else:
+                time.sleep(MICRO_READ_DELAY)
     fc = _read_axis(w, axis);
     ok = (fc == target) if force_exact else abs((fc or target) - target) <= 1
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
@@ -2292,15 +2457,18 @@ def ascend_stairs_to_top(w):
     _set_town_lock_by_y(y_now)
     if TOWN_LOCKED:
         _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
-    # >>> 598’e vardık: 2 mikro S vuruşu (istenen davranış)
-    print("[STAIRS] 598 tepe → S mikro geri 2x")
-    for _ in range(STAIRS_TOP_S_BACKOFF_PULSES):
-        micro_tap(SC_S, STAIRS_TOP_S_BACKOFF_DURATION)
-        time.sleep(0.1)
-    try:
-        post_598_to_597()
-    except Exception as e:
-        print("[STAIRS] 598→597 mikro düzeltme hata:", e)
+    # >>> 598’e vardık: varsayılan mikro S yerine Y fren moduna uyumlu seçenek
+    if bool(globals().get('USE_Y_SLOW_BRAKE', False)) and bool(globals().get('SKIP_598_BACKOFF_WITH_Y', True)):
+        print("[STAIRS] 598 tepe → Y fren aktif; S mikro geri adımı atlandı")
+    else:
+        print("[STAIRS] 598 tepe → S mikro geri 2x")
+        for _ in range(STAIRS_TOP_S_BACKOFF_PULSES):
+            micro_tap(SC_S, STAIRS_TOP_S_BACKOFF_DURATION)
+            time.sleep(0.1)
+        try:
+            post_598_to_597()
+        except Exception as e:
+            print("[STAIRS] 598→597 mikro düzeltme hata:", e)
 
 
 def go_to_npc_from_top(w):
