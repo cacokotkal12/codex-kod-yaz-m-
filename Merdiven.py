@@ -4304,6 +4304,11 @@ def _parse_field_value(field: ConfigField, raw: str) -> Any:
 def _schema_defaults(base_defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     defaults = copy.deepcopy(base_defaults or {})
     for field in CONFIG_FIELDS:
+        # Bazı ortamlarda CONFIG_FIELDS beklenmedik şekilde string vb. değerlerle
+        # genişleyebiliyor; bu durumda key hatası almamak için yalnızca ConfigField
+        # nesnelerini uygularız.
+        if not isinstance(field, ConfigField):
+            continue
         if field.key not in defaults:
             defaults[field.key] = _serialize_value(field.default)
     return defaults
@@ -6469,6 +6474,20 @@ def _grab_tooltip_roi_near_mouse_fast(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_RO
 
 # >>> [YAMA:GUI_DEFAULTS]
 
+def _normalize_step_tuple(step: Any) -> Optional[Tuple[int, int, int, str]]:
+    try:
+        if len(step) == 4:
+            x, y, c, b = step
+        elif len(step) == 3:
+            x, y, c = step
+            b = ""
+        else:
+            return None
+        return int(x), int(y), int(c), str(b)
+    except Exception:
+        return None
+
+
 try:
     # ==== [YAMA GUI VARS] Eğer yoksa global varsayılanları tanımla ====
     _YAMA_GUI_DEFAULTS = {
@@ -6541,9 +6560,11 @@ try:
     }
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS,list) and FABRIC_STEPS:
-        _YAMA_GUI_DEFAULTS["FABRIC_STEPS"] = [(int(x),int(y),int(c),str(b)) for (x,y,c,b) in FABRIC_STEPS[:5]]
+        _steps = [_normalize_step_tuple(s) for s in FABRIC_STEPS[:5]]
+        _YAMA_GUI_DEFAULTS["FABRIC_STEPS"] = [s for s in _steps if s]
     if "LINEN_STEPS" in globals() and isinstance(LINEN_STEPS,list) and LINEN_STEPS:
-        _YAMA_GUI_DEFAULTS["LINEN_STEPS"]  = [(int(x),int(y),int(c),str(b)) for (x,y,c,b) in LINEN_STEPS[:5]]
+        _steps = [_normalize_step_tuple(s) for s in LINEN_STEPS[:5]]
+        _YAMA_GUI_DEFAULTS["LINEN_STEPS"]  = [s for s in _steps if s]
 except Exception as _e:
     print("[YAMA][GUI] Defaults init error:", _e)
 
