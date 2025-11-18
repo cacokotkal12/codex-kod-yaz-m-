@@ -355,6 +355,7 @@ OPERATION_MODE = "ITEM_BASMA"  # ITEM_BASMA veya ITEM_SATIS
 ITEM_SALE_VALID_X = (810, 805, 800)
 ITEM_SALE_FACE_A_DURATION = 1.45
 ITEM_SALE_PRICE_TEXT = "PAZAR_FIYAT_METNI"
+ITEM_SATIS_BANK_TAKE_COUNT = 28
 PAZAR_ESIK_1 = 10
 PAZAR_ESIK_2 = 15
 PAZAR_ESIK_3 = 20
@@ -372,16 +373,23 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
+GUI_SALE_EMPTY_SLOTS = 0
+GUI_SALE_STATUS = ""
 
 
 def _choose_server_xy():
+    mode = str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper()
     try:
         sel = str(globals().get("ITEM_BASMA_SERVER", "Server1"))
     except Exception:
         sel = "Server1"
-    idx = ITEM_SERVER_PRESETS.get(sel, None)
-    if isinstance(idx, int) and 0 <= idx < len(SERVER_CHOICES):
-        return SERVER_CHOICES[idx]
+
+    if mode == "ITEM_SATIS":
+        idx = ITEM_SERVER_PRESETS.get(sel, None)
+        if isinstance(idx, int) and 0 <= idx < len(SERVER_CHOICES):
+            return SERVER_CHOICES[idx]
+        return SERVER_CHOICES[0]
+
     return random.choice(SERVER_CHOICES)
 # ---- HP Bar / In-Game Teyit ----
 HP_POINTS = [(185, 68), (218, 74)];
@@ -646,11 +654,23 @@ _current_stage = "INIT";
 _stage_enter_ts = time.time()
 
 
+def _update_sale_metrics(stage: str = None, empty_slots: int = None):
+    try:
+        if stage is not None:
+            globals()["GUI_SALE_STATUS"] = str(stage)
+        if empty_slots is not None:
+            globals()["GUI_SALE_EMPTY_SLOTS"] = int(empty_slots)
+    except Exception:
+        pass
+
+
 def set_stage(name: str):
     global _current_stage, _stage_enter_ts
     _current_stage = name;
     _stage_enter_ts = time.time();
     print(f"[STAGE] {_current_stage}");
+    if str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper() == "ITEM_SATIS":
+        _update_sale_metrics(stage=name)
     maybe_autotune(False)
 
 
@@ -816,6 +836,32 @@ CF_UNICODETEXT = 13;
 GMEM_MOVEABLE = 0x0002
 
 
+def _get_clipboard_text() -> Optional[str]:
+    if not pause_point():
+        return None
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    text = None
+    for _ in range(5):
+        if user32.OpenClipboard(0):
+            break
+        time.sleep(0.02)
+    else:
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if handle:
+            data = kernel32.GlobalLock(handle)
+            if data:
+                try:
+                    text = ctypes.wstring_at(data)
+                finally:
+                    kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+    return text
+
+
 def set_clipboard_text(text: str) -> bool:
     if not pause_point(): return False
     user32 = ctypes.windll.user32;
@@ -855,14 +901,19 @@ def release_vk(vk):
 
 def paste_text_from_clipboard(text: str) -> bool:
     if not pause_point(): return False
-    if set_clipboard_text(text):
-        press_vk(VK_CONTROL);
-        press_vk(VK_V);
-        release_vk(VK_V);
-        release_vk(VK_CONTROL);
-        time.sleep(0.05);
-        return True
-    return False
+    old_clip = _get_clipboard_text()
+    try:
+        if set_clipboard_text(text):
+            press_vk(VK_CONTROL);
+            press_vk(VK_V);
+            release_vk(VK_V);
+            release_vk(VK_CONTROL);
+            time.sleep(0.05);
+            return True
+        return False
+    finally:
+        if old_clip is not None:
+            set_clipboard_text(old_clip)
 
 
 # ---- Merdiven tepe geri adım ayarı ----
@@ -2703,7 +2754,7 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
     return taken
 
 
-def withdraw_items_from_bank_for_sale(max_take=27):
+def withdraw_items_from_bank_for_sale(max_take=ITEM_SATIS_BANK_TAKE_COUNT):
     set_stage("ITEM_SATIS_BANK_WITHDRAW")
     taken = 0
     tmpl = _load_empty_template()
@@ -2836,7 +2887,13 @@ def _item_sale_handle_bank(w):
     if not move_to_769_and_turn_from_top(new_w):
         print("[ITEM_SATIS] Banka açılamadı.")
         return False
-    taken = withdraw_items_from_bank_for_sale(int(globals().get("BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI)))
+    try:
+        max_take = int(globals().get("ITEM_SATIS_BANK_TAKE_COUNT", ITEM_SATIS_BANK_TAKE_COUNT))
+    except Exception:
+        max_take = ITEM_SATIS_BANK_TAKE_COUNT
+    if max_take <= 0:
+        max_take = ITEM_SATIS_BANK_TAKE_COUNT
+    taken = withdraw_items_from_bank_for_sale(max_take)
     ensure_ui_closed()
     time.sleep(0.2)
     exit_game_fast(new_w)
@@ -2863,6 +2920,7 @@ def _item_sale_run_cycle(w):
         release_key(SC_I)
         time.sleep(0.5)
         empty_slots = count_empty_slots("INV")
+        _update_sale_metrics(empty_slots=empty_slots)
         press_key(SC_I)
         release_key(SC_I)
         time.sleep(0.2)
@@ -5117,11 +5175,14 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_899_count": tk.IntVar(value=int(getattr(m, "CLICK_899_399_ADET", CLICK_899_399_ADET))),
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
                 "sale_bank_threshold": tk.IntVar(value=int(getattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))),
+                "sale_bank_take_count": tk.IntVar(value=int(getattr(m, "ITEM_SATIS_BANK_TAKE_COUNT", ITEM_SATIS_BANK_TAKE_COUNT))),
             }
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
             self.v["brake_bal"] = tk.IntVar(value=int(dm.get("BALANCED", 2)))
             self.v["brake_safe"] = tk.IntVar(value=int(dm.get("SAFE", 1)))
+            self.sale_empty_var = tk.StringVar(value="-")
+            self.sale_status_var = tk.StringVar(value="-")
             self.adv_rows = []
             self._build();
             self._load_json();
@@ -5212,6 +5273,12 @@ def _MERDIVEN_RUN_GUI():
             r = 0
             ttk.Label(f1, text="Durum:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
+            r += 1
+            ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=0, sticky="e")
+            ttk.Label(f1, textvariable=self.sale_empty_var).grid(row=r, column=1, sticky="w")
+            r += 1
+            ttk.Label(f1, text="Satış Durumu:").grid(row=r, column=0, sticky="e")
+            ttk.Label(f1, textvariable=self.sale_status_var, foreground="purple").grid(row=r, column=1, sticky="w")
             r += 1
             ttk.Button(f1, text="Başlat", command=self.start).grid(row=r, column=0, sticky="we", padx=2, pady=2)
             ttk.Button(f1, text="Durdur", command=self.stop).grid(row=r, column=1, sticky="we", padx=2, pady=2)
@@ -5306,6 +5373,9 @@ def _MERDIVEN_RUN_GUI():
             lf_bank.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_bank, text="Bankaya Git Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_bank, text="Bankadan Alınacak Adet:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_take_count"], width=8).grid(row=1, column=1, sticky="w", padx=4,
                                                                                         pady=2)
 
             # HIZ
@@ -5615,6 +5685,7 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
             setattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", int(self.v["sale_bank_threshold"].get()))
+            setattr(m, "ITEM_SATIS_BANK_TAKE_COUNT", int(self.v["sale_bank_take_count"].get() or ITEM_SATIS_BANK_TAKE_COUNT))
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
@@ -5678,7 +5749,22 @@ def _MERDIVEN_RUN_GUI():
 
 
         def _tick(self):
-            self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
+            try:
+                mode = self.v["operation_mode"].get().upper()
+            except Exception:
+                mode = "ITEM_BASMA"
+
+            if mode == "ITEM_SATIS":
+                self.sale_empty_var.set(str(globals().get("GUI_SALE_EMPTY_SLOTS", "-")))
+                status_val = globals().get("GUI_SALE_STATUS", "-")
+                if not status_val:
+                    status_val = self.stage.get()
+                self.sale_status_var.set(str(status_val))
+            else:
+                self.sale_empty_var.set("-")
+                self.sale_status_var.set("-")
+
+            self.root.after(250, self._tick)
 
     # Pencereyi başlat
     root = tk.Tk()
