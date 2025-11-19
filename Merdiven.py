@@ -389,18 +389,29 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
+ITEM_SALE_BANK_WITHDRAW_COUNT = 28
 
 _GUI_UPDATE_SALE_SLOT = None
 
 
 def _choose_server_xy():
     try:
-        sel = str(globals().get("ITEM_BASMA_SERVER", "Server1"))
+        mode = str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper()
     except Exception:
-        sel = "Server1"
-    idx = ITEM_SERVER_PRESETS.get(sel, None)
-    if isinstance(idx, int) and 0 <= idx < len(SERVER_CHOICES):
-        return SERVER_CHOICES[idx]
+        mode = str(OPERATION_MODE).upper()
+
+    # ITEM SATIŞ modunda kullanıcı seçimini kullan (deterministik), diğer modlarda rastgele server seç.
+    if mode == "ITEM_SATIS":
+        try:
+            sel = str(globals().get("ITEM_BASMA_SERVER", "Server1"))
+        except Exception:
+            sel = "Server1"
+        idx = ITEM_SERVER_PRESETS.get(sel, None)
+        if isinstance(idx, int) and 0 <= idx < len(SERVER_CHOICES):
+            return SERVER_CHOICES[idx]
+        return SERVER_CHOICES[0] if SERVER_CHOICES else (0, 0)
+
+    # ITEM BASMA dahil diğer modlar → rastgele server seçimi
     return random.choice(SERVER_CHOICES)
 
 
@@ -2667,8 +2678,15 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
     return taken
 
 
-def withdraw_items_from_bank_for_sale(max_take=27):
+def withdraw_items_from_bank_for_sale(max_take: int = None):
     set_stage("ITEM_SATIS_BANK_WITHDRAW")
+    try:
+        max_take_val = int(max_take if max_take is not None else ITEM_SALE_BANK_WITHDRAW_COUNT)
+    except Exception:
+        max_take_val = ITEM_SALE_BANK_WITHDRAW_COUNT
+    if max_take_val <= 0:
+        max_take_val = ITEM_SALE_BANK_WITHDRAW_COUNT
+
     taken = 0
     tmpl = _load_empty_template()
     bank_go_to_first_page()
@@ -2676,13 +2694,13 @@ def withdraw_items_from_bank_for_sale(max_take=27):
         wait_if_paused()
         watchdog_enforce()
         print(f"[ITEM_SATIS][BANK] Sayfa {page}/8 taranıyor...")
-        stage_detail(f"Bankada sayfa {page}/8 taranıyor (çekilen: {taken}/{max_take})")
+        stage_detail(f"Bankada sayfa {page}/8 taranıyor (çekilen: {taken}/{max_take_val})")
         cols, rows = get_region_grid("BANK_PANEL")
         for r in range(rows):
             for c in range(cols):
-                if taken >= max_take:
-                    print(f"[ITEM_SATIS][BANK] Çekilen: {taken}/{max_take}")
-                    stage_detail(f"Bankadan alınan: {taken}/{max_take}")
+                if taken >= max_take_val:
+                    print(f"[ITEM_SATIS][BANK] Çekilen: {taken}/{max_take_val}")
+                    stage_detail(f"Bankadan alınan: {taken}/{max_take_val}")
                     return taken
                 gray = grab_gray_region("BANK_PANEL")
                 if slot_is_empty_in_gray(gray, c, r, "BANK_PANEL", tmpl):
@@ -2731,13 +2749,31 @@ def _item_sale_move_to_market(w):
         release_key(SC_A)
 
 
+def _item_sale_type_price_text(price_text: str, key_delay: float):
+    text = str(price_text or "")
+    if text:
+        for ch in text:
+            wait_if_paused()
+            watchdog_enforce()
+            keyboard.write(ch)
+            time.sleep(0.02)
+    time.sleep(key_delay)
+    wait_if_paused()
+    watchdog_enforce()
+    press_key(SC_ENTER)
+    release_key(SC_ENTER)
+    time.sleep(key_delay)
+    wait_if_paused()
+    watchdog_enforce()
+    press_key(SC_ENTER)
+    release_key(SC_ENTER)
+    time.sleep(key_delay)
+
+
 def _item_sale_fill_market(price_text: str) -> int:
     set_stage("ITEM_SATIS_PAZAR_DOLDUR")
     filled = 0
     key_delay = 0.20
-    if price_text:
-        set_clipboard_text(price_text)
-        time.sleep(key_delay)
     for row_y in (375, 425, 475, 525):
         for i in range(7):
             wait_if_paused()
@@ -2745,17 +2781,7 @@ def _item_sale_fill_market(price_text: str) -> int:
             sx = 365 + 50 * i
             mouse_drag(sx, row_y, PAZAR_DROP_TARGET[0], PAZAR_DROP_TARGET[1], hold=0.12)
             time.sleep(0.1)
-            press_vk(VK_CONTROL)
-            press_vk(VK_V)
-            release_vk(VK_V)
-            release_vk(VK_CONTROL)
-            time.sleep(key_delay)
-            press_key(SC_ENTER)
-            release_key(SC_ENTER)
-            time.sleep(key_delay)
-            press_key(SC_ENTER)
-            release_key(SC_ENTER)
-            time.sleep(key_delay)
+            _item_sale_type_price_text(price_text, key_delay)
             filled += 1
     for _ in range(2):
         mouse_move(656, 610)
@@ -2850,8 +2876,14 @@ def _item_sale_handle_bank(w):
     if not move_to_769_and_turn_from_top(new_w):
         print("[ITEM_SATIS] Banka açılamadı.")
         return False
-    taken = withdraw_items_from_bank_for_sale(
-        int(globals().get("BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI)))
+    try:
+        take_count = int(globals().get("ITEM_SALE_BANK_WITHDRAW_COUNT", ITEM_SALE_BANK_WITHDRAW_COUNT))
+    except Exception:
+        take_count = ITEM_SALE_BANK_WITHDRAW_COUNT
+    if take_count <= 0:
+        take_count = ITEM_SALE_BANK_WITHDRAW_COUNT
+
+    taken = withdraw_items_from_bank_for_sale(take_count)
     ensure_ui_closed()
     time.sleep(0.2)
     if taken <= 0:
@@ -5272,6 +5304,8 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
                 "sale_bank_threshold": tk.IntVar(
                     value=int(getattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))),
+                "sale_bank_withdraw": tk.IntVar(
+                    value=int(getattr(m, "ITEM_SALE_BANK_WITHDRAW_COUNT", ITEM_SALE_BANK_WITHDRAW_COUNT))),
                 "sale_park_x": tk.IntVar(value=int(getattr(m, "PAZAR_PARK_X", PAZAR_PARK_X))),
                 "sale_slot_interval": tk.DoubleVar(
                     value=float(getattr(m, "ITEM_SALE_SLOT_SCAN_INTERVAL", ITEM_SALE_SLOT_SCAN_INTERVAL))),
@@ -5416,8 +5450,10 @@ def _MERDIVEN_RUN_GUI():
             f1 = ttk.Frame(nb);
             nb.add(f1, text="Genel");
             r = 0
-            ttk.Label(f1, text="Durum:").grid(row=r, column=0, sticky="e");
+            ttk.Label(f1, text="Durum / Makro Aşaması:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
+            ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=2, sticky="e", padx=4);
+            ttk.Label(f1, textvariable=self.sale_slot_var, foreground="blue").grid(row=r, column=3, sticky="w");
             r += 1
             ttk.Button(f1, text="Başlat", command=self.start).grid(row=r, column=0, sticky="we", padx=2, pady=2)
             ttk.Button(f1, text="Durdur", command=self.stop).grid(row=r, column=1, sticky="we", padx=2, pady=2)
@@ -5527,25 +5563,29 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w",
                                                                                          padx=4,
                                                                                          pady=2)
-            ttk.Label(lf_bank, text="Çıkış Süresi Min (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_min"], width=8).grid(row=1, column=1, sticky="w",
+            ttk.Label(lf_bank, text="Bankadan Alınacak Adet:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_withdraw"], width=8).grid(row=1, column=1, sticky="w",
+                                                                                        padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_bank, text="Çıkış Süresi Min (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_min"], width=8).grid(row=2, column=1, sticky="w",
                                                                                          padx=4,
                                                                                          pady=2)
-            ttk.Label(lf_bank, text="Maks (sn):").grid(row=1, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_max"], width=8).grid(row=1, column=3, sticky="w",
+            ttk.Label(lf_bank, text="Maks (sn):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_max"], width=8).grid(row=2, column=3, sticky="w",
                                                                                          padx=4,
                                                                                          pady=2)
             ttk.Checkbutton(lf_bank, text="Banka boşsa Telegram gönder", variable=self.v["sale_bank_notify"],
-                            onvalue=True, offvalue=False).grid(row=2, column=0, columnspan=4, sticky="w", padx=4,
+                            onvalue=True, offvalue=False).grid(row=3, column=0, columnspan=4, sticky="w", padx=4,
                                                                pady=2)
-            ttk.Label(lf_bank, text="Telegram Mesajı:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_message"], width=32).grid(row=3, column=1, columnspan=3,
+            ttk.Label(lf_bank, text="Telegram Mesajı:").grid(row=4, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_message"], width=32).grid(row=4, column=1, columnspan=3,
                                                                                         sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="Telegram Token:").grid(row=4, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["telegram_token"], width=32).grid(row=4, column=1, columnspan=3,
+            ttk.Label(lf_bank, text="Telegram Token:").grid(row=5, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["telegram_token"], width=32).grid(row=5, column=1, columnspan=3,
                                                                                      sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=5, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=5, column=1, columnspan=3,
+            ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=6, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=6, column=1, columnspan=3,
                                                                                        sticky="w", padx=4, pady=2)
 
             lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
@@ -5891,6 +5931,13 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
             setattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", int(self.v["sale_bank_threshold"].get()))
+            try:
+                withdraw_val = int(self.v["sale_bank_withdraw"].get())
+                if withdraw_val <= 0:
+                    withdraw_val = ITEM_SALE_BANK_WITHDRAW_COUNT
+            except Exception:
+                withdraw_val = ITEM_SALE_BANK_WITHDRAW_COUNT
+            setattr(m, "ITEM_SALE_BANK_WITHDRAW_COUNT", withdraw_val)
             setattr(m, "PAZAR_PARK_X", int(self.v["sale_park_x"].get()))
             setattr(m, "ITEM_SALE_SLOT_SCAN_INTERVAL", float(self.v["sale_slot_interval"].get()))
             setattr(m, "ITEM_SALE_EXIT_DELAY_MIN", float(self.v["sale_exit_delay_min"].get()))
