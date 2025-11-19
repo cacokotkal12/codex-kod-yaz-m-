@@ -2910,6 +2910,7 @@ def _item_sale_run_cycle(w):
     thresholds = [t for t in thresholds if t > 0]
     done = [False] * len(thresholds)
     bank_threshold = int(globals().get("BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))
+    last_empty_slots = None
     while True:
         wait_if_paused()
         watchdog_enforce()
@@ -2920,6 +2921,9 @@ def _item_sale_run_cycle(w):
         release_key(SC_I)
         time.sleep(0.5)
         empty_slots = count_empty_slots("INV")
+        if last_empty_slots is None:
+            # Başlangıçta eşik kontrolü yapılmasın (kurulum sonrası üst üste tetiklemeyi önler)
+            last_empty_slots = empty_slots
         _update_sale_metrics(empty_slots=empty_slots)
         press_key(SC_I)
         release_key(SC_I)
@@ -2928,11 +2932,18 @@ def _item_sale_run_cycle(w):
             print(f"[ITEM_SATIS] Banka eşiği ({bank_threshold}) yakalandı.")
             return _item_sale_handle_bank(w)
         for idx, thr in enumerate(thresholds):
-            if idx < len(done) and empty_slots >= thr and not done[idx] and all(done[:idx]):
+            if (
+                idx < len(done)
+                and empty_slots >= thr
+                and (last_empty_slots is None or last_empty_slots < thr)
+                and not done[idx]
+                and all(done[:idx])
+            ):
                 print(f"[ITEM_SATIS] Eşik tetiklendi ({thr}).")
                 _item_sale_refresh_market(initial=False)
                 done[idx] = True
                 break
+        last_empty_slots = empty_slots
         time.sleep(3.0)
 
 
