@@ -355,6 +355,7 @@ OPERATION_MODE = "ITEM_BASMA"  # ITEM_BASMA veya ITEM_SATIS
 ITEM_SALE_VALID_X = (810, 805, 800)
 ITEM_SALE_FACE_A_DURATION = 1.45
 ITEM_SALE_PRICE_TEXT = "PAZAR_FIYAT_METNI"
+ITEM_SATIS_BANK_TAKE_COUNT = 28
 PAZAR_ESIK_1 = 10
 PAZAR_ESIK_2 = 15
 PAZAR_ESIK_3 = 20
@@ -372,16 +373,23 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
+GUI_SALE_EMPTY_SLOTS = 0
+GUI_SALE_STATUS = ""
 
 
 def _choose_server_xy():
+    mode = str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper()
     try:
         sel = str(globals().get("ITEM_BASMA_SERVER", "Server1"))
     except Exception:
         sel = "Server1"
-    idx = ITEM_SERVER_PRESETS.get(sel, None)
-    if isinstance(idx, int) and 0 <= idx < len(SERVER_CHOICES):
-        return SERVER_CHOICES[idx]
+
+    if mode == "ITEM_SATIS":
+        idx = ITEM_SERVER_PRESETS.get(sel, None)
+        if isinstance(idx, int) and 0 <= idx < len(SERVER_CHOICES):
+            return SERVER_CHOICES[idx]
+        return SERVER_CHOICES[0]
+
     return random.choice(SERVER_CHOICES)
 # ---- HP Bar / In-Game Teyit ----
 HP_POINTS = [(185, 68), (218, 74)];
@@ -646,11 +654,23 @@ _current_stage = "INIT";
 _stage_enter_ts = time.time()
 
 
+def _update_sale_metrics(stage: str = None, empty_slots: int = None):
+    try:
+        if stage is not None:
+            globals()["GUI_SALE_STATUS"] = str(stage)
+        if empty_slots is not None:
+            globals()["GUI_SALE_EMPTY_SLOTS"] = int(empty_slots)
+    except Exception:
+        pass
+
+
 def set_stage(name: str):
     global _current_stage, _stage_enter_ts
     _current_stage = name;
     _stage_enter_ts = time.time();
     print(f"[STAGE] {_current_stage}");
+    if str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper() == "ITEM_SATIS":
+        _update_sale_metrics(stage=name)
     maybe_autotune(False)
 
 
@@ -816,6 +836,32 @@ CF_UNICODETEXT = 13;
 GMEM_MOVEABLE = 0x0002
 
 
+def _get_clipboard_text() -> Optional[str]:
+    if not pause_point():
+        return None
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    text = None
+    for _ in range(5):
+        if user32.OpenClipboard(0):
+            break
+        time.sleep(0.02)
+    else:
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if handle:
+            data = kernel32.GlobalLock(handle)
+            if data:
+                try:
+                    text = ctypes.wstring_at(data)
+                finally:
+                    kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+    return text
+
+
 def set_clipboard_text(text: str) -> bool:
     if not pause_point(): return False
     user32 = ctypes.windll.user32;
@@ -855,14 +901,19 @@ def release_vk(vk):
 
 def paste_text_from_clipboard(text: str) -> bool:
     if not pause_point(): return False
-    if set_clipboard_text(text):
-        press_vk(VK_CONTROL);
-        press_vk(VK_V);
-        release_vk(VK_V);
-        release_vk(VK_CONTROL);
-        time.sleep(0.05);
-        return True
-    return False
+    old_clip = _get_clipboard_text()
+    try:
+        if set_clipboard_text(text):
+            press_vk(VK_CONTROL);
+            press_vk(VK_V);
+            release_vk(VK_V);
+            release_vk(VK_CONTROL);
+            time.sleep(0.05);
+            return True
+        return False
+    finally:
+        if old_clip is not None:
+            set_clipboard_text(old_clip)
 
 
 # ---- Merdiven tepe geri adım ayarı ----
@@ -2703,7 +2754,7 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
     return taken
 
 
-def withdraw_items_from_bank_for_sale(max_take=27):
+def withdraw_items_from_bank_for_sale(max_take=ITEM_SATIS_BANK_TAKE_COUNT):
     set_stage("ITEM_SATIS_BANK_WITHDRAW")
     taken = 0
     tmpl = _load_empty_template()
@@ -2836,7 +2887,13 @@ def _item_sale_handle_bank(w):
     if not move_to_769_and_turn_from_top(new_w):
         print("[ITEM_SATIS] Banka açılamadı.")
         return False
-    taken = withdraw_items_from_bank_for_sale(int(globals().get("BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI)))
+    try:
+        max_take = int(globals().get("ITEM_SATIS_BANK_TAKE_COUNT", ITEM_SATIS_BANK_TAKE_COUNT))
+    except Exception:
+        max_take = ITEM_SATIS_BANK_TAKE_COUNT
+    if max_take <= 0:
+        max_take = ITEM_SATIS_BANK_TAKE_COUNT
+    taken = withdraw_items_from_bank_for_sale(max_take)
     ensure_ui_closed()
     time.sleep(0.2)
     exit_game_fast(new_w)
@@ -2863,6 +2920,7 @@ def _item_sale_run_cycle(w):
         release_key(SC_I)
         time.sleep(0.5)
         empty_slots = count_empty_slots("INV")
+        _update_sale_metrics(empty_slots=empty_slots)
         press_key(SC_I)
         release_key(SC_I)
         time.sleep(0.2)
@@ -4161,6 +4219,13 @@ CONFIG_FIELDS: List[ConfigField] = [
 ]
 
 
+def _valid_config_fields(fields: Iterable[Any] = None) -> Tuple[ConfigField, ...]:
+    """CONFIG_FIELDS içindeki yalnızca gerçek ConfigField nesnelerini döndürür."""
+    items = CONFIG_FIELDS if fields is None else fields
+    return tuple(f for f in items if isinstance(f, ConfigField))
+
+
+CONFIG_FIELDS = list(_valid_config_fields())
 CONFIG_FIELD_MAP: Dict[str, ConfigField] = {f.key: f for f in CONFIG_FIELDS}
 CONFIG_CATEGORY_ORDER: Tuple[str, ...] = tuple(dict.fromkeys(f.category for f in CONFIG_FIELDS))
 
@@ -4245,7 +4310,7 @@ def _parse_field_value(field: ConfigField, raw: str) -> Any:
 
 def _schema_defaults(base_defaults: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     defaults = copy.deepcopy(base_defaults or {})
-    for field in CONFIG_FIELDS:
+    for field in _valid_config_fields():
         if field.key not in defaults:
             defaults[field.key] = _serialize_value(field.default)
     return defaults
@@ -4257,7 +4322,7 @@ def _serialize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 def apply_config_values(cfg: Dict[str, Any]) -> None:
     g = globals()
-    for field in CONFIG_FIELDS:
+    for field in _valid_config_fields():
         if field.runtime_only:
             continue
         if field.key not in cfg:
@@ -5117,12 +5182,27 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_899_count": tk.IntVar(value=int(getattr(m, "CLICK_899_399_ADET", CLICK_899_399_ADET))),
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
                 "sale_bank_threshold": tk.IntVar(value=int(getattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))),
+                "sale_bank_take_count": tk.IntVar(value=int(getattr(m, "ITEM_SATIS_BANK_TAKE_COUNT", ITEM_SATIS_BANK_TAKE_COUNT))),
+                "sale_valid_x": tk.StringVar(value=",".join(map(str, getattr(m, "ITEM_SALE_VALID_X", ITEM_SALE_VALID_X)))),
+                "sale_face_duration": tk.DoubleVar(
+                    value=float(getattr(m, "ITEM_SALE_FACE_A_DURATION", ITEM_SALE_FACE_A_DURATION))),
+                "sale_break_click": tk.StringVar(value=",".join(map(str, getattr(m, "PAZAR_BREAK_CLICK_POS", PAZAR_BREAK_CLICK_POS)))),
+                "sale_reopen_key": tk.StringVar(value=str(getattr(m, "PAZAR_REOPEN_KEY", PAZAR_REOPEN_KEY))),
+                "sale_reopen_wait": tk.DoubleVar(value=float(getattr(m, "PAZAR_REOPEN_WAIT", PAZAR_REOPEN_WAIT))),
+                "sale_first_click": tk.StringVar(value=",".join(map(str, getattr(m, "PAZAR_FIRST_CLICK_POS", PAZAR_FIRST_CLICK_POS)))),
+                "sale_second_click": tk.StringVar(value=",".join(map(str, getattr(m, "PAZAR_SECOND_CLICK_POS", PAZAR_SECOND_CLICK_POS)))),
+                "sale_confirm_click": tk.StringVar(
+                    value=",".join(map(str, getattr(m, "PAZAR_CONFIRM_CLICK_POS", PAZAR_CONFIRM_CLICK_POS)))),
+                "sale_drop_target": tk.StringVar(value=",".join(map(str, getattr(m, "PAZAR_DROP_TARGET", PAZAR_DROP_TARGET)))),
             }
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
             self.v["brake_bal"] = tk.IntVar(value=int(dm.get("BALANCED", 2)))
             self.v["brake_safe"] = tk.IntVar(value=int(dm.get("SAFE", 1)))
+            self.sale_empty_var = tk.StringVar(value="-")
+            self.sale_status_var = tk.StringVar(value="-")
             self.adv_rows = []
+            self.sale_adv_rows = []
             self._build();
             self._load_json();
             self._hook_stage();
@@ -5213,6 +5293,12 @@ def _MERDIVEN_RUN_GUI():
             ttk.Label(f1, text="Durum:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
             r += 1
+            ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=0, sticky="e")
+            ttk.Label(f1, textvariable=self.sale_empty_var).grid(row=r, column=1, sticky="w")
+            r += 1
+            ttk.Label(f1, text="Satış Durumu:").grid(row=r, column=0, sticky="e")
+            ttk.Label(f1, textvariable=self.sale_status_var, foreground="purple").grid(row=r, column=1, sticky="w")
+            r += 1
             ttk.Button(f1, text="Başlat", command=self.start).grid(row=r, column=0, sticky="we", padx=2, pady=2)
             ttk.Button(f1, text="Durdur", command=self.stop).grid(row=r, column=1, sticky="we", padx=2, pady=2)
             ttk.Button(f1, text="Ayarları Kaydet", command=self.save).grid(row=r, column=2, sticky="we", padx=2, pady=2)
@@ -5263,8 +5349,17 @@ def _MERDIVEN_RUN_GUI():
                 row=0, column=1, sticky="w", padx=4, pady=2)
 
             # ITEM SATIŞ
-            f_sale = ttk.Frame(nb)
-            nb.add(f_sale, text="Item Satış")
+            f_sale_tab = ttk.Frame(nb)
+            nb.add(f_sale_tab, text="Item Satış")
+            c_sale = tk.Canvas(f_sale_tab, highlightthickness=0)
+            vs_sale = ttk.Scrollbar(f_sale_tab, orient="vertical", command=c_sale.yview)
+            c_sale.configure(yscrollcommand=vs_sale.set)
+            f_sale = ttk.Frame(c_sale)
+            self._sale_canvas_id = c_sale.create_window((0, 0), window=f_sale, anchor="nw")
+            c_sale.bind("<Configure>", lambda e: c_sale.itemconfigure(self._sale_canvas_id, width=e.width))
+            f_sale.bind("<Configure>", lambda e: c_sale.configure(scrollregion=c_sale.bbox("all")))
+            c_sale.pack(side="left", fill="both", expand=True)
+            vs_sale.pack(side="right", fill="y")
             f_sale.columnconfigure(1, weight=1)
             lf_sale = ttk.LabelFrame(f_sale, text="Pazar Ayarları")
             lf_sale.grid(row=0, column=0, columnspan=2, sticky="we", padx=6, pady=6)
@@ -5307,6 +5402,48 @@ def _MERDIVEN_RUN_GUI():
             ttk.Label(lf_bank, text="Bankaya Git Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w", padx=4,
                                                                                         pady=2)
+            ttk.Label(lf_bank, text="Bankadan Alınacak Adet:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_take_count"], width=8).grid(row=1, column=1, sticky="w", padx=4,
+                                                                                        pady=2)
+
+            lf_sale_flow = ttk.LabelFrame(f_sale, text="Slot / Akış")
+            lf_sale_flow.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_sale_flow, text="Geçerli X Değerleri:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_flow, textvariable=self.v["sale_valid_x"], width=18).grid(row=0, column=1, sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_sale_flow, text="Face A Süresi (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_flow, textvariable=self.v["sale_face_duration"], width=10).grid(row=1, column=1, sticky="w", padx=4,
+                                                                                            pady=2)
+
+            lf_sale_positions = ttk.LabelFrame(f_sale, text="Pazar Koordinatları / Kısayol")
+            lf_sale_positions.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_sale_positions, text="Break Tık (x,y):").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_break_click"], width=18).grid(row=0, column=1, sticky="w",
+                                                                                                  padx=4, pady=2)
+            ttk.Label(lf_sale_positions, text="Reopen Tuşu:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_reopen_key"], width=6).grid(row=0, column=3, sticky="w",
+                                                                                              padx=4, pady=2)
+            ttk.Label(lf_sale_positions, text="Reopen Bekleme (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_reopen_wait"], width=10).grid(row=1, column=1, sticky="w",
+                                                                                                padx=4, pady=2)
+            ttk.Label(lf_sale_positions, text="1. Tık (x,y):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_first_click"], width=18).grid(row=2, column=1, sticky="w",
+                                                                                                 padx=4, pady=2)
+            ttk.Label(lf_sale_positions, text="2. Tık (x,y):").grid(row=3, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_second_click"], width=18).grid(row=3, column=1, sticky="w",
+                                                                                                  padx=4, pady=2)
+            ttk.Label(lf_sale_positions, text="Onay (x,y):").grid(row=4, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_confirm_click"], width=18).grid(row=4, column=1, sticky="w",
+                                                                                                  padx=4, pady=2)
+            ttk.Label(lf_sale_positions, text="Drop Target (x,y):").grid(row=5, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_positions, textvariable=self.v["sale_drop_target"], width=18).grid(row=5, column=1, sticky="w",
+                                                                                                 padx=4, pady=2)
+
+            self._build_sale_adv_section(f_sale, start_row=5)
+
+            lf_sale_actions = ttk.Frame(f_sale)
+            lf_sale_actions.grid(row=6, column=0, columnspan=2, sticky="e", padx=6, pady=(0, 6))
+            ttk.Button(lf_sale_actions, text="Kaydet", command=self.save).pack(anchor="e")
 
             # HIZ
             f3 = ttk.Frame(nb);
@@ -5373,6 +5510,63 @@ def _MERDIVEN_RUN_GUI():
             if hasattr(self, "lb"):
                 self.lb.delete(0, "end")
                 for x in self.stage_log[-30:]: self.lb.insert("end", x)
+
+        def _apply_adv_value(self, name, val_raw):
+            import ast
+            try:
+                try:
+                    val = ast.literal_eval(val_raw)
+                except Exception:
+                    val = val_raw
+                setattr(m, name, val)
+                self._msg(f"{name} = {val!r} uygulandı.")
+            except Exception as e:
+                self._msg(f"{name} ayarlanamadı: {e}")
+
+        def _build_sale_adv_section(self, parent, start_row=0):
+            lf_adv = ttk.LabelFrame(parent, text="Satışa Ait Diğer Ayarlar")
+            lf_adv.grid(row=start_row, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            keywords = ("PAZAR", "ITEM_SATIS", "ITEM_SALE", "BANKA", "BOS_SLOT", "EXIT", "TELE", "CHAT", "TOKEN", "MESAJ")
+            managed = {
+                "ITEM_SALE_PRICE_TEXT", "PAZAR_ESIK_1", "PAZAR_ESIK_2", "PAZAR_ESIK_3",
+                "PAZAR_YENILEME_BEKELEME_SURESI", "PAZAR_ILK_BEKELEME_SURESI", "CLICK_902_135_ADET",
+                "CLICK_902_135_HIZ", "CLICK_899_399_ADET", "CLICK_899_399_HIZ", "BANKAYA_GIT_BOS_SLOT_ESIGI",
+                "ITEM_SATIS_BANK_TAKE_COUNT", "ITEM_SALE_VALID_X", "ITEM_SALE_FACE_A_DURATION", "PAZAR_BREAK_CLICK_POS",
+                "PAZAR_REOPEN_KEY", "PAZAR_REOPEN_WAIT", "PAZAR_FIRST_CLICK_POS", "PAZAR_SECOND_CLICK_POS",
+                "PAZAR_CONFIRM_CLICK_POS", "PAZAR_DROP_TARGET",
+            }
+            items = []
+            for name, val in self._adv_items():
+                if name in managed:
+                    continue
+                if not any(k in name for k in keywords):
+                    continue
+                items.append((name, val))
+            items.sort(key=lambda x: _tr_name(x[0]).upper())
+            if not items:
+                ttk.Label(lf_adv, text="Satışla ilişkili ek ayar bulunamadı.").grid(row=0, column=0, sticky="w", padx=4, pady=4)
+                return
+            for row, (name, val) in enumerate(items):
+                ttk.Label(lf_adv, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=3, pady=2)
+                var = tk.StringVar(value=str(val))
+                entry = ttk.Entry(lf_adv, textvariable=var, width=32)
+                entry.grid(row=row, column=1, sticky="we", padx=4, pady=2)
+                ttk.Button(lf_adv, text="Uygula", command=lambda n=name, v=var: self._apply_adv_value(n, v.get())).grid(
+                    row=row, column=2, sticky="w", padx=2, pady=2)
+                try:
+                    info_btn = ttk.Button(lf_adv, width=2, text="i")
+                    info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
+                    _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
+                except Exception:
+                    pass
+                self.sale_adv_rows.append((name, var))
+
+        def _apply_sale_adv_rows(self):
+            for name, var in getattr(self, "sale_adv_rows", []):
+                try:
+                    self._apply_adv_value(name, var.get())
+                except Exception:
+                    pass
 
         # ---- Gelişmiş alan listesi ----
         def _is_editable(self, name, val):
@@ -5599,6 +5793,40 @@ def _MERDIVEN_RUN_GUI():
             self.save()
 
         def apply_core(self):
+            def _int_tuple(val, fallback, expected_len=None):
+                try:
+                    if isinstance(val, (list, tuple)):
+                        parts = list(val)
+                    else:
+                        parts = [int(x.strip()) for x in str(val).replace(";", ",").split(",") if x.strip()]
+                    if expected_len and len(parts) != expected_len:
+                        raise ValueError
+                    return tuple(int(x) for x in parts)
+                except Exception:
+                    try:
+                        return tuple(fallback)
+                    except Exception:
+                        return fallback
+
+            def _int_pair(val, fallback):
+                return _int_tuple(val, fallback, expected_len=2)
+
+            def _float_val(val, fallback):
+                try:
+                    return float(val)
+                except Exception:
+                    try:
+                        return float(fallback)
+                    except Exception:
+                        return fallback
+
+            def _str_val(val, fallback):
+                try:
+                    s = str(val).strip()
+                    return s if s else str(fallback)
+                except Exception:
+                    return str(fallback)
+
             # login
             if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
             if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
@@ -5615,6 +5843,25 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
             setattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", int(self.v["sale_bank_threshold"].get()))
+            setattr(m, "ITEM_SATIS_BANK_TAKE_COUNT", int(self.v["sale_bank_take_count"].get() or ITEM_SATIS_BANK_TAKE_COUNT))
+            setattr(m, "ITEM_SALE_VALID_X",
+                    _int_tuple(self.v["sale_valid_x"].get(), getattr(m, "ITEM_SALE_VALID_X", ITEM_SALE_VALID_X)))
+            setattr(m, "ITEM_SALE_FACE_A_DURATION",
+                    _float_val(self.v["sale_face_duration"].get(), getattr(m, "ITEM_SALE_FACE_A_DURATION", ITEM_SALE_FACE_A_DURATION)))
+            setattr(m, "PAZAR_BREAK_CLICK_POS",
+                    _int_pair(self.v["sale_break_click"].get(), getattr(m, "PAZAR_BREAK_CLICK_POS", PAZAR_BREAK_CLICK_POS)))
+            setattr(m, "PAZAR_REOPEN_KEY",
+                    _str_val(self.v["sale_reopen_key"].get(), getattr(m, "PAZAR_REOPEN_KEY", PAZAR_REOPEN_KEY)))
+            setattr(m, "PAZAR_REOPEN_WAIT",
+                    _float_val(self.v["sale_reopen_wait"].get(), getattr(m, "PAZAR_REOPEN_WAIT", PAZAR_REOPEN_WAIT)))
+            setattr(m, "PAZAR_FIRST_CLICK_POS",
+                    _int_pair(self.v["sale_first_click"].get(), getattr(m, "PAZAR_FIRST_CLICK_POS", PAZAR_FIRST_CLICK_POS)))
+            setattr(m, "PAZAR_SECOND_CLICK_POS",
+                    _int_pair(self.v["sale_second_click"].get(), getattr(m, "PAZAR_SECOND_CLICK_POS", PAZAR_SECOND_CLICK_POS)))
+            setattr(m, "PAZAR_CONFIRM_CLICK_POS",
+                    _int_pair(self.v["sale_confirm_click"].get(), getattr(m, "PAZAR_CONFIRM_CLICK_POS", PAZAR_CONFIRM_CLICK_POS)))
+            setattr(m, "PAZAR_DROP_TARGET",
+                    _int_pair(self.v["sale_drop_target"].get(), getattr(m, "PAZAR_DROP_TARGET", PAZAR_DROP_TARGET)))
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
@@ -5666,7 +5913,7 @@ def _MERDIVEN_RUN_GUI():
             adv = data.get("advanced")
             if not isinstance(adv, dict): adv={}
             data["advanced"] = adv
-            for name, var in self.adv_rows:
+            for name, var in list(self.adv_rows) + list(getattr(self, "sale_adv_rows", [])):
                 try: adv[name] = var.get()
                 except Exception: pass
             tmp = path + ".tmp"
@@ -5675,10 +5922,29 @@ def _MERDIVEN_RUN_GUI():
             os.replace(tmp, path)
             self._msg(f"Ayarlar kaydedildi: {path}")
             self.apply_core()
+            try:
+                self._apply_sale_adv_rows()
+            except Exception:
+                pass
 
 
         def _tick(self):
-            self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
+            try:
+                mode = self.v["operation_mode"].get().upper()
+            except Exception:
+                mode = "ITEM_BASMA"
+
+            if mode == "ITEM_SATIS":
+                self.sale_empty_var.set(str(globals().get("GUI_SALE_EMPTY_SLOTS", "-")))
+                status_val = globals().get("GUI_SALE_STATUS", "-")
+                if not status_val:
+                    status_val = self.stage.get()
+                self.sale_status_var.set(str(status_val))
+            else:
+                self.sale_empty_var.set("-")
+                self.sale_status_var.set("-")
+
+            self.root.after(250, self._tick)
 
     # Pencereyi başlat
     root = tk.Tk()
@@ -6383,6 +6649,20 @@ def _grab_tooltip_roi_near_mouse_fast(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_RO
 
 # >>> [YAMA:GUI_DEFAULTS]
 
+def _normalize_step_tuple(step: Any) -> Optional[Tuple[int, int, int, str]]:
+    try:
+        if len(step) == 4:
+            x, y, c, b = step
+        elif len(step) == 3:
+            x, y, c = step
+            b = ""
+        else:
+            return None
+        return int(x), int(y), int(c), str(b)
+    except Exception:
+        return None
+
+
 try:
     # ==== [YAMA GUI VARS] Eğer yoksa global varsayılanları tanımla ====
     _YAMA_GUI_DEFAULTS = {
@@ -6455,9 +6735,11 @@ try:
     }
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS,list) and FABRIC_STEPS:
-        _YAMA_GUI_DEFAULTS["FABRIC_STEPS"] = [(int(x),int(y),int(c),str(b)) for (x,y,c,b) in FABRIC_STEPS[:5]]
+        _steps = [_normalize_step_tuple(s) for s in FABRIC_STEPS[:5]]
+        _YAMA_GUI_DEFAULTS["FABRIC_STEPS"] = [s for s in _steps if s]
     if "LINEN_STEPS" in globals() and isinstance(LINEN_STEPS,list) and LINEN_STEPS:
-        _YAMA_GUI_DEFAULTS["LINEN_STEPS"]  = [(int(x),int(y),int(c),str(b)) for (x,y,c,b) in LINEN_STEPS[:5]]
+        _steps = [_normalize_step_tuple(s) for s in LINEN_STEPS[:5]]
+        _YAMA_GUI_DEFAULTS["LINEN_STEPS"]  = [s for s in _steps if s]
 except Exception as _e:
     print("[YAMA][GUI] Defaults init error:", _e)
 
@@ -6596,7 +6878,9 @@ def _y_build_and_attach_gui(root):
     nb.add(npc_tab, text="NPC / Upgrade")
 
     general_vars: Dict[str, Any] = {}
-    if CONFIG_FIELDS:
+    valid_fields = _valid_config_fields()
+    category_order = tuple(dict.fromkeys(f.category for f in valid_fields))
+    if valid_fields:
         cgen = tk.Canvas(general_tab, highlightthickness=0)
         vs_gen = ttk.Scrollbar(general_tab, orient="vertical", command=cgen.yview)
         cgen.configure(yscrollcommand=vs_gen.set)
@@ -6607,8 +6891,8 @@ def _y_build_and_attach_gui(root):
         cgen.pack(side="left", fill="both", expand=True)
         vs_gen.pack(side="right", fill="y")
 
-        for category in CONFIG_CATEGORY_ORDER:
-            fields = [f for f in CONFIG_FIELDS if f.category == category]
+        for category in category_order:
+            fields = [f for f in valid_fields if f.category == category]
             if not fields:
                 continue
             grp = ttk.LabelFrame(general_frame, text=category)
@@ -6752,7 +7036,7 @@ def _y_build_and_attach_gui(root):
         last_field = None
         try:
             general_updates = {}
-            for field in CONFIG_FIELDS:
+            for field in valid_fields:
                 var = general_vars.get(field.key)
                 if not var:
                     continue
