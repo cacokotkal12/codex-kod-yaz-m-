@@ -120,6 +120,12 @@ except Exception:
 # ====================== BOOST: GENEL AYARLAR ======================
 LOG_DIR = "logs";
 CRASH_DIR = "crash_dumps"
+LOG_LEVEL = "INFO"
+LOG_TO_CONSOLE = False
+ABORT_HOTKEY = "f12"
+RETRY_ATTEMPTS = 2
+RETRY_DELAY = 0.5
+RETRY_BACKOFF = 1.5
 
 
 def _set_dpi_aware():
@@ -151,6 +157,25 @@ _handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s
 _logger.addHandler(_handler)
 
 
+def _configure_logging(level: Optional[str] = None, console: Optional[bool] = None):
+    lvl_name = str(level or LOG_LEVEL).upper()
+    lvl = getattr(logging, lvl_name, logging.INFO)
+    _logger.setLevel(lvl)
+    try:
+        _handler.setLevel(lvl)
+    except Exception:
+        pass
+    if console is None:
+        console = LOG_TO_CONSOLE
+    if console:
+        exists = any(isinstance(h, logging.StreamHandler) for h in _logger.handlers if not isinstance(h, RotatingFileHandler))
+        if not exists:
+            ch = logging.StreamHandler()
+            ch.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s"))
+            ch.setLevel(lvl)
+            _logger.addHandler(ch)
+
+
 def log(msg, lvl="info"): getattr(_logger, lvl, _logger.info)(msg)
 
 
@@ -158,12 +183,20 @@ _ORIG_SLEEP = time.sleep
 _KEYBOARD_IS_PRESSED_ORIG = getattr(keyboard, "is_pressed", None)
 
 
+def _get_abort_hotkey() -> str:
+    try:
+        return str(globals().get("ABORT_HOTKEY", "f12") or "f12")
+    except Exception:
+        return "f12"
+
+
 def _abort_requested() -> bool:
     if globals().get("GUI_ABORT", False):
         return True
+    hotkey = _get_abort_hotkey()
     if _KEYBOARD_IS_PRESSED_ORIG is not None:
         try:
-            if _KEYBOARD_IS_PRESSED_ORIG("f12"):
+            if _KEYBOARD_IS_PRESSED_ORIG(hotkey):
                 return True
         except Exception:
             pass
@@ -732,7 +765,10 @@ MOUSEEVENTF_RIGHTUP = 0x0010
 # ================== Tuş / Fare / Pause ==================
 def _kb_pressed(key_name: str) -> bool:
     try:
-        return keyboard.is_pressed(key_name)
+        key = key_name
+        if str(key_name).lower() == "f12" or str(key_name).lower() == _get_abort_hotkey().lower():
+            key = _get_abort_hotkey()
+        return keyboard.is_pressed(key)
     except Exception:
         return False
 
@@ -4129,6 +4165,18 @@ class ConfigField:
 
 
 CONFIG_FIELDS: List[ConfigField] = [
+    ConfigField("ABORT_HOTKEY", "Durdurma tuşu", "Kontrol & Log", "str",
+                _cfg_default("ABORT_HOTKEY", "f12"), "Makroyu durduracak kısayol (örn. f12, ctrl+shift+q).", width=12),
+    ConfigField("LOG_LEVEL", "Log seviyesi", "Kontrol & Log", "str",
+                _cfg_default("LOG_LEVEL", "INFO"), "DEBUG / INFO / WARNING / ERROR", width=12),
+    ConfigField("LOG_TO_CONSOLE", "Konsola log yaz", "Kontrol & Log", "bool",
+                _cfg_default("LOG_TO_CONSOLE", False), "Dosyaya ek olarak konsola da log bas."),
+    ConfigField("RETRY_ATTEMPTS", "Retry deneme", "Kontrol & Log", "int",
+                _cfg_default("RETRY_ATTEMPTS", 2), "Otomatik yeniden deneme sayısı"),
+    ConfigField("RETRY_DELAY", "Retry bekleme", "Kontrol & Log", "float",
+                _cfg_default("RETRY_DELAY", 0.5), "İlk bekleme süresi (s)"),
+    ConfigField("RETRY_BACKOFF", "Retry çarpanı", "Kontrol & Log", "float",
+                _cfg_default("RETRY_BACKOFF", 1.5), "Üstel artış katsayısı"),
     ConfigField("tus_hizi", "Tuş hızı (sn)", "Hız & Tıklama", "float",
                 _cfg_default("tus_hizi", 0.050), "Makro genel tuş basım süresi."),
     ConfigField("mouse_hizi", "Mouse hızı (sn)", "Hız & Tıklama", "float",
@@ -4366,7 +4414,7 @@ from functools import wraps
 
 
 _BASE_CONFIG_DEFAULTS = json.loads(
-    r'''{"timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
+    r'''{"ABORT_HOTKEY": "f12", "LOG_LEVEL": "INFO", "LOG_TO_CONSOLE": false, "RETRY_ATTEMPTS": 2, "RETRY_DELAY": 0.5, "RETRY_BACKOFF": 1.5, "timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
 
 
 # --- Config yükle/kaydet ---
@@ -4411,12 +4459,13 @@ def save_config(cfg, path=None):
 
 
 # --- Retry yardımcı ---
-def retry_on_exception(retries=2, delay=0.5, allowed_exceptions=(Exception,), backoff=1.5):
+def retry_on_exception(retries=None, delay=None, allowed_exceptions=(Exception,), backoff=None):
     def deco(fn):
         @wraps(fn)
         def wrapper(*a, **k):
-            r = retries;
-            d = delay
+            r = retries if retries is not None else globals().get('RETRY_ATTEMPTS', 2)
+            d = delay if delay is not None else globals().get('RETRY_DELAY', 0.5)
+            b = backoff if backoff is not None else globals().get('RETRY_BACKOFF', 1.5)
             while True:
                 try:
                     return fn(*a, **k)
@@ -4425,7 +4474,7 @@ def retry_on_exception(retries=2, delay=0.5, allowed_exceptions=(Exception,), ba
                         raise
                     if r <= 0: raise
                     time.sleep(d);
-                    d *= backoff;
+                    d *= b;
                     r -= 1
 
         return wrapper
@@ -4556,6 +4605,16 @@ try:
 except Exception:
     pass
 try:
+    LOG_LEVEL = _GLOBAL_PATCH_CFG.get('LOG_LEVEL', LOG_LEVEL)
+    LOG_TO_CONSOLE = _GLOBAL_PATCH_CFG.get('LOG_TO_CONSOLE', LOG_TO_CONSOLE)
+    ABORT_HOTKEY = _GLOBAL_PATCH_CFG.get('ABORT_HOTKEY', ABORT_HOTKEY)
+    RETRY_ATTEMPTS = int(_GLOBAL_PATCH_CFG.get('RETRY_ATTEMPTS', RETRY_ATTEMPTS))
+    RETRY_DELAY = float(_GLOBAL_PATCH_CFG.get('RETRY_DELAY', RETRY_DELAY))
+    RETRY_BACKOFF = float(_GLOBAL_PATCH_CFG.get('RETRY_BACKOFF', RETRY_BACKOFF))
+    _configure_logging(LOG_LEVEL, LOG_TO_CONSOLE)
+except Exception:
+    pass
+try:
     _ld = _GLOBAL_PATCH_CFG.get('logging', {}).get('log_dir', 'logs');
     _ensure_dir(_ld)
 except Exception:
@@ -4582,6 +4641,14 @@ if 'main' in globals() and callable(globals()['main']):
         t0 = time.time()
         try:
             globals()['_GLOBAL_PATCH_CFG'] = load_config()
+            apply_config_values(globals()['_GLOBAL_PATCH_CFG'])
+            LOG_LEVEL_LOCAL = globals()['_GLOBAL_PATCH_CFG'].get('LOG_LEVEL', globals().get('LOG_LEVEL', 'INFO'))
+            LOG_TO_CONSOLE_LOCAL = globals()['_GLOBAL_PATCH_CFG'].get('LOG_TO_CONSOLE', globals().get('LOG_TO_CONSOLE', False))
+            globals()['ABORT_HOTKEY'] = globals()['_GLOBAL_PATCH_CFG'].get('ABORT_HOTKEY', globals().get('ABORT_HOTKEY', 'f12'))
+            globals()['RETRY_ATTEMPTS'] = int(globals()['_GLOBAL_PATCH_CFG'].get('RETRY_ATTEMPTS', globals().get('RETRY_ATTEMPTS', 2)))
+            globals()['RETRY_DELAY'] = float(globals()['_GLOBAL_PATCH_CFG'].get('RETRY_DELAY', globals().get('RETRY_DELAY', 0.5)))
+            globals()['RETRY_BACKOFF'] = float(globals()['_GLOBAL_PATCH_CFG'].get('RETRY_BACKOFF', globals().get('RETRY_BACKOFF', 1.5)))
+            _configure_logging(LOG_LEVEL_LOCAL, LOG_TO_CONSOLE_LOCAL)
         except Exception:
             pass
         try:
@@ -5248,7 +5315,7 @@ def _MERDIVEN_RUN_GUI():
                 _kb0 = m._kb_pressed
 
                 def _kb(k):
-                    if k.lower() == "f12" and getattr(m, "GUI_ABORT", False): return True
+                    if k.lower() in ("f12", _get_abort_hotkey().lower()) and getattr(m, "GUI_ABORT", False): return True
                     try:
                         return _kb0(k)
                     except:
@@ -5257,7 +5324,7 @@ def _MERDIVEN_RUN_GUI():
                 m._kb_pressed = _kb
             else:
                 def _kb(k):
-                    if k.lower() == "f12" and getattr(m, "GUI_ABORT", False): return True
+                    if k.lower() in ("f12", _get_abort_hotkey().lower()) and getattr(m, "GUI_ABORT", False): return True
                     return False
 
                 m._kb_pressed = _kb
@@ -5267,7 +5334,7 @@ def _MERDIVEN_RUN_GUI():
 
                 def _gui_is_pressed(key):
                     try:
-                        if str(key).lower() == "f12" and getattr(m, "GUI_ABORT", False):
+                        if str(key).lower() in ("f12", _get_abort_hotkey().lower()) and getattr(m, "GUI_ABORT", False):
                             return True
                     except Exception:
                         pass
@@ -5301,6 +5368,9 @@ def _MERDIVEN_RUN_GUI():
             ttk.Button(f1, text="Ayarları Kaydet", command=self.save).grid(row=r, column=2, sticky="we", padx=2, pady=2)
             ttk.Button(f1, text="Hepsini Kapat", command=self.kill_all).grid(row=r, column=3, sticky="we", padx=2,
                                                                              pady=2);
+            ttk.Button(f1, text="Kalibrasyon (koordinat)", command=self.run_calibration).grid(row=r, column=4,
+                                                                                            sticky="we", padx=2,
+                                                                                            pady=2)
             r += 1
             ttk.Label(f1, text="Kullanıcı Adı:").grid(row=r, column=0, sticky="e");
             ttk.Entry(f1, textvariable=self.v["username"], width=28).grid(row=r, column=1, sticky="w");
@@ -5619,9 +5689,10 @@ def _MERDIVEN_RUN_GUI():
                 self.root.after(0, self._sync_thread_state)
 
         def stop(self):
-            self._msg("Durdur (F12 sanalı)...");
+            hotkey = _get_abort_hotkey().upper()
+            self._msg(f"Durdur ({hotkey} sanalı)...");
             m.GUI_ABORT = True;
-            self.stage.set("Durduruluyor (F12)...")
+            self.stage.set(f"Durduruluyor ({hotkey})...")
 
         def _sync_thread_state(self):
             thr = getattr(self, "thr", None)
@@ -5643,6 +5714,70 @@ def _MERDIVEN_RUN_GUI():
             win.resizable(False, False)
             ttk.Label(win, textvariable=self.stage, foreground="blue", font=("Segoe UI", 12, "bold")).pack(padx=10,
                                                                                                            pady=10)
+
+        def run_calibration(self):
+            try:
+                import pyautogui as _p
+            except Exception as e:
+                self._msg(f"[CAL] pyautogui yok: {e}")
+                try:
+                    import tkinter.messagebox as messagebox
+                    messagebox.showerror("Kalibrasyon", "pyautogui yüklenemedi, kalibrasyon yapılamıyor.")
+                except Exception:
+                    pass
+                return
+
+            try:
+                import tkinter.messagebox as messagebox
+            except Exception:
+                messagebox = None
+
+            cfg = load_config()
+            updates = {}
+
+            def _capture(label: str, key: str):
+                base = cfg.get(key, globals().get(key, (0, 0)))
+                try:
+                    if messagebox:
+                        messagebox.showinfo("Kalibrasyon", f"{label}\nİmleci konuma getirip ENTER'a basın.")
+                except Exception:
+                    pass
+                start = time.time()
+                while time.time() - start < 25:
+                    if _abort_requested():
+                        self._msg("[CAL] İptal edildi.")
+                        return base
+                    try:
+                        if keyboard.is_pressed('enter'):
+                            pos = _p.position()
+                            self._msg(f"[CAL] {label}: {pos}")
+                            return (int(pos.x), int(pos.y))
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                return base
+
+            capture_targets = [
+                ("TOWN_CLICK_POS", "Town tıklama konumu"),
+                ("SCROLL_POS", "Scroll satın alma konumu"),
+                ("NPC_CONTEXT_RIGHTCLICK_POS", "NPC sağ tık konumu"),
+                ("LOGIN_USERNAME_CLICK_POS", "Launcher kullanıcı adı alanı"),
+                ("LOGIN_PASSWORD_CLICK_POS", "Launcher şifre alanı"),
+            ]
+
+            for key, label in capture_targets:
+                updates[key] = _capture(label, key)
+
+            cfg.update(updates)
+            save_config(cfg)
+            globals()['_GLOBAL_PATCH_CFG'] = cfg
+            apply_config_values(cfg)
+            try:
+                if messagebox:
+                    messagebox.showinfo("Kalibrasyon", "Koordinatlar kaydedildi ve uygulandı.")
+            except Exception:
+                pass
+            self._msg("[CAL] Kalibrasyon tamamlandı.")
 
         # ---- Ayar yükle/kaydet/uygula ----
         def _cfg(self):
