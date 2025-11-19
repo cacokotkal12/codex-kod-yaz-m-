@@ -2910,6 +2910,7 @@ def _item_sale_run_cycle(w):
     thresholds = [t for t in thresholds if t > 0]
     done = [False] * len(thresholds)
     bank_threshold = int(globals().get("BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))
+    last_empty_slots = None
     while True:
         wait_if_paused()
         watchdog_enforce()
@@ -2920,6 +2921,9 @@ def _item_sale_run_cycle(w):
         release_key(SC_I)
         time.sleep(0.5)
         empty_slots = count_empty_slots("INV")
+        if last_empty_slots is None:
+            # Başlangıçta eşik kontrolü yapılmasın (kurulum sonrası üst üste tetiklemeyi önler)
+            last_empty_slots = empty_slots
         _update_sale_metrics(empty_slots=empty_slots)
         press_key(SC_I)
         release_key(SC_I)
@@ -2928,11 +2932,18 @@ def _item_sale_run_cycle(w):
             print(f"[ITEM_SATIS] Banka eşiği ({bank_threshold}) yakalandı.")
             return _item_sale_handle_bank(w)
         for idx, thr in enumerate(thresholds):
-            if idx < len(done) and empty_slots >= thr and not done[idx] and all(done[:idx]):
+            if (
+                idx < len(done)
+                and empty_slots >= thr
+                and (last_empty_slots is None or last_empty_slots < thr)
+                and not done[idx]
+                and all(done[:idx])
+            ):
                 print(f"[ITEM_SATIS] Eşik tetiklendi ({thr}).")
                 _item_sale_refresh_market(initial=False)
                 done[idx] = True
                 break
+        last_empty_slots = empty_slots
         time.sleep(3.0)
 
 
@@ -6703,7 +6714,14 @@ def _y_build_and_attach_gui(root):
     nb.add(npc_tab, text="NPC / Upgrade")
 
     general_vars: Dict[str, Any] = {}
-    if CONFIG_FIELDS:
+    config_fields: List[ConfigField] = [
+        f for f in CONFIG_FIELDS if isinstance(f, ConfigField)
+    ]
+    category_order: Tuple[str, ...] = tuple(
+        dict.fromkeys(f.category for f in config_fields)
+    )
+
+    if config_fields:
         cgen = tk.Canvas(general_tab, highlightthickness=0)
         vs_gen = ttk.Scrollbar(general_tab, orient="vertical", command=cgen.yview)
         cgen.configure(yscrollcommand=vs_gen.set)
@@ -6714,8 +6732,8 @@ def _y_build_and_attach_gui(root):
         cgen.pack(side="left", fill="both", expand=True)
         vs_gen.pack(side="right", fill="y")
 
-        for category in CONFIG_CATEGORY_ORDER:
-            fields = [f for f in CONFIG_FIELDS if f.category == category]
+        for category in category_order:
+            fields = [f for f in config_fields if f.category == category]
             if not fields:
                 continue
             grp = ttk.LabelFrame(general_frame, text=category)
@@ -6859,7 +6877,7 @@ def _y_build_and_attach_gui(root):
         last_field = None
         try:
             general_updates = {}
-            for field in CONFIG_FIELDS:
+            for field in config_fields:
                 var = general_vars.get(field.key)
                 if not var:
                     continue
