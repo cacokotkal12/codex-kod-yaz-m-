@@ -5376,6 +5376,11 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_902_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_902_135_HIZ", CLICK_902_135_HIZ))),
                 "sale_click_899_count": tk.IntVar(value=int(getattr(m, "CLICK_899_399_ADET", CLICK_899_399_ADET))),
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
+                "auto_market_refresh_enabled": tk.BooleanVar(
+                    value=bool(getattr(m, "auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))),
+                "auto_market_refresh_interval_hours": tk.DoubleVar(
+                    value=float(getattr(m, "auto_market_refresh_interval_hours",
+                                        AUTO_MARKET_REFRESH_INTERVAL_HOURS))),
                 "sale_bank_threshold": tk.IntVar(
                     value=int(getattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))),
                 "sale_bank_withdraw": tk.IntVar(
@@ -5672,8 +5677,17 @@ def _MERDIVEN_RUN_GUI():
                                                                             pady=2)
             ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
                                                                                            padx=4, pady=2)
+            lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
+            lf_auto_refresh.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
+                            variable=self.v["auto_market_refresh_enabled"], onvalue=True,
+                            offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_auto_refresh, text="Yenileme aralığı (saat):").grid(row=1, column=0, sticky="e", padx=4,
+                                                                             pady=2)
+            ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
+                row=1, column=1, sticky="w", padx=4, pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=4, column=0, columnspan=2,
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=5, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
@@ -6004,6 +6018,9 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "CLICK_902_135_HIZ", float(self.v["sale_click_902_speed"].get()))
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
+            setattr(m, "auto_market_refresh_enabled", bool(self.v["auto_market_refresh_enabled"].get()))
+            setattr(m, "auto_market_refresh_interval_hours",
+                    float(self.v["auto_market_refresh_interval_hours"].get()))
             setattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", int(self.v["sale_bank_threshold"].get()))
             try:
                 withdraw_val = int(self.v["sale_bank_withdraw"].get())
