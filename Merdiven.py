@@ -2961,6 +2961,7 @@ def _item_sale_run_cycle(w):
 
     def _try_auto_market_refresh() -> bool:
         nonlocal next_scan
+        global _AUTO_MARKET_LAST_REFRESH_TS
         enabled = bool(globals().get("auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))
         if not enabled:
             return False
