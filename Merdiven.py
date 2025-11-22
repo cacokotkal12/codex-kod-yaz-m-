@@ -454,6 +454,7 @@ PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.015;
 TARGET_STABLE_HITS = 10
+MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
 # ---- Yürüme / Dönüş ----
 ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
@@ -2283,6 +2284,59 @@ def detect_w_direction(w, axis: str, pulses=4, dp=0.020, target=None) -> int:
     return +1
 
 
+def _select_micro_key(direction: int, cur: int, target: int) -> str:
+    """Hedefe yaklaşmak için W/S tuşunu seç (yön ölçümüne göre)."""
+    forward_if_higher = (target > cur and direction == +1) or (target < cur and direction == -1)
+    return 'w' if forward_if_higher else 's'
+
+
+def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, target: int, direction: int,
+                       pulse_seq: Sequence[float], settle_hits: int, max_duration: float = MICRO_ADJUST_MAX_DURATION,
+                       deadline: Optional[float] = None) -> bool:
+    """Çift yönlü mikro döngü: hedefin üstünde ise S, altında ise W ile toparlar."""
+    start = time.time()
+    stable = 0
+    key_map = {'w': SC_W, 's': SC_S}
+
+    def _deadline_reached():
+        now = time.time()
+        if (now - start) >= max_duration:
+            return True
+        if deadline is not None and now >= deadline:
+            return True
+        return False
+
+    while not _deadline_reached():
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            return False
+        cur = read_current()
+        if cur is None:
+            time.sleep(MICRO_READ_DELAY)
+            continue
+        if cur == target:
+            stable += 1
+            if stable >= settle_hits:
+                print(f"[PREC] {axis.upper()} hedef {target} yakalandı.")
+                return True
+            time.sleep(MICRO_READ_DELAY)
+            continue
+        stable = 0
+        key_char = _select_micro_key(direction, cur, target)
+        key_code = key_map[key_char]
+        for dp in pulse_seq:
+            with key_tempo(0.0):
+                press_key(key_code)
+                time.sleep(max(0.002, dp))
+                release_key(key_code)
+            time.sleep(MICRO_READ_DELAY)
+            after = read_current()
+            if after is not None and after != cur:
+                break
+    return False
+
+
 def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre_brake_delta: int = PRE_BRAKE_DELTA,
                            pulse: float = MICRO_PULSE_DURATION, settle_hits: int = TARGET_STABLE_HITS,
                            force_exact: bool = True) -> bool:
@@ -2327,43 +2381,13 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
-    def needs_nudge(c, t):
-        return (c < t) if direction == +1 else (c > t)
-
-    def is_overshoot(c, t):
-        return (c > t) if direction == +1 else (c < t)
-
-    stable = 0;
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
-    while (time.time() - t0) <= timeout:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'): return False
-        cur = _read_axis(w, axis)
-        if cur is None: time.sleep(MICRO_READ_DELAY); continue
-        if cur == target:
-            stable += 1
-            if stable >= settle_hits: print(f"[PREC] {axis.upper()} hedef {target} yakalandı."); return True
-            time.sleep(MICRO_READ_DELAY);
-            continue
-        else:
-            stable = 0
-        if needs_nudge(cur, target):
-            for dp in seq:
-                with key_tempo(0.0):
-                    press_key(SC_W);
-                    time.sleep(max(0.002, dp));
-                    release_key(SC_W)
-                time.sleep(MICRO_READ_DELAY);
-                after = _read_axis(w, axis)
-                if after != cur: break
-        elif is_overshoot(cur, target):
-            print(f"[PREC] overshoot: cur={cur} target={target}");
-            time.sleep(MICRO_READ_DELAY)
-        else:
-            time.sleep(MICRO_READ_DELAY)
+    remaining_timeout = max(0.0, float(timeout) - (time.time() - t0))
+    deadline = time.time() + remaining_timeout
+    matched = _micro_adjust_axis(lambda: _read_axis(w, axis), axis, target, direction, seq, settle_hits,
+                                 max_duration=MICRO_ADJUST_MAX_DURATION, deadline=deadline)
     fc = _read_axis(w, axis);
-    ok = (fc == target) if force_exact else abs((fc or target) - target) <= 1
+    ok = matched or ((fc == target) if force_exact else abs((fc or target) - target) <= 1)
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
     return ok
 
