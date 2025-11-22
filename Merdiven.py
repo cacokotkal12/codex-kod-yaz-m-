@@ -631,12 +631,32 @@ def maybe_autotune(force=False):
 
 AUTO_UNPAUSE_ON_CRITICAL = True
 MODE = "NORMAL";
+PLUS8_RESUME = False  # Relaunch sonrası +8 modunu hatırlamak için bayrak
 BANK_FULL_FLAG = False;
 ITEMS_DEPLETED_FLAG = False;
 REQUEST_RELAUNCH = False;
 BANK_OPEN = False;
 FORCE_PLUS7_ONCE = False
 NEED_STAIRS_REALIGN = True  # relaunch/yeniden giriş sonrası merdiven başlangıcı zorunlu
+
+
+def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = False):
+    """MODE'u NORMAL yapar; istenirse +8 devam bayrağını da temizler."""
+    global MODE, PLUS8_RESUME
+    MODE = "NORMAL"
+    if reset_plus8_state:
+        PLUS8_RESUME = False
+    if reason:
+        print(f"[MODE] NORMAL ({reason})")
+
+
+def _set_mode_bank_plus8(reason: str = None):
+    """MODE'u BANK_PLUS8 yapar ve yeniden girişlerde devam için bayrağı ayarlar."""
+    global MODE, PLUS8_RESUME
+    MODE = "BANK_PLUS8"
+    PLUS8_RESUME = True
+    if reason:
+        print(f"[MODE] BANK_PLUS8 ({reason})")
 
 # ---- LOW scroll genel reopen limiti (anvil) ----
 SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 5
@@ -2339,7 +2359,22 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 if after != cur: break
         elif is_overshoot(cur, target):
             print(f"[PREC] overshoot: cur={cur} target={target}");
-            time.sleep(MICRO_READ_DELAY)
+            release_key(SC_W)
+            correction_deadline = time.time() + 1.5
+            while time.time() < correction_deadline:
+                wait_if_paused();
+                watchdog_enforce()
+                cur_back = _read_axis(w, axis)
+                if cur_back is None:
+                    time.sleep(MICRO_READ_DELAY);
+                    continue
+                if not is_overshoot(cur_back, target):
+                    # Hedefe geri döndüysek ana döngü istikrarı ölçsün.
+                    if cur_back == target:
+                        stable = 0
+                    break
+                micro_tap(SC_S, pulse * 0.6)
+                time.sleep(MICRO_READ_DELAY)
         else:
             time.sleep(MICRO_READ_DELAY)
     fc = _read_axis(w, axis);
@@ -2612,13 +2647,13 @@ def after_deposit_check_and_decide_mode(w):
 
     if empties >= 1:
         print(f"[BANK] 8.sayfa {empties} boş → NORMAL.")
-        MODE = "NORMAL"
+        _set_mode_normal("8.sayfa boş", reset_plus8_state=True)
         BANK_FULL_FLAG = False
         return "NORMAL"
 
     # 8. sayfa FULL
     print(f"[BANK] 8.sayfa full.")
-    MODE = "NORMAL"
+    _set_mode_normal("8.sayfa full", reset_plus8_state=True)
     BANK_FULL_FLAG = True
 
     if AUTO_BANK_PLUS8:
@@ -2629,14 +2664,14 @@ def after_deposit_check_and_decide_mode(w):
             wait_if_paused();
             watchdog_enforce()
             if _kb_pressed('f'):
-                MODE = "BANK_PLUS8"
+                _set_mode_bank_plus8("F alındı")
                 print("[BANK] 'F' alındı → BANK_PLUS8.")
                 return "BANK_PLUS8"
             if _kb_pressed('f12'):
                 print("[BANK] F12 alındı → ABORT.")
                 return "ABORT"
             time.sleep(0.1)
-        MODE = "BANK_PLUS8"
+        _set_mode_bank_plus8("Süre doldu")
         print("[BANK] Süre doldu → otomatik BANK_PLUS8.")
         return "BANK_PLUS8"
     else:
@@ -2647,7 +2682,7 @@ def after_deposit_check_and_decide_mode(w):
             wait_if_paused();
             watchdog_enforce()
             if _kb_pressed('f'):
-                MODE = "BANK_PLUS8"
+                _set_mode_bank_plus8("F alındı")
                 print("[BANK] 'F' alındı → BANK_PLUS8.")
                 return "BANK_PLUS8"
             if _kb_pressed('f12'):
@@ -2655,7 +2690,7 @@ def after_deposit_check_and_decide_mode(w):
                 return "ABORT"
             time.sleep(0.1)
         print("[BANK] Süre doldu → NORMAL.")
-        MODE = "NORMAL"
+        _set_mode_normal("F süresi doldu", reset_plus8_state=True)
         return "NORMAL"
 
 
@@ -3512,7 +3547,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             print("[BANK_PLUS8] Banka açılamadı, town & tekrar.");
             send_town_command()
             if not move_to_769_and_turn_from_top(w): print(
-                "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); MODE = "NORMAL"; return
+                "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); _set_mode_normal("Banka açılamadı"); return
 
     # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
     y_now = _read_y_now()
@@ -3545,12 +3580,12 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
             low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
             print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
-            MODE = "NORMAL";
+            _set_mode_normal("Bankada +7 kalmadı", reset_plus8_state=True)
             return
         ensure_ui_closed();
         exit_game_fast(w);
         w = relaunch_and_login_to_ingame()
-        if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); MODE = "NORMAL"; return
+        if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); _set_mode_normal("Relaunch upgrade başarısız"); return
         sx = town_until_valid_x(w);
         ascend_stairs_to_top(w);
         go_to_anvil_from_top(sx)
@@ -3558,7 +3593,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         print(f"[BANK_PLUS8] +8 deneme: {attempts}/{taken}")
         exit_game_fast(w);
         w = relaunch_and_login_to_ingame()
-        if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); MODE = "NORMAL"; return
+        if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); _set_mode_normal("Relaunch depozit başarısız"); return
         town_until_valid_x(w);
         ascend_stairs_to_top(w);
         press_key(SC_I);
@@ -3576,14 +3611,33 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         else:
             print("[BANK_PLUS8] Üzerinde +8 yok.")
             if not move_to_769_and_turn_from_top(w): print(
-                "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); MODE = "NORMAL"; return
+                "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
 
 
 # ================== NORMAL ÇALIŞMA DÖNGÜSÜ ==================
 @crashguard("WORKFLOW")
 def run_stairs_and_workflow(w):
     # global satırı EN BAŞTA olmalı
-    global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, REQUEST_RELAUNCH, FORCE_PLUS7_ONCE, BANK_OPEN, NEED_STAIRS_REALIGN, TOWN_LOCKED
+    global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, REQUEST_RELAUNCH
+    global FORCE_PLUS7_ONCE, BANK_OPEN, NEED_STAIRS_REALIGN, TOWN_LOCKED
+    global PLUS8_RESUME
+
+    def _ensure_stairs_ready_for_bank_plus8(win):
+        """BANK_PLUS8 resume edildiğinde bile merdiven hizalamasını garanti et."""
+        global NEED_STAIRS_REALIGN, TOWN_LOCKED
+        must_realign = NEED_STAIRS_REALIGN
+        try:
+            cur_x, cur_y = read_coordinates(win)
+        except Exception:
+            cur_x, cur_y = None, None
+        if cur_x not in VALID_X or cur_y is None or int(cur_y) != STAIRS_BOTTOM_Y:
+            must_realign = True
+        if must_realign:
+            set_stage("STAIRS_REALIGN_FOR_BANK_PLUS8")
+            TOWN_LOCKED = False
+            town_until_valid_x(win)
+            ascend_stairs_to_top(win)
+        return True
 
     set_stage("WORKFLOW_LOOP")
     print(f">>> Akış başlıyor (tur={GLOBAL_CYCLE}, +7_kontrol_turu>={NEXT_PLUS7_CHECK_AT})")
@@ -3602,9 +3656,10 @@ def run_stairs_and_workflow(w):
             ascend_stairs_to_top(w)
             continue
 
-        if keyboard.is_pressed("f") or MODE == "BANK_PLUS8":
-            MODE = "BANK_PLUS8"
-            print("[KAMPANYA] +8 modu (F).")
+        if keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME:
+            _set_mode_bank_plus8("Klavye/Resume")
+            print("[KAMPANYA] +8 modu (F/Resume).")
+            _ensure_stairs_ready_for_bank_plus8(w)
             if not BANK_OPEN:
                 if not move_to_769_and_turn_from_top(w):
                     print("[KAMPANYA] Banka yok; town & retry.")
@@ -3612,7 +3667,7 @@ def run_stairs_and_workflow(w):
                     continue
             run_bank_plus8_cycle(w, bank_is_open=BANK_OPEN)
             print("[KAMPANYA] +8 modu tamam → NORMAL.")
-            MODE = "NORMAL"
+            _set_mode_normal("BANK_PLUS8 döngü tamam", reset_plus8_state=True)
             continue
 
         try:
