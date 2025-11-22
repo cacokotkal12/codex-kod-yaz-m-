@@ -68,7 +68,7 @@ def _read_y_now():
 
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
     random, \
-    sys, atexit, traceback, logging, functools, copy, math
+    sys, atexit, traceback, logging, functools, copy, math, threading
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -370,10 +370,20 @@ PAZAR_YENILEME_BEKELEME_MIN = 120.0
 PAZAR_YENILEME_BEKELEME_MAX = 120.0
 PAZAR_YENILEME_BEKELEME_SURESI = PAZAR_YENILEME_BEKELEME_MAX  # geriye dönük uyum
 PAZAR_ILK_BEKELEME_SURESI = 5.0
+AUTO_MARKET_REFRESH_ENABLED = False
+AUTO_MARKET_REFRESH_INTERVAL_HOURS = 3.0
+_AUTO_MARKET_LAST_REFRESH_TS = 0.0
+_AUTO_MARKET_REFRESH_LOCK = threading.Lock()
 CLICK_902_135_ADET = 3
 CLICK_902_135_HIZ = 0.05
 CLICK_899_399_ADET = 3
 CLICK_899_399_HIZ = 0.05
+KRALLIK_YAZISI_ENABLED = True
+KRALLIK_YAZISI_CLICK_POS = (800, 281)
+KRALLIK_YAZISI_INTERVAL = 50.0
+KRALLIK_YAZISI_HOLD_MS = 50.0
+KRALLIK_YAZISI_POST_REFRESH_DELAY = 5.0
+_KRALLIK_LAST_CLICK_TS = 0.0
 BANKAYA_GIT_BOS_SLOT_ESIGI = 27
 ITEM_SALE_SLOT_SCAN_INTERVAL = 10.0
 ITEM_SALE_EXIT_DELAY_MIN = 0.0
@@ -2816,6 +2826,7 @@ def _item_sale_report_slot_count(empty_slots: int):
 
 
 def _item_sale_refresh_market(initial=False) -> int:
+    global _AUTO_MARKET_LAST_REFRESH_TS
     set_stage("ITEM_SATIS_PAZAR_YENILE")
     if initial:
         if PAZAR_ILK_BEKELEME_SURESI > 0:
@@ -2856,6 +2867,12 @@ def _item_sale_refresh_market(initial=False) -> int:
     filled = _item_sale_fill_market(price_text)
     print(f"[ITEM_SATIS] Pazara yerleşen item: {filled}")
     stage_detail(f"Pazara yerleşen item: {filled}")
+    _AUTO_MARKET_LAST_REFRESH_TS = time.time()
+    globals()["_AUTO_MARKET_LAST_REFRESH_TS"] = _AUTO_MARKET_LAST_REFRESH_TS
+    try:
+        log(f"[AUTO_MARKET] Yenileme tamamlandı (initial={initial}, adet={filled}).")
+    except Exception:
+        pass
     return filled
 
 
@@ -2910,6 +2927,7 @@ def _item_sale_handle_bank(w):
 
 
 def _item_sale_run_cycle(w):
+    global _AUTO_MARKET_LAST_REFRESH_TS
     thresholds = [
         int(globals().get("PAZAR_ESIK_1", PAZAR_ESIK_1)),
         int(globals().get("PAZAR_ESIK_2", PAZAR_ESIK_2)),
@@ -2926,19 +2944,149 @@ def _item_sale_run_cycle(w):
         interval = 1.0
 
     set_stage("ITEM_SATIS_SLOT_TAKIP")
-    next_scan = 0.0
-    inv_open = True
+    state = {
+        "next_scan": 0.0,
+        "inv_open": True,
+    }
+    last_krallik_click = 0.0
+    kr_click_backoff_until = 0.0
+    kr_click_error_streak = 0
+    kr_click_enabled = bool(globals().get("KRALLIK_YAZISI_ENABLED", KRALLIK_YAZISI_ENABLED))
+    try:
+        pos_val = globals().get("KRALLIK_YAZISI_CLICK_POS", KRALLIK_YAZISI_CLICK_POS) or KRALLIK_YAZISI_CLICK_POS
+        kr_click_pos = (int(pos_val[0]), int(pos_val[1]))
+    except Exception:
+        kr_click_pos = KRALLIK_YAZISI_CLICK_POS
+    try:
+        kr_click_interval = float(globals().get("KRALLIK_YAZISI_INTERVAL", KRALLIK_YAZISI_INTERVAL))
+    except Exception:
+        kr_click_interval = KRALLIK_YAZISI_INTERVAL
+    kr_click_interval = max(1.0, kr_click_interval)
+    try:
+        kr_click_hold_ms = float(globals().get("KRALLIK_YAZISI_HOLD_MS", KRALLIK_YAZISI_HOLD_MS))
+    except Exception:
+        kr_click_hold_ms = KRALLIK_YAZISI_HOLD_MS
+    kr_click_hold_ms = max(0.0, kr_click_hold_ms)
+    try:
+        kr_post_refresh_delay = float(globals().get("KRALLIK_YAZISI_POST_REFRESH_DELAY", KRALLIK_YAZISI_POST_REFRESH_DELAY))
+    except Exception:
+        kr_post_refresh_delay = KRALLIK_YAZISI_POST_REFRESH_DELAY
+    kr_post_refresh_delay = max(0.0, kr_post_refresh_delay)
+    refresh_lock = globals().get("_AUTO_MARKET_REFRESH_LOCK")
+    if refresh_lock is None:
+        refresh_lock = threading.Lock()
+        globals()["_AUTO_MARKET_REFRESH_LOCK"] = refresh_lock
 
     def open_inventory():
-        nonlocal inv_open, next_scan
-        if not inv_open:
-            inv_open = True
-            next_scan = 0.0
+        if not state["inv_open"]:
+            state["inv_open"] = True
+            state["next_scan"] = 0.0
 
     def close_inventory():
-        nonlocal inv_open
-        if inv_open:
-            inv_open = False
+        if state["inv_open"]:
+            state["inv_open"] = False
+
+    def _try_auto_market_refresh() -> bool:
+        global _AUTO_MARKET_LAST_REFRESH_TS
+        nonlocal last_krallik_click, kr_click_backoff_until, kr_click_error_streak
+        enabled = bool(globals().get("auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))
+        if not enabled:
+            return False
+        try:
+            interval_hours = float(globals().get("auto_market_refresh_interval_hours", AUTO_MARKET_REFRESH_INTERVAL_HOURS))
+        except Exception:
+            interval_hours = AUTO_MARKET_REFRESH_INTERVAL_HOURS
+        interval_sec = max(60.0, interval_hours * 3600.0)
+        last = float(globals().get("_AUTO_MARKET_LAST_REFRESH_TS", _AUTO_MARKET_LAST_REFRESH_TS) or 0.0)
+        now = time.time()
+        if now - last < interval_sec:
+            return False
+        if refresh_lock and not refresh_lock.acquire(False):
+            return False
+        globals()["_AUTO_MARKET_REFRESHING"] = True
+        try:
+            stage_detail("Otomatik pazar yenileme tetikleniyor")
+            msg = f"[ITEM_SATIS] Otomatik pazar yenileme tetiklendi (aralık {interval_hours:g} saat)."
+            print(msg)
+            try:
+                log(msg)
+            except Exception:
+                pass
+            close_inventory()
+            _item_sale_refresh_market(initial=False)
+            _AUTO_MARKET_LAST_REFRESH_TS = time.time()
+            globals()["_AUTO_MARKET_LAST_REFRESH_TS"] = _AUTO_MARKET_LAST_REFRESH_TS
+            state["next_scan"] = 0.0
+            now_ts = time.time()
+            last_krallik_click = now_ts
+            kr_click_backoff_until = now_ts + kr_post_refresh_delay
+            kr_click_error_streak = 0
+            return True
+        except Exception as e:
+            err = f"[ITEM_SATIS] Otomatik pazar yenileme hata: {e}"
+            print(err)
+            try:
+                log(err, lvl="warning")
+            except Exception:
+                pass
+            _AUTO_MARKET_LAST_REFRESH_TS = now
+            globals()["_AUTO_MARKET_LAST_REFRESH_TS"] = _AUTO_MARKET_LAST_REFRESH_TS
+            return False
+        finally:
+            globals()["_AUTO_MARKET_REFRESHING"] = False
+            if refresh_lock:
+                try:
+                    refresh_lock.release()
+                except Exception:
+                    pass
+
+    def _krallik_yazisi_click(now: float):
+        nonlocal last_krallik_click, kr_click_backoff_until, kr_click_error_streak
+        if not kr_click_enabled:
+            return
+        if globals().get("_AUTO_MARKET_REFRESHING"):
+            return
+        if now < kr_click_backoff_until:
+            return
+        if now - last_krallik_click < kr_click_interval:
+            return
+        try:
+            mouse_move(*kr_click_pos)
+            if kr_click_hold_ms > 0:
+                if not pause_point():
+                    return
+                extra = ctypes.c_ulong(0)
+                ii_ = Input_I()
+                ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, ctypes.pointer(extra))
+                SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+                time.sleep(kr_click_hold_ms / 1000.0)
+                if not pause_point():
+                    return
+                ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
+                SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+                time.sleep(mouse_hizi / 2)
+            else:
+                mouse_click("left")
+            last_krallik_click = now
+            kr_click_error_streak = 0
+            try:
+                globals()["_KRALLIK_LAST_CLICK_TS"] = now
+            except Exception:
+                pass
+            try:
+                stage_detail(f"Krallık yazısı korunuyor (tıklandı — {time.strftime('%H:%M:%S', time.localtime(now))})")
+            except Exception:
+                pass
+        except Exception as e:
+            kr_click_error_streak += 1
+            if kr_click_error_streak >= 3:
+                kr_click_backoff_until = now + 60.0
+                kr_click_error_streak = 0
+                try:
+                    stage_detail("Krallık yazısı tıklaması ardışık hatalar nedeniyle 60 sn beklemede")
+                except Exception:
+                    pass
+            print(f"[ITEM_SATIS] Krallık yazısı tıklama hata: {e}")
 
     while True:
         wait_if_paused()
@@ -2950,14 +3098,14 @@ def _item_sale_run_cycle(w):
 
         open_inventory()
         now = time.time()
-        if now < next_scan:
+        if now < state["next_scan"]:
             time.sleep(0.2)
             continue
 
         set_stage("ITEM_SATIS_SLOT_TAKIP")
         empty_slots = count_empty_slots("INV")
         _item_sale_report_slot_count(empty_slots)
-        next_scan = time.time() + interval
+        state["next_scan"] = time.time() + interval
 
         if empty_slots >= bank_threshold:
             print(f"[ITEM_SATIS] Banka eşiği ({bank_threshold}) yakalandı.")
@@ -2972,6 +3120,11 @@ def _item_sale_run_cycle(w):
                 _wait_with_stage_detail(delay, lambda rem: f"Boş slot sonrası çıkış bekleniyor: {rem} sn kaldı")
             return _item_sale_handle_bank(w)
 
+        _krallik_yazisi_click(now)
+
+        if _try_auto_market_refresh():
+            continue
+
         triggered = False
         for idx, thr in enumerate(thresholds):
             if idx < len(done) and empty_slots >= thr and not done[idx] and all(done[:idx]):
@@ -2981,7 +3134,11 @@ def _item_sale_run_cycle(w):
                 _item_sale_refresh_market(initial=False)
                 set_stage("ITEM_SATIS_SLOT_TAKIP")
                 done[idx] = True
-                next_scan = 0.0
+                state["next_scan"] = 0.0
+                now_ts = time.time()
+                last_krallik_click = now_ts
+                kr_click_backoff_until = now_ts + kr_post_refresh_delay
+                kr_click_error_streak = 0
                 triggered = True
                 break
 
@@ -4109,6 +4266,32 @@ def _parse_number_list(raw: Any) -> List[float]:
     return [float(x) for x in _NUMBER_RE.findall(str(raw or ""))]
 
 
+def _clamp_float(value: Any, default: float, minimum: float = 0.0, maximum: Optional[float] = None) -> float:
+    try:
+        val = float(value)
+    except Exception:
+        val = float(default)
+    if math.isnan(val) or math.isinf(val):
+        val = float(default)
+    if val < minimum:
+        val = minimum
+    if maximum is not None and val > maximum:
+        val = maximum
+    return val
+
+
+def _clamp_int(value: Any, default: int, minimum: int = 0, maximum: Optional[int] = None) -> int:
+    try:
+        val = int(round(float(value)))
+    except Exception:
+        val = int(default)
+    if val < minimum:
+        val = minimum
+    if maximum is not None and val > maximum:
+        val = maximum
+    return val
+
+
 def _ensure_float_list(value: Any) -> List[float]:
     if isinstance(value, (list, tuple, set)):
         seq = sorted(value) if isinstance(value, set) else list(value)
@@ -4169,6 +4352,19 @@ def _ensure_regions(value: Any) -> Tuple[str, ...]:
 
 def _ensure_int_set(value: Any) -> set:
     return set(_ensure_int_list(value))
+
+
+def _apply_positive_interval(value: Any, fallback: float, minimum: float = 1.0) -> float:
+    return _clamp_float(value, fallback, minimum=minimum)
+
+
+def _apply_non_negative_ms(value: Any, fallback: float, maximum: Optional[float] = None) -> float:
+    return _clamp_float(value, fallback, minimum=0.0, maximum=maximum)
+
+
+def _apply_click_pos(value: Any, fallback: Tuple[int, int]) -> Tuple[int, int]:
+    x, y = _ensure_int_pair(value)
+    return max(0, x), max(0, y)
 
 
 @dataclass
@@ -4287,10 +4483,33 @@ CONFIG_FIELDS: List[ConfigField] = [
                 "Scroll araması yapılacak bölgeler.", apply=_ensure_regions),
     ConfigField("PAZAR_YENILEME_BEKELEME_MIN", "Pazar yenileme bekleme min", "Item Satış", "float",
                 _cfg_default("PAZAR_YENILEME_BEKELEME_MIN", 120.0),
-                "Pazar yenileme öncesi minimum bekleme süresi."),
+                "Pazar yenileme öncesi minimum bekleme süresi.",
+                apply=lambda v: _apply_positive_interval(v, _cfg_default("PAZAR_YENILEME_BEKELEME_MIN", 120.0), 0.0)),
     ConfigField("PAZAR_YENILEME_BEKELEME_MAX", "Pazar yenileme bekleme maks", "Item Satış", "float",
                 _cfg_default("PAZAR_YENILEME_BEKELEME_MAX", 120.0),
-                "Pazar yenileme öncesi maksimum bekleme süresi."),
+                "Pazar yenileme öncesi maksimum bekleme süresi.",
+                apply=lambda v: _apply_positive_interval(v, _cfg_default("PAZAR_YENILEME_BEKELEME_MAX", 120.0), 0.0)),
+    ConfigField("KRALLIK_YAZISI_ENABLED", "Krallık yazısı tıklama aktif", "Item Satış", "bool",
+                _cfg_default("KRALLIK_YAZISI_ENABLED", True),
+                "Krallık yazısı korunması için periyodik tıklamayı aç/kapat."),
+    ConfigField("KRALLIK_YAZISI_CLICK_POS", "Krallık yazısı koordinatı", "Item Satış", "int_pair",
+                _cfg_default("KRALLIK_YAZISI_CLICK_POS", (800, 281)),
+                "Krallık yazısına tıklanacak koordinat.", apply=lambda v: _apply_click_pos(v, _cfg_default("KRALLIK_YAZISI_CLICK_POS", (800, 281)))),
+    ConfigField("KRALLIK_YAZISI_INTERVAL", "Krallık yazısı aralığı (sn)", "Item Satış", "float",
+                _cfg_default("KRALLIK_YAZISI_INTERVAL", 50.0),
+                "Krallık yazısı tıklama periyodu (saniye).",
+                apply=lambda v: _apply_positive_interval(v, _cfg_default("KRALLIK_YAZISI_INTERVAL", 50.0), 1.0)),
+    ConfigField("KRALLIK_YAZISI_HOLD_MS", "Tık basılı tutma (ms)", "Item Satış", "float",
+                _cfg_default("KRALLIK_YAZISI_HOLD_MS", 50.0),
+                "Krallık yazısı tıklamasının basılı kalma süresi (ms).",
+                apply=lambda v: _apply_non_negative_ms(v, _cfg_default("KRALLIK_YAZISI_HOLD_MS", 50.0), 2000.0)),
+    ConfigField("auto_market_refresh_enabled", "Pazar yenileme aktif", "Item Satış", "bool",
+                _cfg_default("auto_market_refresh_enabled", False),
+                "Zamanlı otomatik pazar yenilemeyi aç/kapat."),
+    ConfigField("auto_market_refresh_interval_hours", "Yenileme aralığı (saat)", "Item Satış", "float",
+                _cfg_default("auto_market_refresh_interval_hours", 3.0),
+                "Otomatik pazar yenileme sıklığı (saat cinsinden).",
+                apply=lambda v: _apply_positive_interval(v, _cfg_default("auto_market_refresh_interval_hours", 3.0), 0.25)),
     ConfigField("ITEM_SALE_EXIT_DELAY_MIN", "Banka çıkış bekleme min", "Item Satış", "float",
                 _cfg_default("ITEM_SALE_EXIT_DELAY_MIN", 0.0),
                 "Banka eşiği yakalandığında çıkış öncesi minimum bekleme."),
@@ -4299,7 +4518,8 @@ CONFIG_FIELDS: List[ConfigField] = [
                 "Banka eşiği yakalandığında çıkış öncesi maksimum bekleme."),
     ConfigField("ITEM_SALE_SLOT_SCAN_INTERVAL", "Slot tarama süresi", "Item Satış", "float",
                 _cfg_default("ITEM_SALE_SLOT_SCAN_INTERVAL", 10.0),
-                "Envanter boş slot tarama aralığı (sn)."),
+                "Envanter boş slot tarama aralığı (sn).",
+                apply=lambda v: _apply_positive_interval(v, _cfg_default("ITEM_SALE_SLOT_SCAN_INTERVAL", 10.0), 1.0)),
     ConfigField("ITEM_SALE_BANK_NOTIFY", "Banka boşsa Telegram", "Item Satış", "int",
                 _cfg_default("ITEM_SALE_BANK_NOTIFY", 1),
                 "Banka boşaldığında Telegram bildirimi gönder.",
@@ -4430,8 +4650,9 @@ def apply_config_values(cfg: Dict[str, Any]) -> None:
         try:
             applied = field.apply(value) if field.apply else value
         except Exception as exc:
-            print(f"[CFG] {field.key} uygulanamadı: {exc}")
-            continue
+            fallback = copy.deepcopy(field.default)
+            print(f"[CFG] {field.key} uygulanamadı, varsayılan kullanılacak: {exc}")
+            applied = fallback
         g[field.key] = applied
     try:
         g['VALID_X'] = set(g.get('VALID_X_LEFT', set())) | set(g.get('VALID_X_RIGHT', set()))
@@ -5302,6 +5523,21 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_902_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_902_135_HIZ", CLICK_902_135_HIZ))),
                 "sale_click_899_count": tk.IntVar(value=int(getattr(m, "CLICK_899_399_ADET", CLICK_899_399_ADET))),
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
+                "auto_market_refresh_enabled": tk.BooleanVar(
+                    value=bool(getattr(m, "auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))),
+                "auto_market_refresh_interval_hours": tk.DoubleVar(
+                    value=float(getattr(m, "auto_market_refresh_interval_hours",
+                                        AUTO_MARKET_REFRESH_INTERVAL_HOURS))),
+                "krallik_yazisi_enabled": tk.BooleanVar(
+                    value=bool(getattr(m, "KRALLIK_YAZISI_ENABLED", KRALLIK_YAZISI_ENABLED))),
+                "krallik_yazisi_pos_x": tk.IntVar(
+                    value=int(getattr(m, "KRALLIK_YAZISI_CLICK_POS", KRALLIK_YAZISI_CLICK_POS)[0])),
+                "krallik_yazisi_pos_y": tk.IntVar(
+                    value=int(getattr(m, "KRALLIK_YAZISI_CLICK_POS", KRALLIK_YAZISI_CLICK_POS)[1])),
+                "krallik_yazisi_interval": tk.DoubleVar(
+                    value=float(getattr(m, "KRALLIK_YAZISI_INTERVAL", KRALLIK_YAZISI_INTERVAL))),
+                "krallik_yazisi_hold_ms": tk.DoubleVar(
+                    value=float(getattr(m, "KRALLIK_YAZISI_HOLD_MS", KRALLIK_YAZISI_HOLD_MS))),
                 "sale_bank_threshold": tk.IntVar(
                     value=int(getattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", BANKAYA_GIT_BOS_SLOT_ESIGI))),
                 "sale_bank_withdraw": tk.IntVar(
@@ -5598,8 +5834,39 @@ def _MERDIVEN_RUN_GUI():
                                                                             pady=2)
             ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
                                                                                            padx=4, pady=2)
+            lf_krallik = ttk.LabelFrame(f_sale, text="Krallık Yazısı")
+            lf_krallik.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(lf_krallik, text="Krallık yazısı tıklama aktif",
+                            variable=self.v["krallik_yazisi_enabled"], onvalue=True,
+                            offvalue=False).grid(row=0, column=0, columnspan=4, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_krallik, text="Koordinat X:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_yazisi_pos_x"], width=8).grid(row=1, column=1,
+                                                                                            sticky="w", padx=4,
+                                                                                            pady=2)
+            ttk.Label(lf_krallik, text="Y:").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_yazisi_pos_y"], width=8).grid(row=1, column=3,
+                                                                                            sticky="w", padx=4,
+                                                                                            pady=2)
+            ttk.Label(lf_krallik, text="Tekrar aralığı (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_yazisi_interval"], width=8).grid(row=2, column=1,
+                                                                                                 sticky="w", padx=4,
+                                                                                                 pady=2)
+            ttk.Label(lf_krallik, text="Basılı tutma (ms):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_yazisi_hold_ms"], width=8).grid(row=2, column=3,
+                                                                                                sticky="w",
+                                                                                                padx=4, pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=4, column=0, columnspan=2,
+            lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
+            lf_auto_refresh.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
+                            variable=self.v["auto_market_refresh_enabled"], onvalue=True,
+                            offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_auto_refresh, text="Yenileme aralığı (saat):").grid(row=1, column=0, sticky="e", padx=4,
+                                                                             pady=2)
+            ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
+                row=1, column=1, sticky="w", padx=4, pady=2)
+
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=6, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
@@ -5914,6 +6181,22 @@ def _MERDIVEN_RUN_GUI():
 
         def apply_core(self):
             # login
+            def _safe_float(name, default, min_val=0.0, max_val=None):
+                val = _clamp_float(self.v[name].get(), default, minimum=min_val, maximum=max_val)
+                try:
+                    self.v[name].set(val)
+                except Exception:
+                    pass
+                return val
+
+            def _safe_int(name, default, min_val=0, max_val=None):
+                val = _clamp_int(self.v[name].get(), default, minimum=min_val, maximum=max_val)
+                try:
+                    self.v[name].set(val)
+                except Exception:
+                    pass
+                return val
+
             if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
             if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
             setattr(m, "OPERATION_MODE", self.v["operation_mode"].get().upper())
@@ -5922,15 +6205,26 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "PAZAR_ESIK_1", int(self.v["sale_threshold_1"].get()))
             setattr(m, "PAZAR_ESIK_2", int(self.v["sale_threshold_2"].get()))
             setattr(m, "PAZAR_ESIK_3", int(self.v["sale_threshold_3"].get()))
-            setattr(m, "PAZAR_YENILEME_BEKELEME_MIN", float(self.v["sale_refresh_min"].get()))
-            setattr(m, "PAZAR_YENILEME_BEKELEME_MAX", float(self.v["sale_refresh_max"].get()))
-            setattr(m, "PAZAR_YENILEME_BEKELEME_SURESI", float(self.v["sale_refresh_max"].get()))
-            setattr(m, "PAZAR_ILK_BEKELEME_SURESI", float(self.v["sale_initial_wait"].get()))
+            refresh_min = _safe_float("sale_refresh_min", PAZAR_YENILEME_BEKELEME_MIN, 0.0)
+            refresh_max = _safe_float("sale_refresh_max", PAZAR_YENILEME_BEKELEME_MAX, refresh_min)
+            setattr(m, "PAZAR_YENILEME_BEKELEME_MIN", refresh_min)
+            setattr(m, "PAZAR_YENILEME_BEKELEME_MAX", refresh_max)
+            setattr(m, "PAZAR_YENILEME_BEKELEME_SURESI", refresh_max)
+            setattr(m, "PAZAR_ILK_BEKELEME_SURESI", _safe_float("sale_initial_wait", PAZAR_ILK_BEKELEME_SURESI, 0.0))
             setattr(m, "CLICK_902_135_ADET", int(self.v["sale_click_902_count"].get()))
             setattr(m, "CLICK_902_135_HIZ", float(self.v["sale_click_902_speed"].get()))
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
-            setattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", int(self.v["sale_bank_threshold"].get()))
+            setattr(m, "auto_market_refresh_enabled", bool(self.v["auto_market_refresh_enabled"].get()))
+            setattr(m, "auto_market_refresh_interval_hours",
+                    _safe_float("auto_market_refresh_interval_hours", AUTO_MARKET_REFRESH_INTERVAL_HOURS, 0.25))
+            setattr(m, "KRALLIK_YAZISI_ENABLED", bool(self.v["krallik_yazisi_enabled"].get()))
+            setattr(m, "KRALLIK_YAZISI_CLICK_POS", (
+                _safe_int("krallik_yazisi_pos_x", KRALLIK_YAZISI_CLICK_POS[0], 0),
+                _safe_int("krallik_yazisi_pos_y", KRALLIK_YAZISI_CLICK_POS[1], 0)))
+            setattr(m, "KRALLIK_YAZISI_INTERVAL", _safe_float("krallik_yazisi_interval", KRALLIK_YAZISI_INTERVAL, 1.0))
+            setattr(m, "KRALLIK_YAZISI_HOLD_MS", _safe_float("krallik_yazisi_hold_ms", KRALLIK_YAZISI_HOLD_MS, 0.0, 2000.0))
+            setattr(m, "BANKAYA_GIT_BOS_SLOT_ESIGI", _safe_int("sale_bank_threshold", BANKAYA_GIT_BOS_SLOT_ESIGI, 1))
             try:
                 withdraw_val = int(self.v["sale_bank_withdraw"].get())
                 if withdraw_val <= 0:
@@ -5939,9 +6233,9 @@ def _MERDIVEN_RUN_GUI():
                 withdraw_val = ITEM_SALE_BANK_WITHDRAW_COUNT
             setattr(m, "ITEM_SALE_BANK_WITHDRAW_COUNT", withdraw_val)
             setattr(m, "PAZAR_PARK_X", int(self.v["sale_park_x"].get()))
-            setattr(m, "ITEM_SALE_SLOT_SCAN_INTERVAL", float(self.v["sale_slot_interval"].get()))
-            setattr(m, "ITEM_SALE_EXIT_DELAY_MIN", float(self.v["sale_exit_delay_min"].get()))
-            setattr(m, "ITEM_SALE_EXIT_DELAY_MAX", float(self.v["sale_exit_delay_max"].get()))
+            setattr(m, "ITEM_SALE_SLOT_SCAN_INTERVAL", _safe_float("sale_slot_interval", ITEM_SALE_SLOT_SCAN_INTERVAL, 1.0))
+            setattr(m, "ITEM_SALE_EXIT_DELAY_MIN", _safe_float("sale_exit_delay_min", ITEM_SALE_EXIT_DELAY_MIN, 0.0))
+            setattr(m, "ITEM_SALE_EXIT_DELAY_MAX", _safe_float("sale_exit_delay_max", ITEM_SALE_EXIT_DELAY_MAX, 0.0))
             setattr(m, "ITEM_SALE_BANK_NOTIFY", bool(self.v["sale_bank_notify"].get()))
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
