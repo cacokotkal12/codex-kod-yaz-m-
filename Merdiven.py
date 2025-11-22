@@ -636,6 +636,7 @@ ITEMS_DEPLETED_FLAG = False;
 REQUEST_RELAUNCH = False;
 BANK_OPEN = False;
 FORCE_PLUS7_ONCE = False
+NEED_STAIRS_REALIGN = True  # relaunch/yeniden giriş sonrası merdiven başlangıcı zorunlu
 
 # ---- LOW scroll genel reopen limiti (anvil) ----
 SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 5
@@ -2417,6 +2418,7 @@ def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
 # <<< SPEED_AWARE_END_v2
 
 def ascend_stairs_to_top(w):
+    global NEED_STAIRS_REALIGN
     set_stage("ASCEND_STAIRS");
     ensure_ui_closed()
     try:
@@ -2444,6 +2446,7 @@ def ascend_stairs_to_top(w):
         post_598_to_597()
     except Exception as e:
         print("[STAIRS] 598→597 mikro düzeltme hata:", e)
+    NEED_STAIRS_REALIGN = False
 
 
 def go_to_npc_from_top(w):
@@ -2958,6 +2961,7 @@ def _item_sale_run_cycle(w):
 
     def _try_auto_market_refresh() -> bool:
         nonlocal next_scan
+        global _AUTO_MARKET_LAST_REFRESH_TS
         enabled = bool(globals().get("auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))
         if not enabled:
             return False
@@ -3428,8 +3432,9 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
 @with_retry("RELAUNCH_LOGIN", attempts=3, delay=2.0)
 @crashguard("RELAUNCH_LOGIN")
 def relaunch_and_login_to_ingame():
-    global TOWN_LOCKED
+    global TOWN_LOCKED, NEED_STAIRS_REALIGN
     TOWN_LOCKED = False
+    NEED_STAIRS_REALIGN = True
     globals()['TOWN_HARD_LOCK'] = False
     _town_log_once('[TOWN] HardLock KAPALI (relaunch başı).')
     _town_log_once("[TOWN] Kilit sıfırlandı (relaunch başı).")
@@ -3578,7 +3583,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
 @crashguard("WORKFLOW")
 def run_stairs_and_workflow(w):
     # global satırı EN BAŞTA olmalı
-    global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, REQUEST_RELAUNCH, FORCE_PLUS7_ONCE, BANK_OPEN
+    global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, REQUEST_RELAUNCH, FORCE_PLUS7_ONCE, BANK_OPEN, NEED_STAIRS_REALIGN, TOWN_LOCKED
 
     set_stage("WORKFLOW_LOOP")
     print(f">>> Akış başlıyor (tur={GLOBAL_CYCLE}, +7_kontrol_turu>={NEXT_PLUS7_CHECK_AT})")
@@ -3589,6 +3594,13 @@ def run_stairs_and_workflow(w):
         if _kb_pressed('f12'):
             print("[LOOP] F12 iptal.")
             return (False, False)
+
+        if NEED_STAIRS_REALIGN:
+            set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
+            TOWN_LOCKED = False
+            town_until_valid_x(w)
+            ascend_stairs_to_top(w)
+            continue
 
         if keyboard.is_pressed("f") or MODE == "BANK_PLUS8":
             MODE = "BANK_PLUS8"
