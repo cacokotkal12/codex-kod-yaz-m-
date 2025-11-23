@@ -2470,27 +2470,39 @@ def ascend_stairs_to_top(w):
     except Exception:
         x = None
     if x not in VALID_X: print("[STAIRS] X geçersiz → town hizala."); town_until_valid_x(w)
-    ok = go_w_to_y(w, STAIRS_TOP_Y, timeout=Y_SEEK_TIMEOUT)
+    target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
+
+    def _finalize_top(y_val=None):
+        global NEED_STAIRS_REALIGN
+        nonlocal target_y
+        y_val = _read_y_now() if y_val is None else y_val
+        _set_town_lock_by_y(y_val)
+        if TOWN_LOCKED:
+            _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
+        if y_val is not None and int(y_val) == target_y:
+            print("[STAIRS] 598 tepe → S mikro geri 2x")
+            for _ in range(STAIRS_TOP_S_BACKOFF_PULSES):
+                micro_tap(SC_S, STAIRS_TOP_S_BACKOFF_DURATION)
+                time.sleep(0.1)
+            try:
+                post_598_to_597()
+            except Exception as e:
+                print("[STAIRS] 598→597 mikro düzeltme hata:", e)
+        NEED_STAIRS_REALIGN = False
+
+    y_now = _read_y_now()
+    if y_now is not None and target_y - 1 <= int(y_now) <= target_y:
+        print(f"[STAIRS] Y≈{y_now} (597-598 bandı) → go_w_to_y atlandı, konum sabitleniyor.")
+        _finalize_top(y_now)
+        return
+
+    ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
     if not ok:
         print("[STAIRS] go_w_to_y başarısız → town & retry");
         send_town_command()
         return
 
-    # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
-    y_now = _read_y_now()
-    _set_town_lock_by_y(y_now)
-    if TOWN_LOCKED:
-        _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
-    # >>> 598’e vardık: 2 mikro S vuruşu (istenen davranış)
-    print("[STAIRS] 598 tepe → S mikro geri 2x")
-    for _ in range(STAIRS_TOP_S_BACKOFF_PULSES):
-        micro_tap(SC_S, STAIRS_TOP_S_BACKOFF_DURATION)
-        time.sleep(0.1)
-    try:
-        post_598_to_597()
-    except Exception as e:
-        print("[STAIRS] 598→597 mikro düzeltme hata:", e)
-    NEED_STAIRS_REALIGN = False
+    _finalize_top(_read_y_now())
 
 
 def go_to_npc_from_top(w):
