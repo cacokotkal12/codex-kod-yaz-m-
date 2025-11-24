@@ -2595,6 +2595,7 @@ def ascend_stairs_to_top(w):
     target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
 
     def _finalize_top(y_val=None):
+        global NEED_STAIRS_REALIGN
         nonlocal target_y
         y_val = _read_y_now() if y_val is None else y_val
         _set_town_lock_by_y(y_val)
