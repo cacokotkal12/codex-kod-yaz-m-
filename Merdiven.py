@@ -465,6 +465,19 @@ TURN_RIGHT_SEC = 1.44
 # ---- Town ----
 TOWN_CLICK_POS = (775, 775);
 TOWN_WAIT = 2.5
+TOWN_CLICK_COUNT = 1  # Normal town tıklama sayısı
+TOWN_INITIAL_CLICK_COUNT = 3  # HP bar sonrası ilk town tıklama sayısı (varsayılan 3x)
+TOWN_CLICK_INTERVAL = 0.03  # Tıklamalar arası bekleme (sn)
+TOWN_CACHE_TTL = 0.10  # Koordinat okuma için kısa cache (sn)
+TOWN_VOTE_READS = 3  # X/Y için çoğunluk oylaması deneme sayısı
+TOWN_VOTE_INTERVAL = 0.02  # Oylama okumaları arası bekleme (sn)
+# ---- Koordinat OCR/Şablon ----
+COORD_ROI = (102, 100, 162, 122)  # (x1, y1, x2, y2) pencereye göre
+COORD_RESIZE_SCALE = 2.0
+COORD_CONTRAST = 3.0
+COORD_TEMPLATE_DIR = "digit_templates"  # 0-9 PNG şablonları için dizin
+COORD_TEMPLATE_THRESHOLD = 0.62
+COORD_TEMPLATE_GAP = 6
 # ---- Splash/Login yardımcı tık ----
 SPLASH_CLICK_POS = (700, 550)
 # ---- Tooltip OCR
@@ -1368,24 +1381,132 @@ def perform_login_inputs(w):
 
 # ---- NOT: Aşağıdaki büyük bloklar (OCR, template, upgrade, hover OCR, storage, rota, relaunch+main) Parça 2'de. ----
 # ================== OCR / INV / UPG Yardımcıları ==================
-def read_coordinates(window):
-    """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
+_COORD_CACHE = {"ts": 0.0, "val": (None, None)}
+_TEMPLATE_DIGITS = None
+
+
+def _coord_bbox(window):
     left, top = window.left, window.top;
-    bbox = (left + 104, top + 102, left + 160, top + 120)
-    img = ImageGrab.grab(bbox);
-    gray = img.convert('L').resize((img.width * 2, img.height * 2))
-    TOWN_LOCKED = False
-    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-    TOWN_LOCKED = False
-    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-    gray = ImageEnhance.Contrast(gray).enhance(3.0);
-    gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
-    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
-    text = pytesseract.image_to_string(gray, config=cfg).strip()
-    parts = re.split(r'[,.\s]+', text);
+    x1, y1, x2, y2 = COORD_ROI
+    return (left + x1, top + y1, left + x2, top + y2)
+
+
+def _load_digit_templates():
+    global _TEMPLATE_DIGITS
+    if _TEMPLATE_DIGITS is not None:
+        return _TEMPLATE_DIGITS
+    _TEMPLATE_DIGITS = {}
+    try:
+        base = resource_path(COORD_TEMPLATE_DIR)
+        if not os.path.isdir(base):
+            return _TEMPLATE_DIGITS
+        for d in range(10):
+            p = os.path.join(base, f"{d}.png")
+            if os.path.exists(p):
+                img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    _TEMPLATE_DIGITS[str(d)] = img
+    except Exception as e:
+        print(f"[COORD] Şablon yükleme hatası: {e}")
+    return _TEMPLATE_DIGITS
+
+
+def _parse_numbers_from_text(text: str):
+    parts = re.split(r'[,.\s]+', text)
     nums = [p for p in parts if p.isdigit()]
-    if len(nums) >= 2: return int(nums[0]), int(nums[1])
+    if len(nums) >= 2:
+        return int(nums[0]), int(nums[1])
     return None, None
+
+
+def _coords_from_templates(gray_img: Image.Image):
+    digits = _load_digit_templates()
+    if not digits:
+        return None, None
+    try:
+        arr = np.array(gray_img.convert("L"))
+        matches = []
+        for digit, tmpl in digits.items():
+            res = cv2.matchTemplate(arr, tmpl, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(res >= COORD_TEMPLATE_THRESHOLD)
+            for pt in zip(*loc[::-1]):
+                score = float(res[pt[1], pt[0]])
+                matches.append((pt[0], digit, score))
+        if not matches:
+            return None, None
+        matches.sort(key=lambda t: t[0])
+        seq = []
+        last_x = None
+        for x, digit, score in matches:
+            if last_x is not None and (x - last_x) > COORD_TEMPLATE_GAP:
+                seq.append("|")  # ayırıcı
+            seq.append(digit)
+            last_x = x
+        text = "".join(seq)
+        parts = text.split("|")
+        if len(parts) >= 2:
+            try:
+                return int(parts[0]), int(parts[1])
+            except ValueError:
+                return None, None
+        return None, None
+    except Exception as e:
+        print(f"[COORD] Şablon okuma hatası: {e}")
+        return None, None
+
+
+def _ocr_coordinates_from_img(img: Image.Image):
+    gray = img.convert('L')
+    if COORD_RESIZE_SCALE != 1.0:
+        gray = gray.resize((int(gray.width * COORD_RESIZE_SCALE), int(gray.height * COORD_RESIZE_SCALE)))
+    gray = ImageEnhance.Contrast(gray).enhance(COORD_CONTRAST)
+    gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.UnsharpMask(radius=1, percent=180))
+    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.'
+    text = pytesseract.image_to_string(gray, config=cfg).strip()
+    return _parse_numbers_from_text(text)
+
+
+def _read_coordinates_once(window):
+    bbox = _coord_bbox(window)
+    img = ImageGrab.grab(bbox)
+    # Önce şablon, sonra OCR fallback
+    xy = _coords_from_templates(img)
+    if xy == (None, None):
+        xy = _ocr_coordinates_from_img(img)
+    return xy
+
+
+def _majority(values):
+    if not values:
+        return None
+    counts = {}
+    for v in values:
+        counts[v] = counts.get(v, 0) + 1
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def read_coordinates(window):
+    """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR/şablon ile okur (cache+oylama ile)."""
+    now = time.time()
+    if now - _COORD_CACHE.get("ts", 0) <= TOWN_CACHE_TTL:
+        return _COORD_CACHE.get("val", (None, None))
+
+    samples = []
+    for i in range(max(1, int(TOWN_VOTE_READS))):
+        xy = _read_coordinates_once(window)
+        if xy != (None, None):
+            samples.append(xy)
+        if i < TOWN_VOTE_READS - 1:
+            time.sleep(max(0.0, float(TOWN_VOTE_INTERVAL)))
+
+    xs = [s[0] for s in samples if s[0] is not None]
+    ys = [s[1] for s in samples if s[1] is not None]
+    x = _majority(xs)
+    y = _majority(ys)
+
+    _COORD_CACHE["ts"] = time.time()
+    _COORD_CACHE["val"] = (x, y)
+    return x, y
 
 
 def get_region_bounds(region):
@@ -2407,6 +2528,7 @@ def go_w_to_y(w, target_y: int, timeout: float = Y_SEEK_TIMEOUT) -> bool:  retur
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
+    print(f"[ALIGN] VALID_X hedefi: {sorted(list(VALID_X))}")
     while True:
         wait_if_paused();
         watchdog_enforce()
@@ -2415,9 +2537,9 @@ def town_until_valid_x(w):
         except Exception:
             x = None
         if x in VALID_X: print(f"[ALIGN] Geçerli X: {x} (deneme={attempts})"); return x
-        print(f"[ALIGN] X={x} geçersiz → town.");
+        print(f"[ALIGN] X={x} geçersiz → town (deneme={attempts}).");
         ensure_ui_closed();
-        send_town_command();
+        send_town_command(reason="align_invalid_x", initial=(attempts == 0));
         attempts += 1;
         set_stage("TOWN_ALIGN_FOR_VALID_X");
         time.sleep(0.2)
@@ -2473,6 +2595,7 @@ def ascend_stairs_to_top(w):
     target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
 
     def _finalize_top(y_val=None):
+        global NEED_STAIRS_REALIGN
         nonlocal target_y
         y_val = _read_y_now() if y_val is None else y_val
         _set_town_lock_by_y(y_val)
@@ -2607,22 +2730,31 @@ def move_to_769_and_turn_from_top(w):
     return True
 
 
-def send_town_command(*a, **kw):
-    # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
+def send_town_command(*a, click_count=None, reason: str = "", initial: bool = False, **kw):
+    """Town at komutu. Kilit/log kontrolü + çoklu tıklama desteği."""
     global TOWN_LOCKED, BANK_OPEN
-    # [YAMA] HardLock aktifse town tamamen kapalı
+    base_clicks = int(TOWN_INITIAL_CLICK_COUNT if initial else TOWN_CLICK_COUNT)
+    clicks = click_count if click_count is not None else base_clicks
+    clicks = max(1, clicks)
     if globals().get('TOWN_HARD_LOCK', False):
-        _town_log_once('[TOWN] HardLock aktif — komut iptal.')
+        _town_log_once(f"[TOWN] HardLock aktif — komut iptal. reason={reason}")
         return False
+
     y_now = _read_y_now();
     _set_town_lock_by_y(y_now)
     if TOWN_LOCKED:
-        _town_log_once('[TOWN] Kilit aktif (Y=598) — komut iptal edildi')
+        _town_log_once(f"[TOWN] Kilit aktif (Y=598) — komut iptal. reason={reason} y={y_now}")
         return False
+
+    print(f"[TOWN] Komut gönderiliyor (clicks={clicks}, interval={TOWN_CLICK_INTERVAL:.3f}s, reason={reason}, initial={initial}, y={y_now})")
     mouse_move(*TOWN_CLICK_POS);
-    mouse_click('left');
+    for i in range(clicks):
+        mouse_click('left');
+        if i < clicks - 1:
+            time.sleep(max(0.0, float(TOWN_CLICK_INTERVAL)))
     time.sleep(TOWN_WAIT)
     BANK_OPEN = False
+    return True
 
 
 def buy_items_from_npc():
@@ -3545,7 +3677,7 @@ def relaunch_and_login_to_ingame():
                 continue
         set_stage("RELAUNCH_TOWN_HIDE");
         ensure_ui_closed();
-        send_town_command();
+        send_town_command(reason="relaunch_first_town", initial=True);
         press_key(SC_O);
         release_key(SC_O);
         time.sleep(0.1)
@@ -3833,7 +3965,7 @@ def main():
                     if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
                 set_stage("INGAME_TOWN");
                 ensure_ui_closed();
-                send_town_command();
+                send_town_command(reason="initial_login", initial=True)
                 _town_log_once("[TOWN] Bir kez town atıldı.")
                 press_key(SC_O);
                 release_key(SC_O);
