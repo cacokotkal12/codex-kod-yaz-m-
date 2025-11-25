@@ -70,7 +70,7 @@ import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwind
     random, \
     sys, atexit, traceback, logging, functools, copy, math, threading
 from ctypes import wintypes
-from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
+from PIL import Image, ImageGrab, ImageEnhance, ImageFilter, ImageDraw, ImageFont
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
@@ -475,7 +475,8 @@ TOWN_VOTE_INTERVAL = 0.02  # Oylama okumaları arası bekleme (sn)
 COORD_ROI = (102, 100, 162, 122)  # (x1, y1, x2, y2) pencereye göre
 COORD_RESIZE_SCALE = 2.0
 COORD_CONTRAST = 3.0
-COORD_TEMPLATE_DIR = "digit_templates"  # 0-9 PNG şablonları için dizin
+COORD_TEMPLATE_DIR = "digit_templates"  # 0-9 PNG şablonları için dizin (persist altında)
+COORD_TEMPLATE_CHARS = "0123456789,."
 COORD_TEMPLATE_THRESHOLD = 0.62
 COORD_TEMPLATE_GAP = 6
 # ---- Splash/Login yardımcı tık ----
@@ -1383,6 +1384,7 @@ def perform_login_inputs(w):
 # ================== OCR / INV / UPG Yardımcıları ==================
 _COORD_CACHE = {"ts": 0.0, "val": (None, None)}
 _TEMPLATE_DIGITS = None
+_TEMPLATE_DIR_LOGGED = False
 
 
 def _coord_bbox(window):
@@ -1391,23 +1393,124 @@ def _coord_bbox(window):
     return (left + x1, top + y1, left + x2, top + y2)
 
 
+def _coord_template_base_dir() -> str:
+    """Koordinat şablonları için yazılabilir kök dizin (persist altında)."""
+    try:
+        path = PERSIST_PATH(COORD_TEMPLATE_DIR)
+    except Exception:
+        path = os.path.join(os.path.expanduser("~"), COORD_TEMPLATE_DIR)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _digit_template_filename(char: str) -> str:
+    """Şablon dosya adını geçerli bir uzantı ile üret (punctuation için güvenli)."""
+    if char == ',':
+        return "comma.png"
+    if char == '.':
+        return "dot.png"
+    return f"{char}.png"
+
+
+def _template_candidate_paths(char: str) -> List[str]:
+    """Yeni/güvenli adlar + eski adlarla birlikte arama listesi."""
+    base = _coord_template_base_dir()
+    preferred = os.path.join(base, _digit_template_filename(char))
+    candidates = [preferred]
+    legacy = os.path.join(base, f"{char}.png")
+    if legacy not in candidates:
+        candidates.append(legacy)
+    return candidates
+
+
+def _persist_digit_templates_to_disk(digits: Dict[str, np.ndarray]):
+    """Bellekteki şablonların gerçekten diske yazıldığından emin ol."""
+    for digit, tmpl in digits.items():
+        try:
+            p = os.path.join(_coord_template_base_dir(), _digit_template_filename(digit))
+            if tmpl is None:
+                continue
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            Image.fromarray(tmpl.astype(np.uint8)).save(p)
+            print(f"[COORD] Şablon diske yazıldı/yenilendi: {p}")
+        except Exception as e:
+            print(f"[COORD] Şablon yazılamadı ({digit}): {e}")
+
+
+def _render_digit_template(char: str, size=(22, 28)):
+    # NE İŞE YARAR: Template klasörü yoksa minimal rakam/ayraç görselleri üretir.
+    w, h = size
+    img = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", int(h * 0.9))
+    except Exception:
+        font = ImageFont.load_default()
+    text = str(char)
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        offset = (-bbox[0], -bbox[1])
+    except Exception:
+        tw, th = draw.textsize(text, font=font)
+        offset = (0, 0)
+    draw.text(((w - tw) // 2 + offset[0], (h - th) // 2 + offset[1]), text, fill=255, font=font)
+    return np.array(img)
+
+
 def _load_digit_templates():
     global _TEMPLATE_DIGITS
     if _TEMPLATE_DIGITS is not None:
+        try:
+            _persist_digit_templates_to_disk(_TEMPLATE_DIGITS)
+        except Exception as e:
+            print(f"[COORD] Şablon diske teyit edilemedi (hazır cache): {e}")
         return _TEMPLATE_DIGITS
     _TEMPLATE_DIGITS = {}
     try:
-        base = resource_path(COORD_TEMPLATE_DIR)
-        if not os.path.isdir(base):
-            return _TEMPLATE_DIGITS
-        for d in range(10):
-            p = os.path.join(base, f"{d}.png")
-            if os.path.exists(p):
-                img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
-                if img is not None:
-                    _TEMPLATE_DIGITS[str(d)] = img
+        base = _coord_template_base_dir()
+        global _TEMPLATE_DIR_LOGGED
+        if not _TEMPLATE_DIR_LOGGED:
+            print(f"[COORD] Şablon dizini: {base}")
+            _TEMPLATE_DIR_LOGGED = True
+        # Eğer paketle beraber gelen bir dizin varsa ve boş değilse persist dizinine kopyala
+        bundled = resource_path(COORD_TEMPLATE_DIR)
+        if os.path.isdir(bundled):
+            for d in range(10):
+                src = os.path.join(bundled, f"{d}.png")
+                dst = os.path.join(base, f"{d}.png")
+                if os.path.isfile(src) and not os.path.isfile(dst):
+                    try:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        Image.open(src).save(dst)
+                    except Exception:
+                        pass
+
+        for ch in COORD_TEMPLATE_CHARS:
+            loaded = False
+            for p in _template_candidate_paths(ch):
+                if os.path.exists(p):
+                    img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+                    if img is not None:
+                        _TEMPLATE_DIGITS[str(ch)] = img
+                        loaded = True
+                        break
+            # Şablon yoksa minimal bir tane üretip kaydet (yazılabilir dizine)
+            if not loaded:
+                tmpl = _render_digit_template(ch)
+                target = os.path.join(base, _digit_template_filename(ch))
+                try:
+                    Image.fromarray(tmpl).save(target)
+                    print(f"[COORD] Şablon üretildi: {target}")
+                except Exception as se:
+                    print(f"[COORD] Şablon kaydedilemedi ({target}): {se}")
+                _TEMPLATE_DIGITS[str(ch)] = tmpl
     except Exception as e:
         print(f"[COORD] Şablon yükleme hatası: {e}")
+    try:
+        _persist_digit_templates_to_disk(_TEMPLATE_DIGITS)
+    except Exception as e:
+        print(f"[COORD] Şablon diske teyit edilemedi: {e}")
     return _TEMPLATE_DIGITS
 
 
@@ -1425,8 +1528,14 @@ def _coords_from_templates(gray_img: Image.Image):
         return None, None
     try:
         arr = np.array(gray_img.convert("L"))
+        # Basit eşik ile gürültüyü azalt (CPU dostu)
+        _, arr = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         matches = []
         for digit, tmpl in digits.items():
+            if tmpl is None:
+                continue
+            if tmpl.shape[0] > arr.shape[0] or tmpl.shape[1] > arr.shape[1]:
+                continue
             res = cv2.matchTemplate(arr, tmpl, cv2.TM_CCOEFF_NORMED)
             loc = np.where(res >= COORD_TEMPLATE_THRESHOLD)
             for pt in zip(*loc[::-1]):
@@ -1440,6 +1549,10 @@ def _coords_from_templates(gray_img: Image.Image):
         for x, digit, score in matches:
             if last_x is not None and (x - last_x) > COORD_TEMPLATE_GAP:
                 seq.append("|")  # ayırıcı
+            if digit in {",", "."}:
+                seq.append("|")
+                last_x = x
+                continue
             seq.append(digit)
             last_x = x
         text = "".join(seq)
