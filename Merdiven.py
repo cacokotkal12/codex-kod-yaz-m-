@@ -70,7 +70,7 @@ import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwind
     random, \
     sys, atexit, traceback, logging, functools, copy, math, threading
 from ctypes import wintypes
-from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
+from PIL import Image, ImageGrab, ImageEnhance, ImageFilter, ImageDraw, ImageFont
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
@@ -475,7 +475,7 @@ TOWN_VOTE_INTERVAL = 0.02  # Oylama okumaları arası bekleme (sn)
 COORD_ROI = (102, 100, 162, 122)  # (x1, y1, x2, y2) pencereye göre
 COORD_RESIZE_SCALE = 2.0
 COORD_CONTRAST = 3.0
-COORD_TEMPLATE_DIR = "digit_templates"  # 0-9 PNG şablonları için dizin
+COORD_TEMPLATE_DIR = "digit_templates"  # 0-9 PNG şablonları için dizin (persist altında)
 COORD_TEMPLATE_THRESHOLD = 0.62
 COORD_TEMPLATE_GAP = 6
 # ---- Splash/Login yardımcı tık ----
@@ -1391,21 +1391,66 @@ def _coord_bbox(window):
     return (left + x1, top + y1, left + x2, top + y2)
 
 
+def _coord_template_base_dir() -> str:
+    """Koordinat şablonları için yazılabilir kök dizin (persist altında)."""
+    try:
+        path = PERSIST_PATH(COORD_TEMPLATE_DIR)
+    except Exception:
+        path = os.path.join(os.path.expanduser("~"), COORD_TEMPLATE_DIR)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _render_digit_template(digit: int, size=(22, 28)):
+    # NE İŞE YARAR: Template klasörü yoksa minimal 0-9 görselleri üretir.
+    w, h = size
+    img = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", int(h * 0.9))
+    except Exception:
+        font = ImageFont.load_default()
+    text = str(int(digit))
+    tw, th = draw.textsize(text, font=font)
+    draw.text(((w - tw) // 2, (h - th) // 2), text, fill=255, font=font)
+    return np.array(img)
+
+
 def _load_digit_templates():
     global _TEMPLATE_DIGITS
     if _TEMPLATE_DIGITS is not None:
         return _TEMPLATE_DIGITS
     _TEMPLATE_DIGITS = {}
     try:
-        base = resource_path(COORD_TEMPLATE_DIR)
-        if not os.path.isdir(base):
-            return _TEMPLATE_DIGITS
+        base = _coord_template_base_dir()
+        # Eğer paketle beraber gelen bir dizin varsa ve boş değilse persist dizinine kopyala
+        bundled = resource_path(COORD_TEMPLATE_DIR)
+        if os.path.isdir(bundled):
+            for d in range(10):
+                src = os.path.join(bundled, f"{d}.png")
+                dst = os.path.join(base, f"{d}.png")
+                if os.path.isfile(src) and not os.path.isfile(dst):
+                    try:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        Image.open(src).save(dst)
+                    except Exception:
+                        pass
+
         for d in range(10):
             p = os.path.join(base, f"{d}.png")
             if os.path.exists(p):
                 img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
                 if img is not None:
                     _TEMPLATE_DIGITS[str(d)] = img
+                    continue
+            # Şablon yoksa minimal bir tane üretip kaydet (yazılabilir dizine)
+            tmpl = _render_digit_template(d)
+            try:
+                Image.fromarray(tmpl).save(p)
+                print(f"[COORD] Şablon üretildi: {p}")
+            except Exception as se:
+                print(f"[COORD] Şablon kaydedilemedi ({p}): {se}")
+            _TEMPLATE_DIGITS[str(d)] = tmpl
     except Exception as e:
         print(f"[COORD] Şablon yükleme hatası: {e}")
     return _TEMPLATE_DIGITS
@@ -1425,8 +1470,12 @@ def _coords_from_templates(gray_img: Image.Image):
         return None, None
     try:
         arr = np.array(gray_img.convert("L"))
+        # Basit eşik ile gürültüyü azalt (CPU dostu)
+        _, arr = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         matches = []
         for digit, tmpl in digits.items():
+            if tmpl is None:
+                continue
             res = cv2.matchTemplate(arr, tmpl, cv2.TM_CCOEFF_NORMED)
             loc = np.where(res >= COORD_TEMPLATE_THRESHOLD)
             for pt in zip(*loc[::-1]):
