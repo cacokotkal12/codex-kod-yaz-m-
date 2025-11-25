@@ -70,7 +70,7 @@ import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwind
     random, \
     sys, atexit, traceback, logging, functools, copy, math, threading
 from ctypes import wintypes
-from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
+from PIL import Image, ImageGrab, ImageEnhance, ImageFilter, ImageDraw, ImageFont
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
@@ -1391,6 +1391,21 @@ def _coord_bbox(window):
     return (left + x1, top + y1, left + x2, top + y2)
 
 
+def _render_digit_template(digit: int, size=(22, 28)):
+    # NE İŞE YARAR: Template klasörü yoksa minimal 0-9 görselleri üretir.
+    w, h = size
+    img = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", int(h * 0.9))
+    except Exception:
+        font = ImageFont.load_default()
+    text = str(int(digit))
+    tw, th = draw.textsize(text, font=font)
+    draw.text(((w - tw) // 2, (h - th) // 2), text, fill=255, font=font)
+    return np.array(img)
+
+
 def _load_digit_templates():
     global _TEMPLATE_DIGITS
     if _TEMPLATE_DIGITS is not None:
@@ -1398,14 +1413,21 @@ def _load_digit_templates():
     _TEMPLATE_DIGITS = {}
     try:
         base = resource_path(COORD_TEMPLATE_DIR)
-        if not os.path.isdir(base):
-            return _TEMPLATE_DIGITS
+        os.makedirs(base, exist_ok=True)
         for d in range(10):
             p = os.path.join(base, f"{d}.png")
             if os.path.exists(p):
                 img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
                 if img is not None:
                     _TEMPLATE_DIGITS[str(d)] = img
+                    continue
+            # Şablon yoksa minimal bir tane üretip kaydet
+            tmpl = _render_digit_template(d)
+            try:
+                Image.fromarray(tmpl).save(p)
+            except Exception:
+                pass
+            _TEMPLATE_DIGITS[str(d)] = tmpl
     except Exception as e:
         print(f"[COORD] Şablon yükleme hatası: {e}")
     return _TEMPLATE_DIGITS
