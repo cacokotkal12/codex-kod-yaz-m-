@@ -358,6 +358,7 @@ SERVER_OPEN_POS = (455, 231)  # server list drop-down
 SERVER_CHOICES = [(671, 254), (676, 281)]  # listeden seçimlerden biri
 ITEM_SERVER_PRESETS = {"Server1": 0, "Server2": 1}
 ITEM_BASMA_SERVER = "Server1"
+MODE_BANK_PLUS7_MC = "BANK_PLUS7_MC"  # Bankadan +1..+6 al, middle class ile +7'ye kadar bas
 OPERATION_MODE = "ITEM_BASMA"  # ITEM_BASMA veya ITEM_SATIS
 PAZAR_PARK_X = 805
 ITEM_SALE_VALID_X = (810, 805, 800)
@@ -394,6 +395,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
+BANK_PLUS7_MC_TARGET_INV_SLOTS = 27
+BANK_PLUS7_MC_MAX_TRIES_PER_ITEM = 7
+BANK_PLUS7_MC_BANK_SCAN_PAGES = 1
+BANK_PLUS7_MC_LOG_LEVEL = "INFO"
 
 _GUI_UPDATE_SALE_SLOT = None
 
@@ -2894,6 +2899,42 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
     return taken
 
 
+def withdraw_below_plus7_from_bank_pages(win, max_take: int = 27, pages: int = 1):
+    """+7 olmayan (boş olmayan) itemleri bankadan envantere çeker."""
+    set_stage("BANK_WITHDRAW_BELOW7");
+    taken = 0
+    tmpl = _load_empty_template()
+    bank_go_to_first_page()
+    page_limit = max(1, int(pages))
+    for page in range(1, page_limit + 1):
+        wait_if_paused();
+        watchdog_enforce();
+        print(f"[BANK] Sayfa {page}/{page_limit} (+1..+6) taranıyor...")
+        cols, rows = get_region_grid("BANK_PANEL")
+        for r in range(rows):
+            for c in range(cols):
+                if taken >= max_take:
+                    print(f"[BANK] +1..+6 çekimi tamamlandı: {taken}/{max_take}")
+                    return taken
+                gray = grab_gray_region("BANK_PANEL")
+                if slot_is_empty_in_gray(gray, c, r, "BANK_PANEL", tmpl):
+                    continue
+                try:
+                    if hover_has_plusN(win, "BANK_PANEL", c, r, 7, hover_wait=HOVER_WAIT_BANK):
+                        continue
+                except Exception:
+                    continue
+                x, y = slot_center("BANK_PANEL", c, r)
+                mouse_move(x, y)
+                mouse_click("right")
+                taken += 1
+                time.sleep(0.10)
+        if page < page_limit:
+            bank_click_next(1, 0.15)
+    print(f"[BANK] Çekilen +1..+6 toplam: {taken}/{max_take}")
+    return taken
+
+
 def withdraw_items_from_bank_for_sale(max_take: int = None):
     set_stage("ITEM_SATIS_BANK_WITHDRAW")
     try:
@@ -3484,7 +3525,8 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
     press_key(SC_I);
     release_key(SC_I);
     time.sleep(0.6)
-    skip_plus7 = (scroll_required == "LOW") and (win is not None)
+    skip_plus7 = ((scroll_required == "LOW") or
+                  (scroll_required == "MID" and str(globals().get("MODE", "")).upper() == MODE_BANK_PLUS7_MC)) and (win is not None)
     # >>> YENİ: LOW akışı için global reopen sayacı sıfırla
     if scroll_required == "LOW":
         _reset_scroll_reopen_budget("LOW")
@@ -3498,8 +3540,13 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
         tmpl = _load_empty_template();
         c, r = slot
         if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
-        if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
-            f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
+        if skip_plus7:
+            try:
+                if hover_has_plusN(win, "UPG", c, r, 7) or (
+                        str(globals().get("MODE", "")).upper() == MODE_BANK_PLUS7_MC and hover_has_plusN(win, "UPG", c, r, 8)):
+                    print(f"[UPG] Slot ({c},{r}) +7/+8 → atla."); start_index = idx_found + 1; continue
+            except Exception:
+                pass
         res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
         if res == "DONE":
             used.add(slot);
@@ -3523,11 +3570,16 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
             c, r = WRAP_SLOTS[idx]
             if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
             seen_item = True
-            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
-                print(f"[UPG] Slot ({c},{r}) +7 → atla.");
-                continue
-            else:
-                if skip_plus7: seen_only_plus7 = False
+            if skip_plus7:
+                try:
+                    if hover_has_plusN(win, "UPG", c, r, 7) or (
+                            str(globals().get("MODE", "")).upper() == MODE_BANK_PLUS7_MC and hover_has_plusN(win, "UPG", c, r, 8)):
+                        print(f"[UPG] Slot ({c},{r}) +7/+8 → atla.");
+                        continue
+                    else:
+                        seen_only_plus7 = False
+                except Exception:
+                    seen_only_plus7 = False
             res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
             if res == "DONE":
                 attempts_done += 1;
@@ -3788,6 +3840,71 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
                 "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
 
 
+# ================== BANK_PLUS7_MC ORKESTRASYONU ==================
+def _bank_plus7_mc_cfg():
+    return {
+        "TARGET_INV_SLOTS": int(globals().get("BANK_PLUS7_MC_TARGET_INV_SLOTS", 27)),
+        "MAX_TRIES_PER_ITEM": int(globals().get("BANK_PLUS7_MC_MAX_TRIES_PER_ITEM", 7)),
+        "BANK_SCAN_PAGES": int(globals().get("BANK_PLUS7_MC_BANK_SCAN_PAGES", 1)),
+        "LOG_LEVEL": str(globals().get("BANK_PLUS7_MC_LOG_LEVEL", "INFO")),
+    }
+
+
+@crashguard("BANK_PLUS7_MC")
+def run_mode_bank_plus7_mc(w):
+    global MODE
+    MODE = MODE_BANK_PLUS7_MC
+    cfg = _bank_plus7_mc_cfg()
+    while True:
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            print("[BANK_PLUS7_MC] F12 tespit edildi, çıkılıyor.")
+            return
+
+        send_town_command(reason="bank_plus7_mc_cycle")
+        sx = town_until_valid_x(w)
+        ascend_stairs_to_top(w)
+
+        if not move_to_769_and_turn_from_top(w):
+            print("[BANK_PLUS7_MC] Banka açılamadı, town tekrar denenecek.")
+            continue
+
+        deposit_inventory_plusN_to_bank(w, 7)
+
+        empty_slots = count_empty_slots("INV")
+        target_slots = max(0, min(int(cfg.get("TARGET_INV_SLOTS", 27)), empty_slots))
+        if target_slots <= 0:
+            target_slots = empty_slots
+        taken = withdraw_below_plus7_from_bank_pages(w, max_take=target_slots, pages=cfg.get("BANK_SCAN_PAGES", 1))
+
+        if taken <= 0:
+            print("[BANK_PLUS7_MC] Bankada +1..+6 kalmadı, kullanıcı müdahalesi bekleniyor (F12 için çıkış).")
+            while not _kb_pressed('f12'):
+                wait_if_paused();
+                watchdog_enforce()
+                time.sleep(5.0)
+            print("[BANK_PLUS7_MC] F12 alındı, döngü sonlandırılıyor.")
+            return
+
+        send_town_command(reason="bank_plus7_mc_to_anvil")
+        sx = town_until_valid_x(w)
+        ascend_stairs_to_top(w)
+        go_to_anvil_from_top(sx)
+
+        attempts_limit = max(1, int(taken * max(1, int(cfg.get("MAX_TRIES_PER_ITEM", 7)))))
+        print(f"[BANK_PLUS7_MC] Anvil deneme limiti: {attempts_limit} (adet={taken})")
+        basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w)
+
+        send_town_command(reason="bank_plus7_mc_deposit")
+        sx = town_until_valid_x(w)
+        ascend_stairs_to_top(w)
+        if move_to_769_and_turn_from_top(w):
+            deposit_inventory_plusN_to_bank(w, 7)
+        else:
+            print("[BANK_PLUS7_MC] Döngü kapanışında banka açılamadı, yeniden denenecek.")
+
+
 # ================== NORMAL ÇALIŞMA DÖNGÜSÜ ==================
 @crashguard("WORKFLOW")
 def run_stairs_and_workflow(w):
@@ -3995,6 +4112,10 @@ def main():
                 _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
                 maybe_autotune(True)
                 set_stage("RUN_WORKFLOW");
+                if str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper() == MODE_BANK_PLUS7_MC:
+                    print("[MAIN] MODE_BANK_PLUS7_MC seçili → bank +7 döngüsü başlıyor.")
+                    run_mode_bank_plus7_mc(w)
+                    break
                 cycle_done, _purchased = run_stairs_and_workflow(w)
                 if cycle_done:
                     set_stage("CYCLE_EXIT_RESTART");
@@ -5620,6 +5741,12 @@ def _MERDIVEN_RUN_GUI():
                     value=str(getattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))),
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
+                "bank_plus7_target_slots": tk.IntVar(
+                    value=int(getattr(m, "BANK_PLUS7_MC_TARGET_INV_SLOTS", BANK_PLUS7_MC_TARGET_INV_SLOTS))),
+                "bank_plus7_max_tries": tk.IntVar(
+                    value=int(getattr(m, "BANK_PLUS7_MC_MAX_TRIES_PER_ITEM", BANK_PLUS7_MC_MAX_TRIES_PER_ITEM))),
+                "bank_plus7_scan_pages": tk.IntVar(
+                    value=int(getattr(m, "BANK_PLUS7_MC_BANK_SCAN_PAGES", BANK_PLUS7_MC_BANK_SCAN_PAGES))),
             }
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
@@ -5780,7 +5907,21 @@ def _MERDIVEN_RUN_GUI():
                 row=0, column=0, sticky="w", padx=4, pady=2)
             ttk.Radiobutton(lf_mode, text="Item Satış", value="ITEM_SATIS", variable=self.v["operation_mode"]).grid(
                 row=0, column=1, sticky="w", padx=4, pady=2)
-            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=2, padx=6, pady=2)
+            ttk.Radiobutton(lf_mode, text="Bankadan +1..+6 → +7 (Middle Class)", value=MODE_BANK_PLUS7_MC,
+                             variable=self.v["operation_mode"]).grid(row=0, column=2, sticky="w", padx=4, pady=2)
+            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, padx=6, pady=2)
+
+            lf_bank7 = ttk.LabelFrame(f1, text="BANK_PLUS7_MC")
+            lf_bank7.grid(row=r + 1, column=0, columnspan=4, sticky="we", pady=6)
+            ttk.Label(lf_bank7, text="Envanter Hedef Slot:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank7, textvariable=self.v["bank_plus7_target_slots"], width=6).grid(row=0, column=1, sticky="w",
+                                                                                              padx=4, pady=2)
+            ttk.Label(lf_bank7, text="Deneme/Satır:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank7, textvariable=self.v["bank_plus7_max_tries"], width=6).grid(row=0, column=3, sticky="w",
+                                                                                           padx=4, pady=2)
+            ttk.Label(lf_bank7, text="Banka Sayfa Tarama:").grid(row=0, column=4, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank7, textvariable=self.v["bank_plus7_scan_pages"], width=6).grid(row=0, column=5, sticky="w",
+                                                                                            padx=4, pady=2)
 
             # SATIN ALMA
             f2 = ttk.Frame(nb);
@@ -6259,6 +6400,9 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
             setattr(m, "TELEGRAM_CHAT_ID", self.v["telegram_chat_id"].get().strip())
+            setattr(m, "BANK_PLUS7_MC_TARGET_INV_SLOTS", int(self.v["bank_plus7_target_slots"].get()))
+            setattr(m, "BANK_PLUS7_MC_MAX_TRIES_PER_ITEM", int(self.v["bank_plus7_max_tries"].get()))
+            setattr(m, "BANK_PLUS7_MC_BANK_SCAN_PAGES", int(self.v["bank_plus7_scan_pages"].get()))
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
