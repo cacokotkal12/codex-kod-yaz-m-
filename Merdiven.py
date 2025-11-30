@@ -359,6 +359,7 @@ SERVER_CHOICES = [(671, 254), (676, 281)]  # listeden seçimlerden biri
 ITEM_SERVER_PRESETS = {"Server1": 0, "Server2": 1}
 ITEM_BASMA_SERVER = "Server1"
 OPERATION_MODE = "ITEM_BASMA"  # ITEM_BASMA veya ITEM_SATIS
+PLUS7_BANK_MODE = "PLUS7_BANK"
 PAZAR_PARK_X = 805
 ITEM_SALE_VALID_X = (810, 805, 800)
 ITEM_SALE_FACE_A_DURATION = 1.45
@@ -658,6 +659,14 @@ def _set_mode_bank_plus8(reason: str = None):
     PLUS8_RESUME = True
     if reason:
         print(f"[MODE] BANK_PLUS8 ({reason})")
+
+
+def _set_mode_bank_plus7(reason: str = None):
+    """MODE'u BANK_PLUS7 yapar; çıkışta _set_mode_normal kullan."""
+    global MODE
+    MODE = "BANK_PLUS7"
+    if reason:
+        print(f"[MODE] BANK_PLUS7 ({reason})")
 
 # ---- LOW scroll genel reopen limiti (anvil) ----
 SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 5
@@ -2741,6 +2750,44 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
     return taken
 
 
+def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 6, max_take: int = 27):
+    set_stage("BANK_WITHDRAW_PLUS_RANGE");
+    taken = 0
+    tmpl = _load_empty_template()
+    bank_go_to_first_page()
+    for page in range(1, 9):
+        wait_if_paused();
+        watchdog_enforce();
+        print(f"[BANK] Sayfa {page}/8 ( +{min_plus}…+{max_plus} ) taranıyor…")
+        cols, rows = get_region_grid("BANK_PANEL")
+        for r in range(rows):
+            for c in range(cols):
+                if taken >= max_take:
+                    print(f"[BANK] İstenen adet: {taken}/{max_take}");
+                    return taken
+                gray = grab_gray_region("BANK_PANEL")
+                if slot_is_empty_in_gray(gray, c, r, "BANK_PANEL", tmpl):
+                    continue
+                try:
+                    if hover_has_plusN(win, "BANK_PANEL", c, r, 7, hover_wait=HOVER_WAIT_BANK) or \
+                            hover_has_plusN(win, "BANK_PANEL", c, r, 8, hover_wait=HOVER_WAIT_BANK):
+                        continue
+                    roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
+                    if roi is not None and (_roi_has_plusN(roi, 7) or _roi_has_plusN(roi, 8)):
+                        continue
+                    x, y = slot_center("BANK_PANEL", c, r)
+                    mouse_move(x, y)
+                    mouse_click("right")
+                    taken += 1
+                    time.sleep(0.10)
+                except Exception as e:
+                    print(f"[BANK] +{min_plus}…+{max_plus} tarama hata: {e}")
+        if page < 8:
+            bank_click_next(1, 0.15)
+    print(f"[BANK] Toplam çekilen +{min_plus}…+{max_plus}: {taken}")
+    return taken
+
+
 def withdraw_items_from_bank_for_sale(max_take: int = None):
     set_stage("ITEM_SATIS_BANK_WITHDRAW")
     try:
@@ -3318,7 +3365,7 @@ def perform_upgrade_on_slot(col, row, click_region, scroll_required=None, *, win
 
 
 @crashguard("UPGRADE_LOOP")
-def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
+def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_plus8: bool = False):
     global ITEMS_DEPLETED_FLAG, REQUEST_RELAUNCH, MODE, FORCE_PLUS7_ONCE
     ITEMS_DEPLETED_FLAG = False;
     limit = attempts_limit if attempts_limit is not None else BASMA_HAKKI
@@ -3347,6 +3394,8 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
         if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
         if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
             f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
+        if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
+            f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
         res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
         if res == "DONE":
             used.add(slot);
@@ -3372,6 +3421,9 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
             seen_item = True
             if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
                 print(f"[UPG] Slot ({c},{r}) +7 → atla.");
+                continue
+            if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
+                print(f"[UPG] Slot ({c},{r}) +8 → atla.");
                 continue
             else:
                 if skip_plus7: seen_only_plus7 = False
@@ -3635,6 +3687,65 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
                 "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
 
 
+# ================== BANK_PLUS7 ORKESTRASYONU ==================
+@crashguard("BANK_PLUS7")
+def run_bank_plus7_mode(w):
+    global MODE
+    _set_mode_bank_plus7("Başlat")
+    while True:
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            print("[BANK_PLUS7] F12 alındı, çıkılıyor.")
+            _set_mode_normal("F12")
+            return False
+        town_until_valid_x(w)
+        ascend_stairs_to_top(w)
+        press_key(SC_I);
+        release_key(SC_I);
+        time.sleep(0.6)
+        plus7_inv = count_inventory_plusN(w, 7, "INV")
+        press_key(SC_I);
+        release_key(SC_I);
+        time.sleep(0.2)
+        need_deposit = plus7_inv >= 3
+        if not move_to_769_and_turn_from_top(w):
+            print("[BANK_PLUS7] Banka açılamadı → town retry")
+            send_town_command()
+            continue
+        if need_deposit:
+            deposited = deposit_inventory_plusN_to_bank(w, 7)
+            print(f"[BANK_PLUS7] Bankaya bırakılan +7: {deposited}")
+        taken = withdraw_plus_range_from_bank_pages(w, 1, 6, max_take=27)
+        if taken <= 0:
+            print("[BANK_PLUS7] Bankada +1…+6 kalmadı → mod bitiyor.")
+            _set_mode_normal("PLUS7 kaynak bitti")
+            return True
+        ensure_ui_closed();
+        exit_game_fast(w);
+        w = relaunch_and_login_to_ingame()
+        if not w:
+            print("[BANK_PLUS7] Yeniden giriş başarısız (upgrade).")
+            _set_mode_normal("Relaunch upgrade başarısız")
+            return False
+        town_until_valid_x(w)
+        ascend_stairs_to_top(w)
+        try:
+            start_x, _ = read_coordinates(w)
+        except Exception:
+            start_x = None
+        go_to_anvil_from_top(start_x)
+        attempts_limit = min(int(BASMA_HAKKI), int(taken))
+        attempts_done = basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w, skip_plus8=True)
+        print(f"[BANK_PLUS7] +7 deneme: {attempts_done}/{attempts_limit}")
+        exit_game_fast(w)
+        w = relaunch_and_login_to_ingame()
+        if not w:
+            print("[BANK_PLUS7] Yeniden giriş başarısız (depozit).")
+            _set_mode_normal("Relaunch depozit başarısız")
+            return False
+
+
 # ================== NORMAL ÇALIŞMA DÖNGÜSÜ ==================
 @crashguard("WORKFLOW")
 def run_stairs_and_workflow(w):
@@ -3777,9 +3888,12 @@ def run_stairs_and_workflow(w):
 @crashguard("MAIN")
 def main():
     global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, BANK_FULL_FLAG  # <- GLOBAL EN BAŞTA!
-    if str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper() == "ITEM_SATIS":
+    mode = str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper()
+    if mode == "ITEM_SATIS":
         run_item_sale_mode()
         return
+    if mode == PLUS7_BANK_MODE:
+        _set_mode_bank_plus7("Başlangıç")
     _set_dpi_aware();
     _wire_tesseract_portable()
     load_plus7_templates();
@@ -3842,6 +3956,9 @@ def main():
                 _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
                 maybe_autotune(True)
                 set_stage("RUN_WORKFLOW");
+                if mode == PLUS7_BANK_MODE:
+                    run_bank_plus7_mode(w)
+                    return
                 cycle_done, _purchased = run_stairs_and_workflow(w)
                 if cycle_done:
                     set_stage("CYCLE_EXIT_RESTART");
@@ -5627,7 +5744,9 @@ def _MERDIVEN_RUN_GUI():
                 row=0, column=0, sticky="w", padx=4, pady=2)
             ttk.Radiobutton(lf_mode, text="Item Satış", value="ITEM_SATIS", variable=self.v["operation_mode"]).grid(
                 row=0, column=1, sticky="w", padx=4, pady=2)
-            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=2, padx=6, pady=2)
+            ttk.Radiobutton(lf_mode, text="Artı 7’ye item basma", value=PLUS7_BANK_MODE,
+                            variable=self.v["operation_mode"]).grid(row=0, column=2, sticky="w", padx=4, pady=2)
+            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, padx=6, pady=2)
 
             # SATIN ALMA
             f2 = ttk.Frame(nb);
