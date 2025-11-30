@@ -70,7 +70,7 @@ import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwind
     random, \
     sys, atexit, traceback, logging, functools, copy, math, threading
 from ctypes import wintypes
-from PIL import Image, ImageGrab, ImageEnhance, ImageFilter, ImageDraw, ImageFont
+from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
@@ -358,7 +358,6 @@ SERVER_OPEN_POS = (455, 231)  # server list drop-down
 SERVER_CHOICES = [(671, 254), (676, 281)]  # listeden seçimlerden biri
 ITEM_SERVER_PRESETS = {"Server1": 0, "Server2": 1}
 ITEM_BASMA_SERVER = "Server1"
-MODE_BANK_PLUS7_MC = "BANK_PLUS7_MC"  # Bankadan +1..+6 al, middle class ile +7'ye kadar bas
 OPERATION_MODE = "ITEM_BASMA"  # ITEM_BASMA veya ITEM_SATIS
 PAZAR_PARK_X = 805
 ITEM_SALE_VALID_X = (810, 805, 800)
@@ -395,10 +394,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
-BANK_PLUS7_MC_TARGET_INV_SLOTS = 27
-BANK_PLUS7_MC_MAX_TRIES_PER_ITEM = 7
-BANK_PLUS7_MC_BANK_SCAN_PAGES = 1
-BANK_PLUS7_MC_LOG_LEVEL = "INFO"
 
 _GUI_UPDATE_SALE_SLOT = None
 
@@ -457,7 +452,7 @@ except Exception as _e:
 
 PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
-MICRO_READ_DELAY = 0.015;
+MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
 MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
 # ---- Yürüme / Dönüş ----
@@ -465,24 +460,11 @@ ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
 NPC_SEEK_TIMEOUT = 20.0;
 Y_SEEK_TIMEOUT = 20.0
-TURN_LEFT_SEC = 1.443;
-TURN_RIGHT_SEC = 1.44
+TURN_LEFT_SEC = 1.432;
+TURN_RIGHT_SEC = 1.432
 # ---- Town ----
 TOWN_CLICK_POS = (775, 775);
 TOWN_WAIT = 2.5
-TOWN_CLICK_COUNT = 1  # Normal town tıklama sayısı
-TOWN_INITIAL_CLICK_COUNT = 3  # HP bar sonrası ilk town tıklama sayısı (varsayılan 3x)
-TOWN_CLICK_INTERVAL = 0.03  # Tıklamalar arası bekleme (sn)
-TOWN_CACHE_TTL = 0.10  # Koordinat okuma için kısa cache (sn)
-TOWN_VOTE_READS = 3  # X/Y için çoğunluk oylaması deneme sayısı
-TOWN_VOTE_INTERVAL = 0.02  # Oylama okumaları arası bekleme (sn)
-# ---- Koordinat OCR/Şablon ----
-COORD_ROI = (102, 100, 162, 122)  # (x1, y1, x2, y2) pencereye göre
-COORD_RESIZE_SCALE = 2.0
-COORD_CONTRAST = 3.0
-COORD_TEMPLATE_DIR = "digit_templates"  # 0-9 PNG şablonları için dizin
-COORD_TEMPLATE_THRESHOLD = 0.62
-COORD_TEMPLATE_GAP = 6
 # ---- Splash/Login yardımcı tık ----
 SPLASH_CLICK_POS = (700, 550)
 # ---- Tooltip OCR
@@ -1386,154 +1368,24 @@ def perform_login_inputs(w):
 
 # ---- NOT: Aşağıdaki büyük bloklar (OCR, template, upgrade, hover OCR, storage, rota, relaunch+main) Parça 2'de. ----
 # ================== OCR / INV / UPG Yardımcıları ==================
-_COORD_CACHE = {"ts": 0.0, "val": (None, None)}
-_TEMPLATE_DIGITS = None
-
-
-def _coord_bbox(window):
-    left, top = window.left, window.top;
-    x1, y1, x2, y2 = COORD_ROI
-    return (left + x1, top + y1, left + x2, top + y2)
-
-
-def _render_digit_template(digit: int, size=(22, 28)):
-    # NE İŞE YARAR: Template klasörü yoksa minimal 0-9 görselleri üretir.
-    w, h = size
-    img = Image.new("L", (w, h), 0)
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", int(h * 0.9))
-    except Exception:
-        font = ImageFont.load_default()
-    text = str(int(digit))
-    tw, th = draw.textsize(text, font=font)
-    draw.text(((w - tw) // 2, (h - th) // 2), text, fill=255, font=font)
-    return np.array(img)
-
-
-def _load_digit_templates():
-    global _TEMPLATE_DIGITS
-    if _TEMPLATE_DIGITS is not None:
-        return _TEMPLATE_DIGITS
-    _TEMPLATE_DIGITS = {}
-    try:
-        base = resource_path(COORD_TEMPLATE_DIR)
-        os.makedirs(base, exist_ok=True)
-        for d in range(10):
-            p = os.path.join(base, f"{d}.png")
-            if os.path.exists(p):
-                img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
-                if img is not None:
-                    _TEMPLATE_DIGITS[str(d)] = img
-                    continue
-            # Şablon yoksa minimal bir tane üretip kaydet
-            tmpl = _render_digit_template(d)
-            try:
-                Image.fromarray(tmpl).save(p)
-            except Exception:
-                pass
-            _TEMPLATE_DIGITS[str(d)] = tmpl
-    except Exception as e:
-        print(f"[COORD] Şablon yükleme hatası: {e}")
-    return _TEMPLATE_DIGITS
-
-
-def _parse_numbers_from_text(text: str):
-    parts = re.split(r'[,.\s]+', text)
-    nums = [p for p in parts if p.isdigit()]
-    if len(nums) >= 2:
-        return int(nums[0]), int(nums[1])
-    return None, None
-
-
-def _coords_from_templates(gray_img: Image.Image):
-    digits = _load_digit_templates()
-    if not digits:
-        return None, None
-    try:
-        arr = np.array(gray_img.convert("L"))
-        matches = []
-        for digit, tmpl in digits.items():
-            res = cv2.matchTemplate(arr, tmpl, cv2.TM_CCOEFF_NORMED)
-            loc = np.where(res >= COORD_TEMPLATE_THRESHOLD)
-            for pt in zip(*loc[::-1]):
-                score = float(res[pt[1], pt[0]])
-                matches.append((pt[0], digit, score))
-        if not matches:
-            return None, None
-        matches.sort(key=lambda t: t[0])
-        seq = []
-        last_x = None
-        for x, digit, score in matches:
-            if last_x is not None and (x - last_x) > COORD_TEMPLATE_GAP:
-                seq.append("|")  # ayırıcı
-            seq.append(digit)
-            last_x = x
-        text = "".join(seq)
-        parts = text.split("|")
-        if len(parts) >= 2:
-            try:
-                return int(parts[0]), int(parts[1])
-            except ValueError:
-                return None, None
-        return None, None
-    except Exception as e:
-        print(f"[COORD] Şablon okuma hatası: {e}")
-        return None, None
-
-
-def _ocr_coordinates_from_img(img: Image.Image):
-    gray = img.convert('L')
-    if COORD_RESIZE_SCALE != 1.0:
-        gray = gray.resize((int(gray.width * COORD_RESIZE_SCALE), int(gray.height * COORD_RESIZE_SCALE)))
-    gray = ImageEnhance.Contrast(gray).enhance(COORD_CONTRAST)
-    gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.UnsharpMask(radius=1, percent=180))
-    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.'
-    text = pytesseract.image_to_string(gray, config=cfg).strip()
-    return _parse_numbers_from_text(text)
-
-
-def _read_coordinates_once(window):
-    bbox = _coord_bbox(window)
-    img = ImageGrab.grab(bbox)
-    # Önce şablon, sonra OCR fallback
-    xy = _coords_from_templates(img)
-    if xy == (None, None):
-        xy = _ocr_coordinates_from_img(img)
-    return xy
-
-
-def _majority(values):
-    if not values:
-        return None
-    counts = {}
-    for v in values:
-        counts[v] = counts.get(v, 0) + 1
-    return max(counts.items(), key=lambda kv: kv[1])[0]
-
-
 def read_coordinates(window):
-    """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR/şablon ile okur (cache+oylama ile)."""
-    now = time.time()
-    if now - _COORD_CACHE.get("ts", 0) <= TOWN_CACHE_TTL:
-        return _COORD_CACHE.get("val", (None, None))
-
-    samples = []
-    for i in range(max(1, int(TOWN_VOTE_READS))):
-        xy = _read_coordinates_once(window)
-        if xy != (None, None):
-            samples.append(xy)
-        if i < TOWN_VOTE_READS - 1:
-            time.sleep(max(0.0, float(TOWN_VOTE_INTERVAL)))
-
-    xs = [s[0] for s in samples if s[0] is not None]
-    ys = [s[1] for s in samples if s[1] is not None]
-    x = _majority(xs)
-    y = _majority(ys)
-
-    _COORD_CACHE["ts"] = time.time()
-    _COORD_CACHE["val"] = (x, y)
-    return x, y
+    """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
+    left, top = window.left, window.top;
+    bbox = (left + 104, top + 102, left + 160, top + 120)
+    img = ImageGrab.grab(bbox);
+    gray = img.convert('L').resize((img.width * 2, img.height * 2))
+    TOWN_LOCKED = False
+    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+    TOWN_LOCKED = False
+    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+    gray = ImageEnhance.Contrast(gray).enhance(3.0);
+    gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
+    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
+    text = pytesseract.image_to_string(gray, config=cfg).strip()
+    parts = re.split(r'[,.\s]+', text);
+    nums = [p for p in parts if p.isdigit()]
+    if len(nums) >= 2: return int(nums[0]), int(nums[1])
+    return None, None
 
 
 def get_region_bounds(region):
@@ -2555,7 +2407,6 @@ def go_w_to_y(w, target_y: int, timeout: float = Y_SEEK_TIMEOUT) -> bool:  retur
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
-    print(f"[ALIGN] VALID_X hedefi: {sorted(list(VALID_X))}")
     while True:
         wait_if_paused();
         watchdog_enforce()
@@ -2564,9 +2415,9 @@ def town_until_valid_x(w):
         except Exception:
             x = None
         if x in VALID_X: print(f"[ALIGN] Geçerli X: {x} (deneme={attempts})"); return x
-        print(f"[ALIGN] X={x} geçersiz → town (deneme={attempts}).");
+        print(f"[ALIGN] X={x} geçersiz → town.");
         ensure_ui_closed();
-        send_town_command(reason="align_invalid_x", initial=(attempts == 0));
+        send_town_command();
         attempts += 1;
         set_stage("TOWN_ALIGN_FOR_VALID_X");
         time.sleep(0.2)
@@ -2757,31 +2608,22 @@ def move_to_769_and_turn_from_top(w):
     return True
 
 
-def send_town_command(*a, click_count=None, reason: str = "", initial: bool = False, **kw):
-    """Town at komutu. Kilit/log kontrolü + çoklu tıklama desteği."""
+def send_town_command(*a, **kw):
+    # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
     global TOWN_LOCKED, BANK_OPEN
-    base_clicks = int(TOWN_INITIAL_CLICK_COUNT if initial else TOWN_CLICK_COUNT)
-    clicks = click_count if click_count is not None else base_clicks
-    clicks = max(1, clicks)
+    # [YAMA] HardLock aktifse town tamamen kapalı
     if globals().get('TOWN_HARD_LOCK', False):
-        _town_log_once(f"[TOWN] HardLock aktif — komut iptal. reason={reason}")
+        _town_log_once('[TOWN] HardLock aktif — komut iptal.')
         return False
-
     y_now = _read_y_now();
     _set_town_lock_by_y(y_now)
     if TOWN_LOCKED:
-        _town_log_once(f"[TOWN] Kilit aktif (Y=598) — komut iptal. reason={reason} y={y_now}")
+        _town_log_once('[TOWN] Kilit aktif (Y=598) — komut iptal edildi')
         return False
-
-    print(f"[TOWN] Komut gönderiliyor (clicks={clicks}, interval={TOWN_CLICK_INTERVAL:.3f}s, reason={reason}, initial={initial}, y={y_now})")
     mouse_move(*TOWN_CLICK_POS);
-    for i in range(clicks):
-        mouse_click('left');
-        if i < clicks - 1:
-            time.sleep(max(0.0, float(TOWN_CLICK_INTERVAL)))
+    mouse_click('left');
     time.sleep(TOWN_WAIT)
     BANK_OPEN = False
-    return True
 
 
 def buy_items_from_npc():
@@ -2896,42 +2738,6 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
                     time.sleep(0.10)
         if page < 8: bank_click_next(1, 0.15)
     print(f"[BANK] Toplam çekilen +{N}: {taken}");
-    return taken
-
-
-def withdraw_below_plus7_from_bank_pages(win, max_take: int = 27, pages: int = 1):
-    """+7 olmayan (boş olmayan) itemleri bankadan envantere çeker."""
-    set_stage("BANK_WITHDRAW_BELOW7");
-    taken = 0
-    tmpl = _load_empty_template()
-    bank_go_to_first_page()
-    page_limit = max(1, int(pages))
-    for page in range(1, page_limit + 1):
-        wait_if_paused();
-        watchdog_enforce();
-        print(f"[BANK] Sayfa {page}/{page_limit} (+1..+6) taranıyor...")
-        cols, rows = get_region_grid("BANK_PANEL")
-        for r in range(rows):
-            for c in range(cols):
-                if taken >= max_take:
-                    print(f"[BANK] +1..+6 çekimi tamamlandı: {taken}/{max_take}")
-                    return taken
-                gray = grab_gray_region("BANK_PANEL")
-                if slot_is_empty_in_gray(gray, c, r, "BANK_PANEL", tmpl):
-                    continue
-                try:
-                    if hover_has_plusN(win, "BANK_PANEL", c, r, 7, hover_wait=HOVER_WAIT_BANK):
-                        continue
-                except Exception:
-                    continue
-                x, y = slot_center("BANK_PANEL", c, r)
-                mouse_move(x, y)
-                mouse_click("right")
-                taken += 1
-                time.sleep(0.10)
-        if page < page_limit:
-            bank_click_next(1, 0.15)
-    print(f"[BANK] Çekilen +1..+6 toplam: {taken}/{max_take}")
     return taken
 
 
@@ -3525,8 +3331,7 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
     press_key(SC_I);
     release_key(SC_I);
     time.sleep(0.6)
-    skip_plus7 = ((scroll_required == "LOW") or
-                  (scroll_required == "MID" and str(globals().get("MODE", "")).upper() == MODE_BANK_PLUS7_MC)) and (win is not None)
+    skip_plus7 = (scroll_required == "LOW") and (win is not None)
     # >>> YENİ: LOW akışı için global reopen sayacı sıfırla
     if scroll_required == "LOW":
         _reset_scroll_reopen_budget("LOW")
@@ -3540,13 +3345,8 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
         tmpl = _load_empty_template();
         c, r = slot
         if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
-        if skip_plus7:
-            try:
-                if hover_has_plusN(win, "UPG", c, r, 7) or (
-                        str(globals().get("MODE", "")).upper() == MODE_BANK_PLUS7_MC and hover_has_plusN(win, "UPG", c, r, 8)):
-                    print(f"[UPG] Slot ({c},{r}) +7/+8 → atla."); start_index = idx_found + 1; continue
-            except Exception:
-                pass
+        if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
+            f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
         res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
         if res == "DONE":
             used.add(slot);
@@ -3570,17 +3370,12 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None):
             c, r = WRAP_SLOTS[idx]
             if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
             seen_item = True
-            if skip_plus7:
-                try:
-                    if hover_has_plusN(win, "UPG", c, r, 7) or (
-                            str(globals().get("MODE", "")).upper() == MODE_BANK_PLUS7_MC and hover_has_plusN(win, "UPG", c, r, 8)):
-                        print(f"[UPG] Slot ({c},{r}) +7/+8 → atla.");
-                        continue
-                    else:
-                        seen_only_plus7 = False
-                except Exception:
-                    seen_only_plus7 = False
-        res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
+            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
+                print(f"[UPG] Slot ({c},{r}) +7 → atla.");
+                continue
+            else:
+                if skip_plus7: seen_only_plus7 = False
+            res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
             if res == "DONE":
                 attempts_done += 1;
                 wrap_cursor = (idx + 1) % len(WRAP_SLOTS);
@@ -3751,7 +3546,7 @@ def relaunch_and_login_to_ingame():
                 continue
         set_stage("RELAUNCH_TOWN_HIDE");
         ensure_ui_closed();
-        send_town_command(reason="relaunch_first_town", initial=True);
+        send_town_command();
         press_key(SC_O);
         release_key(SC_O);
         time.sleep(0.1)
@@ -3838,71 +3633,6 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             print("[BANK_PLUS8] Üzerinde +8 yok.")
             if not move_to_769_and_turn_from_top(w): print(
                 "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
-
-
-# ================== BANK_PLUS7_MC ORKESTRASYONU ==================
-def _bank_plus7_mc_cfg():
-    return {
-        "TARGET_INV_SLOTS": int(globals().get("BANK_PLUS7_MC_TARGET_INV_SLOTS", 27)),
-        "MAX_TRIES_PER_ITEM": int(globals().get("BANK_PLUS7_MC_MAX_TRIES_PER_ITEM", 7)),
-        "BANK_SCAN_PAGES": int(globals().get("BANK_PLUS7_MC_BANK_SCAN_PAGES", 1)),
-        "LOG_LEVEL": str(globals().get("BANK_PLUS7_MC_LOG_LEVEL", "INFO")),
-    }
-
-
-@crashguard("BANK_PLUS7_MC")
-def run_mode_bank_plus7_mc(w):
-    global MODE
-    MODE = MODE_BANK_PLUS7_MC
-    cfg = _bank_plus7_mc_cfg()
-    while True:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'):
-            print("[BANK_PLUS7_MC] F12 tespit edildi, çıkılıyor.")
-            return
-
-        send_town_command(reason="bank_plus7_mc_cycle")
-        sx = town_until_valid_x(w)
-        ascend_stairs_to_top(w)
-
-        if not move_to_769_and_turn_from_top(w):
-            print("[BANK_PLUS7_MC] Banka açılamadı, town tekrar denenecek.")
-            continue
-
-        deposit_inventory_plusN_to_bank(w, 7)
-
-        empty_slots = count_empty_slots("INV")
-        target_slots = max(0, min(int(cfg.get("TARGET_INV_SLOTS", 27)), empty_slots))
-        if target_slots <= 0:
-            target_slots = empty_slots
-        taken = withdraw_below_plus7_from_bank_pages(w, max_take=target_slots, pages=cfg.get("BANK_SCAN_PAGES", 1))
-
-        if taken <= 0:
-            print("[BANK_PLUS7_MC] Bankada +1..+6 kalmadı, kullanıcı müdahalesi bekleniyor (F12 için çıkış).")
-            while not _kb_pressed('f12'):
-                wait_if_paused();
-                watchdog_enforce()
-                time.sleep(5.0)
-            print("[BANK_PLUS7_MC] F12 alındı, döngü sonlandırılıyor.")
-            return
-
-        send_town_command(reason="bank_plus7_mc_to_anvil")
-        sx = town_until_valid_x(w)
-        ascend_stairs_to_top(w)
-        go_to_anvil_from_top(sx)
-
-        attempts_limit = max(1, int(taken * max(1, int(cfg.get("MAX_TRIES_PER_ITEM", 7)))))
-        print(f"[BANK_PLUS7_MC] Anvil deneme limiti: {attempts_limit} (adet={taken})")
-        basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w)
-
-        send_town_command(reason="bank_plus7_mc_deposit")
-        sx = town_until_valid_x(w)
-        ascend_stairs_to_top(w)
-        if move_to_769_and_turn_from_top(w):
-            deposit_inventory_plusN_to_bank(w, 7)
-        else:
-            print("[BANK_PLUS7_MC] Döngü kapanışında banka açılamadı, yeniden denenecek.")
 
 
 # ================== NORMAL ÇALIŞMA DÖNGÜSÜ ==================
@@ -4104,7 +3834,7 @@ def main():
                     if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
                 set_stage("INGAME_TOWN");
                 ensure_ui_closed();
-                send_town_command(reason="initial_login", initial=True)
+                send_town_command();
                 _town_log_once("[TOWN] Bir kez town atıldı.")
                 press_key(SC_O);
                 release_key(SC_O);
@@ -4112,10 +3842,6 @@ def main():
                 _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
                 maybe_autotune(True)
                 set_stage("RUN_WORKFLOW");
-                if str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper() == MODE_BANK_PLUS7_MC:
-                    print("[MAIN] MODE_BANK_PLUS7_MC seçili → bank +7 döngüsü başlıyor.")
-                    run_mode_bank_plus7_mc(w)
-                    break
                 cycle_done, _purchased = run_stairs_and_workflow(w)
                 if cycle_done:
                     set_stage("CYCLE_EXIT_RESTART");
@@ -5741,12 +5467,6 @@ def _MERDIVEN_RUN_GUI():
                     value=str(getattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))),
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
-                "bank_plus7_target_slots": tk.IntVar(
-                    value=int(getattr(m, "BANK_PLUS7_MC_TARGET_INV_SLOTS", BANK_PLUS7_MC_TARGET_INV_SLOTS))),
-                "bank_plus7_max_tries": tk.IntVar(
-                    value=int(getattr(m, "BANK_PLUS7_MC_MAX_TRIES_PER_ITEM", BANK_PLUS7_MC_MAX_TRIES_PER_ITEM))),
-                "bank_plus7_scan_pages": tk.IntVar(
-                    value=int(getattr(m, "BANK_PLUS7_MC_BANK_SCAN_PAGES", BANK_PLUS7_MC_BANK_SCAN_PAGES))),
             }
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
@@ -5907,21 +5627,7 @@ def _MERDIVEN_RUN_GUI():
                 row=0, column=0, sticky="w", padx=4, pady=2)
             ttk.Radiobutton(lf_mode, text="Item Satış", value="ITEM_SATIS", variable=self.v["operation_mode"]).grid(
                 row=0, column=1, sticky="w", padx=4, pady=2)
-            ttk.Radiobutton(lf_mode, text="Bankadan +1..+6 → +7 (Middle Class)", value=MODE_BANK_PLUS7_MC,
-                             variable=self.v["operation_mode"]).grid(row=0, column=2, sticky="w", padx=4, pady=2)
-            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, padx=6, pady=2)
-
-            lf_bank7 = ttk.LabelFrame(f1, text="BANK_PLUS7_MC")
-            lf_bank7.grid(row=r + 1, column=0, columnspan=4, sticky="we", pady=6)
-            ttk.Label(lf_bank7, text="Envanter Hedef Slot:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank7, textvariable=self.v["bank_plus7_target_slots"], width=6).grid(row=0, column=1, sticky="w",
-                                                                                              padx=4, pady=2)
-            ttk.Label(lf_bank7, text="Deneme/Satır:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank7, textvariable=self.v["bank_plus7_max_tries"], width=6).grid(row=0, column=3, sticky="w",
-                                                                                           padx=4, pady=2)
-            ttk.Label(lf_bank7, text="Banka Sayfa Tarama:").grid(row=0, column=4, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank7, textvariable=self.v["bank_plus7_scan_pages"], width=6).grid(row=0, column=5, sticky="w",
-                                                                                            padx=4, pady=2)
+            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=2, padx=6, pady=2)
 
             # SATIN ALMA
             f2 = ttk.Frame(nb);
@@ -6400,9 +6106,6 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
             setattr(m, "TELEGRAM_CHAT_ID", self.v["telegram_chat_id"].get().strip())
-            setattr(m, "BANK_PLUS7_MC_TARGET_INV_SLOTS", int(self.v["bank_plus7_target_slots"].get()))
-            setattr(m, "BANK_PLUS7_MC_MAX_TRIES_PER_ITEM", int(self.v["bank_plus7_max_tries"].get()))
-            setattr(m, "BANK_PLUS7_MC_BANK_SCAN_PAGES", int(self.v["bank_plus7_scan_pages"].get()))
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
