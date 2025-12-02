@@ -390,6 +390,11 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
+KING_TEXT_CLICK_ENABLED = False
+KING_TEXT_CLICK_POS = (0, 0)
+KING_TEXT_CLICK_INTERVAL = 120.0
+KING_TEXT_CLICK_HOLD = 0.05
+_KING_TEXT_LAST_CLICK_TS = 0.0
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ITEM_SALE_BANK_NOTIFY = True
@@ -776,6 +781,10 @@ def _wait_with_stage_detail(total_seconds: float, detail_builder: Optional[Calla
             if msg and msg != last_msg:
                 stage_detail(msg)
                 last_msg = msg
+        try:
+            _item_sale_maybe_click_king_text()
+        except Exception:
+            pass
         time.sleep(min(1.0, remaining, 0.5))
 
 
@@ -925,6 +934,22 @@ def repeated_click(pos, count, delay):
         mouse_move(x, y)
         mouse_click("left")
         time.sleep(max(0.0, float(delay)))
+
+
+def _mouse_click_with_hold(x: int, y: int, hold: float):
+    mouse_move(x, y)
+    if not pause_point():
+        return
+    extra = ctypes.c_ulong(0)
+    ii_ = Input_I()
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, ctypes.pointer(extra))
+    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+    time.sleep(max(0.0, float(hold)))
+    if not pause_point():
+        return
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
+    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+    time.sleep(mouse_hizi / 2)
 
 
 def right_click_enter_at(x, y):
@@ -2910,10 +2935,10 @@ def _item_sale_fill_market(price_text: str) -> int:
         time.sleep(0.2)
     mouse_move(476, 644)
     mouse_click("left")
-    time.sleep(61.0)
+    _wait_with_stage_detail(61.0)
     mouse_move(476, 644)
     mouse_click("left")
-    time.sleep(2.0)
+    _wait_with_stage_detail(2.0)
     mouse_move(806, 776)
     mouse_click("left")
     time.sleep(key_delay)
@@ -2930,6 +2955,41 @@ def _item_sale_report_slot_count(empty_slots: int):
             cb(int(empty_slots))
     except Exception:
         pass
+
+
+def _item_sale_maybe_click_king_text(now: Optional[float] = None) -> bool:
+    try:
+        enabled = bool(globals().get("KING_TEXT_CLICK_ENABLED", KING_TEXT_CLICK_ENABLED))
+    except Exception:
+        enabled = KING_TEXT_CLICK_ENABLED
+    if not enabled:
+        return False
+    try:
+        pos = globals().get("KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS)
+        x, y = int(pos[0]), int(pos[1])
+    except Exception:
+        return False
+    try:
+        interval = float(globals().get("KING_TEXT_CLICK_INTERVAL", KING_TEXT_CLICK_INTERVAL))
+    except Exception:
+        interval = KING_TEXT_CLICK_INTERVAL
+    try:
+        hold = float(globals().get("KING_TEXT_CLICK_HOLD", KING_TEXT_CLICK_HOLD))
+    except Exception:
+        hold = KING_TEXT_CLICK_HOLD
+    if interval <= 0:
+        return False
+    if now is None:
+        now = time.time()
+    last = float(globals().get("_KING_TEXT_LAST_CLICK_TS", _KING_TEXT_LAST_CLICK_TS) or 0.0)
+    if now - last < interval:
+        return False
+    globals()["_KING_TEXT_LAST_CLICK_TS"] = now
+    try:
+        _mouse_click_with_hold(x, y, hold)
+    except Exception:
+        return False
+    return True
 
 
 def _item_sale_refresh_market(initial=False) -> int:
@@ -3057,6 +3117,7 @@ def _item_sale_run_cycle(w):
     if refresh_lock is None:
         refresh_lock = threading.Lock()
         globals()["_AUTO_MARKET_REFRESH_LOCK"] = refresh_lock
+    globals()["_KING_TEXT_LAST_CLICK_TS"] = 0.0
 
     def open_inventory():
         nonlocal inv_open, next_scan
@@ -3129,6 +3190,7 @@ def _item_sale_run_cycle(w):
 
         open_inventory()
         now = time.time()
+        _item_sale_maybe_click_king_text(now)
         if now < next_scan:
             time.sleep(0.2)
             continue
@@ -4552,6 +4614,18 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("PAZAR_YENILEME_BEKELEME_MAX", "Pazar yenileme bekleme maks", "Item Satış", "float",
                 _cfg_default("PAZAR_YENILEME_BEKELEME_MAX", 120.0),
                 "Pazar yenileme öncesi maksimum bekleme süresi."),
+    ConfigField("KING_TEXT_CLICK_ENABLED", "Krallık tıklama aktif", "Item Satış", "bool",
+                _cfg_default("KING_TEXT_CLICK_ENABLED", KING_TEXT_CLICK_ENABLED),
+                "Krallık yazısı için periyodik tıklamayı aç/kapat."),
+    ConfigField("KING_TEXT_CLICK_POS", "Krallık tık (x,y)", "Item Satış", "int_pair",
+                _cfg_default("KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS),
+                "Krallık yazısı için tıklama koordinatı.", apply=_ensure_int_pair),
+    ConfigField("KING_TEXT_CLICK_INTERVAL", "Krallık tıklama aralığı", "Item Satış", "float",
+                _cfg_default("KING_TEXT_CLICK_INTERVAL", KING_TEXT_CLICK_INTERVAL),
+                "Krallık yazısı tıklama sıklığı (sn)."),
+    ConfigField("KING_TEXT_CLICK_HOLD", "Krallık tıklama süresi", "Item Satış", "float",
+                _cfg_default("KING_TEXT_CLICK_HOLD", KING_TEXT_CLICK_HOLD),
+                "Krallık yazısı tıklamasında basılı kalma süresi (sn)."),
     ConfigField("auto_market_refresh_enabled", "Pazar yenileme aktif", "Item Satış", "bool",
                 _cfg_default("auto_market_refresh_enabled", False),
                 "Zamanlı otomatik pazar yenilemeyi aç/kapat."),
@@ -5569,6 +5643,13 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_902_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_902_135_HIZ", CLICK_902_135_HIZ))),
                 "sale_click_899_count": tk.IntVar(value=int(getattr(m, "CLICK_899_399_ADET", CLICK_899_399_ADET))),
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
+                "king_click_enabled": tk.BooleanVar(
+                    value=bool(getattr(m, "KING_TEXT_CLICK_ENABLED", KING_TEXT_CLICK_ENABLED))),
+                "king_click_x": tk.IntVar(value=int(getattr(m, "KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS)[0])),
+                "king_click_y": tk.IntVar(value=int(getattr(m, "KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS)[1])),
+                "king_click_interval": tk.DoubleVar(
+                    value=float(getattr(m, "KING_TEXT_CLICK_INTERVAL", KING_TEXT_CLICK_INTERVAL))),
+                "king_click_hold": tk.DoubleVar(value=float(getattr(m, "KING_TEXT_CLICK_HOLD", KING_TEXT_CLICK_HOLD))),
                 "auto_market_refresh_enabled": tk.BooleanVar(
                     value=bool(getattr(m, "auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))),
                 "auto_market_refresh_interval_hours": tk.DoubleVar(
@@ -5831,8 +5912,24 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_timing, textvariable=self.v["sale_click_899_speed"], width=8).grid(row=3, column=3, sticky="w",
                                                                                             padx=4, pady=2)
 
+            lf_king = ttk.LabelFrame(f_sale, text="Krallık Yazısı Tıklama")
+            lf_king.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(lf_king, text="Aktif", variable=self.v["king_click_enabled"], onvalue=True,
+                            offvalue=False).grid(row=0, column=0, columnspan=4, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_king, text="Koordinat (x,y):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_king, textvariable=self.v["king_click_x"], width=8).grid(row=1, column=1, sticky="w", padx=4,
+                                                                                  pady=2)
+            ttk.Entry(lf_king, textvariable=self.v["king_click_y"], width=8).grid(row=1, column=2, sticky="w", padx=4,
+                                                                                  pady=2)
+            ttk.Label(lf_king, text="Aralık (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_king, textvariable=self.v["king_click_interval"], width=8).grid(row=2, column=1, sticky="w",
+                                                                                          padx=4, pady=2)
+            ttk.Label(lf_king, text="Basılı tut (sn):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_king, textvariable=self.v["king_click_hold"], width=8).grid(row=2, column=3, sticky="w",
+                                                                                       padx=4, pady=2)
+
             lf_bank = ttk.LabelFrame(f_sale, text="Banka")
-            lf_bank.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_bank.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_bank, text="Bankaya Git Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w",
                                                                                          padx=4,
@@ -5863,7 +5960,7 @@ def _MERDIVEN_RUN_GUI():
                                                                                        sticky="w", padx=4, pady=2)
 
             lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
-            lf_monitor.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_monitor.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_monitor, text="Boş Slot Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Label(lf_monitor, textvariable=self.sale_slot_var, width=6, foreground="blue").grid(row=0, column=1,
                                                                                                     sticky="w",
@@ -5873,7 +5970,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
                                                                                            padx=4, pady=2)
             lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
-            lf_auto_refresh.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_auto_refresh.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
                             variable=self.v["auto_market_refresh_enabled"], onvalue=True,
                             offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
@@ -5882,7 +5979,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
                 row=1, column=1, sticky="w", padx=4, pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=5, column=0, columnspan=2,
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=6, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
@@ -6213,6 +6310,14 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "CLICK_902_135_HIZ", float(self.v["sale_click_902_speed"].get()))
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
+            setattr(m, "KING_TEXT_CLICK_ENABLED", bool(self.v["king_click_enabled"].get()))
+            try:
+                kx = int(self.v["king_click_x"].get()); ky = int(self.v["king_click_y"].get())
+            except Exception:
+                kx, ky = KING_TEXT_CLICK_POS
+            setattr(m, "KING_TEXT_CLICK_POS", (kx, ky))
+            setattr(m, "KING_TEXT_CLICK_INTERVAL", float(self.v["king_click_interval"].get()))
+            setattr(m, "KING_TEXT_CLICK_HOLD", float(self.v["king_click_hold"].get()))
             setattr(m, "auto_market_refresh_enabled", bool(self.v["auto_market_refresh_enabled"].get()))
             setattr(m, "auto_market_refresh_interval_hours",
                     float(self.v["auto_market_refresh_interval_hours"].get()))
