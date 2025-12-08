@@ -950,6 +950,7 @@ SC_ESC = 0x01;
 SC_O = 0x18
 VK_CONTROL = 0x11;
 VK_V = 0x56;
+VK_A = 0x41;
 VK_BACKSPACE = 0x08;
 VK_CAPITAL = 0x14
 
@@ -1101,29 +1102,92 @@ CF_UNICODETEXT = 13;
 GMEM_MOVEABLE = 0x0002
 
 
+@contextmanager
+def _open_clipboard():
+    """Open clipboard with multiple window fallbacks (console/windowless exe friendly)."""
+    user32 = ctypes.windll.user32
+    handles = [0]
+    try:
+        handles.extend([user32.GetForegroundWindow(), user32.GetDesktopWindow()])
+    except Exception:
+        pass
+    for hwnd in handles:
+        for _ in range(5):
+            if user32.OpenClipboard(hwnd):
+                try:
+                    yield True
+                finally:
+                    user32.CloseClipboard()
+                return
+            time.sleep(0.02)
+    yield False
+
+
 def set_clipboard_text(text: str) -> bool:
     if not pause_point(): return False
     user32 = ctypes.windll.user32;
     kernel32 = ctypes.windll.kernel32
-    for _ in range(5):
-        if user32.OpenClipboard(0): break
-        time.sleep(0.02)
-    else:
-        return False
-    try:
-        user32.EmptyClipboard();
-        data = ctypes.create_unicode_buffer(text)
-        size_bytes = ctypes.sizeof(ctypes.c_wchar) * (len(text) + 1)
-        hGlobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_bytes)
-        if not hGlobal: return False
-        lpGlobal = kernel32.GlobalLock(hGlobal)
-        if not lpGlobal: kernel32.GlobalFree(hGlobal); return False
-        ctypes.memmove(lpGlobal, ctypes.addressof(data), size_bytes);
-        kernel32.GlobalUnlock(hGlobal)
-        if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal): kernel32.GlobalFree(hGlobal); return False
-        return True
-    finally:
-        user32.CloseClipboard()
+    with _open_clipboard() as opened:
+        if not opened:
+            # Tk fallback helps on PyInstaller GUI builds with no console window
+            try:
+                import tkinter as tk
+                r = tk.Tk(); r.withdraw(); r.clipboard_clear(); r.clipboard_append(text); r.update(); r.destroy();
+                return True
+            except Exception:
+                return False
+        try:
+            user32.EmptyClipboard();
+            data = ctypes.create_unicode_buffer(text)
+            size_bytes = ctypes.sizeof(ctypes.c_wchar) * (len(text) + 1)
+            hGlobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_bytes)
+            if not hGlobal: return False
+            lpGlobal = kernel32.GlobalLock(hGlobal)
+            if not lpGlobal: kernel32.GlobalFree(hGlobal); return False
+            ctypes.memmove(lpGlobal, ctypes.addressof(data), size_bytes);
+            kernel32.GlobalUnlock(hGlobal)
+            if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal): kernel32.GlobalFree(hGlobal); return False
+            return True
+        except Exception:
+            try:
+                import tkinter as tk
+                r = tk.Tk(); r.withdraw(); r.clipboard_clear(); r.clipboard_append(text); r.update(); r.destroy();
+                return True
+            except Exception:
+                return False
+
+
+def get_clipboard_text() -> Optional[str]:
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    with _open_clipboard() as opened:
+        if not opened:
+            try:
+                import tkinter as tk
+                r = tk.Tk(); r.withdraw();
+                data = r.clipboard_get(); r.destroy();
+                return data
+            except Exception:
+                return None
+        try:
+            handle = user32.GetClipboardData(CF_UNICODETEXT)
+            if not handle:
+                return None
+            ptr = kernel32.GlobalLock(handle)
+            if not ptr:
+                return None
+            try:
+                return ctypes.wstring_at(ptr)
+            finally:
+                kernel32.GlobalUnlock(handle)
+        except Exception:
+            try:
+                import tkinter as tk
+                r = tk.Tk(); r.withdraw();
+                data = r.clipboard_get(); r.destroy();
+                return data
+            except Exception:
+                return None
 
 
 def press_vk(vk):
@@ -1138,15 +1202,34 @@ def release_vk(vk):
     time.sleep(tus_hizi)
 
 
-def paste_text_from_clipboard(text: str) -> bool:
-    if not pause_point(): return False
-    if set_clipboard_text(text):
-        press_vk(VK_CONTROL);
-        press_vk(VK_V);
-        release_vk(VK_V);
-        release_vk(VK_CONTROL);
-        time.sleep(0.05);
-        return True
+def paste_text_from_clipboard(text: str, retries: int = 3, select_all: bool = True) -> bool:
+    if not pause_point():
+        return False
+    target = text if text is not None else ""
+    for attempt in range(1, retries + 1):
+        if not set_clipboard_text(target):
+            time.sleep(0.05)
+            continue
+        time.sleep(0.02)
+        for paste_try in range(2):
+            if select_all:
+                press_vk(VK_CONTROL); press_vk(VK_A); release_vk(VK_A); release_vk(VK_CONTROL)
+                time.sleep(0.05)
+            press_vk(VK_CONTROL); press_vk(VK_V); release_vk(VK_V); release_vk(VK_CONTROL)
+            time.sleep(0.12)
+            try:
+                press_vk(VK_CONTROL); press_vk(VK_A); release_vk(VK_A); release_vk(VK_CONTROL)
+                time.sleep(0.04)
+                press_vk(VK_CONTROL); press_vk(VK_C); release_vk(VK_C); release_vk(VK_CONTROL)
+                time.sleep(0.06)
+                pasted = get_clipboard_text()
+            except Exception:
+                pasted = None
+            if pasted == target:
+                return True
+            time.sleep(0.08)
+        print(f"[PASTE] Yapıştırma doğrulanamadı (deneme {attempt}).")
+    print(f"[PASTE] Panoya yapıştırılamadı (deneme {retries}).")
     return False
 
 
@@ -1512,7 +1595,8 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
     time.sleep(0.1)
-    paste_text_from_clipboard(LOGIN_USERNAME);
+    if not paste_text_from_clipboard(LOGIN_USERNAME):
+        print("[LOGIN] Kullanıcı adı yapıştırılamadı.")
     time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
@@ -1521,7 +1605,8 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    paste_text_from_clipboard(LOGIN_PASSWORD);
+    if not paste_text_from_clipboard(LOGIN_PASSWORD):
+        print("[LOGIN] Şifre yapıştırılamadı.")
     time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
