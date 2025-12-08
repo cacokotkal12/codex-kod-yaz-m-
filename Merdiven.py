@@ -1241,7 +1241,14 @@ class PROCESSENTRY32W(ctypes.Structure):
 
 
 def _iter_processes():
-    k32 = ctypes.windll.kernel32
+    # Windows API erişimi yoksa (örn. Linux/macOS) sessizce çık
+    if not hasattr(ctypes, "windll"):
+        return
+
+    try:
+        k32 = ctypes.windll.kernel32
+    except Exception:
+        return
     snapshot = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     INVALID = ctypes.c_void_p(-1).value
     if snapshot == INVALID:
@@ -1272,6 +1279,9 @@ def _pids_by_image(names: Set[str]) -> Set[int]:
 
 
 def _pids_from_hwnds(hwnds: List[int]) -> Set[int]:
+    if not hasattr(ctypes, "windll"):
+        return set()
+
     pids = set()
     for h in hwnds:
         try:
@@ -1302,6 +1312,9 @@ def _enum_launcher_hwnds() -> List[int]:
 
 
 def _wm_close_hwnds(hwnds: List[int]):
+    if not hasattr(ctypes, "windll"):
+        return
+
     WM_CLOSE = 0x0010
     user32 = ctypes.windll.user32
     for h in hwnds:
@@ -1312,6 +1325,9 @@ def _wm_close_hwnds(hwnds: List[int]):
 
 
 def _kill_pids(pids: Set[int]):
+    if not hasattr(ctypes, "windll"):
+        return
+
     k32 = ctypes.windll.kernel32
     PROCESS_TERMINATE = 0x0001
     for pid in list(pids):
