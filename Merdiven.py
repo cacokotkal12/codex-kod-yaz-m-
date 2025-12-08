@@ -113,6 +113,71 @@ def _MERDIVEN_CFG_PATH():
     return path
 
 
+_CONFIG_LOCK = threading.RLock()
+
+
+def _ensure_cfg_sections(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    base: Dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if "gui" not in base or not isinstance(base.get("gui"), dict):
+        base["gui"] = {}
+    if "advanced" not in base or not isinstance(base.get("advanced"), dict):
+        base["advanced"] = {}
+    if "speed_config" not in base or not isinstance(base.get("speed_config"), dict):
+        base["speed_config"] = {}
+    return base
+
+
+def _load_full_config(path: Optional[str] = None) -> Dict[str, Any]:
+    path = path or _MERDIVEN_CFG_PATH()
+    with _CONFIG_LOCK:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        return _ensure_cfg_sections(data)
+
+
+def _atomic_save_json(path: str, payload: Dict[str, Any]) -> bool:
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(_serialize_config(payload), f, indent=2, ensure_ascii=False)
+            try:
+                f.flush(); os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(os.path.dirname(path) or '.', os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        try:
+            print('[PATCH][config] atomic save error:', e)
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+def _save_full_config(payload: Dict[str, Any], path: Optional[str] = None) -> bool:
+    path = path or _MERDIVEN_CFG_PATH()
+    with _CONFIG_LOCK:
+        return _atomic_save_json(path, _ensure_cfg_sections(payload))
+
+
 try:
     import mss
 except Exception:
@@ -4883,12 +4948,12 @@ def load_config(path=None, defaults=None):
     if defaults is None:
         defaults = _schema_defaults(_BASE_CONFIG_DEFAULTS)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        if not os.path.exists(path):
-            with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
-            return defaults
-        with open(path, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
+        base = _load_full_config(path)
+        cfg = copy.deepcopy(defaults)
+        for k, v in base.items():
+            if k in ("gui", "advanced", "speed_config"):
+                continue
+            cfg[k] = v
 
         def _merge(a, b):
             for k, v in b.items():
@@ -4898,6 +4963,8 @@ def load_config(path=None, defaults=None):
                     _merge(a[k], v)
 
         _merge(cfg, defaults)
+        base.update(_serialize_config(cfg))
+        _save_full_config(base, path)
         return cfg
     except Exception as e:
         print('[PATCH][config] load error:', e)
@@ -4908,10 +4975,9 @@ def save_config(cfg, path=None):
     if path is None:
         path = _MERDIVEN_CFG_PATH()
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
-        return True
+        base = _load_full_config(path)
+        base.update(_serialize_config(cfg))
+        return _save_full_config(base, path)
     except Exception as e:
         print('[PATCH][config] save error:', e)
         return False
@@ -6333,10 +6399,9 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                with open(self._cfg(), "r", encoding="utf-8") as f:
-                    j = json.load(f)
-            except:
-                j = {}
+                j = _load_full_config(self._cfg())
+            except Exception:
+                j = _ensure_cfg_sections({})
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if k in self.v:
@@ -6488,11 +6553,15 @@ def _MERDIVEN_RUN_GUI():
                     adv[name] = var.get()
                 except Exception:
                     pass
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-            self._msg(f"Ayarlar kaydedildi: {path}")
+            if _save_full_config(data, path):
+                try:
+                    cfg_section = {k: v for k, v in data.items() if k not in ("gui", "advanced", "speed_config")}
+                    globals()['_GLOBAL_PATCH_CFG'] = cfg_section
+                except Exception:
+                    pass
+                self._msg(f"Ayarlar kaydedildi: {path}")
+            else:
+                self._msg(f"[GUI] Kayıt hatası: {path}")
             self.apply_core()
 
         def _tick(self):
@@ -6794,20 +6863,28 @@ __yama_install_fast_anvil()
 # === [YAMA FAST GUI] start ===
 # Hız / Anvil / PREC 598 / Cache / QC ayar penceresi (tek pencerede)
 def _speed_cfg_path():
-    try:
-        return PERSIST_PATH('speed_config.json')  # Uygulama verileri altında
-    except Exception:
-        import os
-        return os.path.join(os.path.expanduser('~'), 'speed_config.json')
+    return _MERDIVEN_CFG_PATH()
 
 
 def load_speed_config():
     try:
         import json, os
         p = _speed_cfg_path()
-        if not os.path.exists(p): return False
-        with open(p, 'r', encoding='utf-8') as f:
-            conf = json.load(f)
+        full = _load_full_config(p)
+        speed_conf = full.get('speed_config', {}) or {}
+        legacy_path = None
+        try:
+            legacy_path = PERSIST_PATH('speed_config.json')
+        except Exception:
+            legacy_path = None
+        if not speed_conf and legacy_path and os.path.exists(legacy_path) and legacy_path != p:
+            try:
+                with open(legacy_path, 'r', encoding='utf-8') as f:
+                    speed_conf = json.load(f)
+                full['speed_config'] = speed_conf
+                _save_full_config(full, p)
+            except Exception:
+                pass
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -6815,7 +6892,8 @@ def load_speed_config():
                   'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
-            if k in conf: globals()[k] = conf[k]
+            if k in speed_conf:
+                globals()[k] = speed_conf[k]
         return True
     except Exception as e:
         print('[GUI] speed_config yüklenemedi:', e);
@@ -6824,13 +6902,10 @@ def load_speed_config():
 
 def save_speed_config():
     try:
-        import json, os
+        import os
         p = _speed_cfg_path()
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                conf = json.load(f)
-        except Exception:
-            conf = {}
+        full = _load_full_config(p)
+        conf = full.get('speed_config', {}) or {}
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -6839,12 +6914,12 @@ def save_speed_config():
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
             conf[k] = globals().get(k)
+        full['speed_config'] = conf
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, 'w', encoding='utf-8') as f:
-            import json;
-            json.dump(conf, f, indent=2, ensure_ascii=False)
-        print('[GUI] speed_config kaydedildi:', p);
-        return True
+        if _save_full_config(full, p):
+            print('[GUI] speed_config kaydedildi:', p);
+            return True
+        return False
     except Exception as e:
         print('[GUI] speed_config kaydetme hata:', e);
         return False
@@ -7116,10 +7191,11 @@ def _yama_speed_cfg_path():
 def yama_load_extra_cfg():
     import json, os
     p = _yama_speed_cfg_path()
-    if not os.path.exists(p): return False
     try:
-        with open(p, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
+        cfg_all = _load_full_config(p)
+        cfg = cfg_all.get('speed_config', {}) or {}
+        if not cfg:
+            return False
         if 'ANVIL_HOVER_GUARD' in cfg: globals()['ANVIL_HOVER_GUARD'] = bool(cfg['ANVIL_HOVER_GUARD'])
         if 'ANVIL_MOUSE_PARK_POS' in cfg:
             try:
@@ -7139,22 +7215,20 @@ def yama_save_extra_cfg():
     import json, os
     p = _yama_speed_cfg_path()
     try:
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-        except Exception:
-            cfg = {}
+        cfg_all = _load_full_config(p)
+        cfg = cfg_all.get('speed_config', {}) or {}
         cfg.update({
             'ANVIL_HOVER_GUARD': bool(globals().get('ANVIL_HOVER_GUARD', True)),
             'ANVIL_MOUSE_PARK_POS': list(globals().get('ANVIL_MOUSE_PARK_POS', (5, 5))),
             'ANVIL_HOVER_CLEAR_SEC': float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.035)),
             'ROI_STALE_MS': int(globals().get('ROI_STALE_MS', 120)),
         })
+        cfg_all['speed_config'] = cfg
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, 'w', encoding='utf-8') as f:
-            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
-        print('[YAMA CFG] kaydedildi:', p);
-        return True
+        if _save_full_config(cfg_all, p):
+            print('[YAMA CFG] kaydedildi:', p);
+            return True
+        return False
     except Exception as e:
         print('[YAMA CFG] save hata:', e);
         return False
