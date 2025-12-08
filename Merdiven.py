@@ -646,6 +646,74 @@ BANK_OPEN = False;
 FORCE_PLUS7_ONCE = False
 NEED_STAIRS_REALIGN = True  # relaunch/yeniden giriş sonrası merdiven başlangıcı zorunlu
 
+# --- +8 F bekleme bildirimi ayarları ve durumu ---
+PLUS8_IDLE_MESSAGE = str(globals().get("PLUS8_IDLE_MESSAGE", "+8 basma döngüsü devam ediyor, lütfen kontrol et."))
+PLUS8_IDLE_MESSAGE_INTERVAL_MIN = int(globals().get("PLUS8_IDLE_MESSAGE_INTERVAL_MIN", 10))
+_PLUS8_IDLE_WAITING = False
+_PLUS8_IDLE_LAST_SENT = 0.0
+_PLUS8_IDLE_NOTIFY_STOP = threading.Event()
+_PLUS8_IDLE_LOCK = threading.Lock()
+_PLUS8_IDLE_THREAD = None
+
+
+def _set_plus8_idle_waiting(active: bool):
+    """+8 F bekleme durum bayrağını günceller (interval reset içerir)."""
+    global _PLUS8_IDLE_WAITING, _PLUS8_IDLE_LAST_SENT
+    _ensure_plus8_idle_thread()
+    with _PLUS8_IDLE_LOCK:
+        changed = (_PLUS8_IDLE_WAITING != bool(active))
+        _PLUS8_IDLE_WAITING = bool(active)
+        if not _PLUS8_IDLE_WAITING:
+            _PLUS8_IDLE_LAST_SENT = time.time()
+        elif changed:
+            _PLUS8_IDLE_LAST_SENT = time.time()
+
+
+def _plus8_idle_can_notify() -> bool:
+    return MODE == "BANK_PLUS8" and _PLUS8_IDLE_WAITING
+
+
+def _plus8_idle_loop():
+    global _PLUS8_IDLE_LAST_SENT
+    while not _PLUS8_IDLE_NOTIFY_STOP.is_set():
+        try:
+            if _plus8_idle_can_notify():
+                try:
+                    interval = float(globals().get("PLUS8_IDLE_MESSAGE_INTERVAL_MIN", PLUS8_IDLE_MESSAGE_INTERVAL_MIN))
+                except Exception:
+                    interval = float(PLUS8_IDLE_MESSAGE_INTERVAL_MIN)
+                interval_sec = max(60.0, interval * 60.0)
+                now = time.time()
+                with _PLUS8_IDLE_LOCK:
+                    last = _PLUS8_IDLE_LAST_SENT
+                if now - last >= interval_sec:
+                    msg = str(globals().get("PLUS8_IDLE_MESSAGE", PLUS8_IDLE_MESSAGE))
+                    for _ in range(3):
+                        send_telegram_message(msg)
+                    with _PLUS8_IDLE_LOCK:
+                        _PLUS8_IDLE_LAST_SENT = time.time()
+        except Exception as exc:
+            try:
+                print(f"[TELEGRAM] +8 idle bildirim hata: {exc}")
+            except Exception:
+                pass
+        _PLUS8_IDLE_NOTIFY_STOP.wait(5.0)
+
+
+def _ensure_plus8_idle_thread():
+    global _PLUS8_IDLE_THREAD
+    if _PLUS8_IDLE_THREAD is not None:
+        return
+    try:
+        t = threading.Thread(target=_plus8_idle_loop, name="plus8_idle_notifier", daemon=True)
+        t.start();
+        _PLUS8_IDLE_THREAD = t
+    except Exception as exc:
+        try:
+            print(f"[TELEGRAM] +8 idle thread başlatılamadı: {exc}")
+        except Exception:
+            pass
+
 
 def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
     """MODE'u NORMAL yapar; istenirse +8 devam bayrağını da temizler."""
@@ -653,6 +721,7 @@ def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
     MODE = "NORMAL"
     if reset_plus8_state:
         PLUS8_RESUME = False
+    _set_plus8_idle_waiting(False)
     if reason:
         print(f"[MODE] NORMAL ({reason})")
 
@@ -662,6 +731,7 @@ def _set_mode_bank_plus8(reason: str = None):
     global MODE, PLUS8_RESUME
     MODE = "BANK_PLUS8"
     PLUS8_RESUME = True
+    _set_plus8_idle_waiting(False)
     if reason:
         print(f"[MODE] BANK_PLUS8 ({reason})")
 
@@ -3451,76 +3521,83 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
     # >>> YENİ: LOW akışı için global reopen sayacı sıfırla
     if scroll_required == "LOW":
         _reset_scroll_reopen_budget("LOW")
-    while attempts_done < limit and start_index < total_slots:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'): break
-        idx_found, slot = find_next_filled_slot_from_index(start_index, used, "UPG")
-        if slot is None: break
-        gray = grab_gray_region("UPG");
-        tmpl = _load_empty_template();
-        c, r = slot
-        if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
-        if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
-            f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
-        if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
-            f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
-        res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
-        if res == "DONE":
-            used.add(slot);
-            attempts_done += 1
-        elif res in ("EXIT_LOOP", "ABORT"):
-            return attempts_done
-        start_index = idx_found + 1
-    wrap_cursor = 0
-    while attempts_done < limit:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'): break
-        gray = grab_gray_region("UPG");
-        tmpl = _load_empty_template()
-        found_and_upgraded = False;
-        seen_item = False;
-        skipped_due_to_scroll = False;
-        seen_only_plus7 = True if skip_plus7 else False
-        for i in range(len(WRAP_SLOTS)):
-            idx = (wrap_cursor + i) % len(WRAP_SLOTS);
-            c, r = WRAP_SLOTS[idx]
-            if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
-            seen_item = True
-            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
-                print(f"[UPG] Slot ({c},{r}) +7 → atla.");
-                continue
-            if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
-                print(f"[UPG] Slot ({c},{r}) +8 → atla.");
-                continue
-            else:
-                if skip_plus7: seen_only_plus7 = False
+    plus8_idle_scope = (scroll_required == "MID")
+    if plus8_idle_scope:
+        _set_plus8_idle_waiting(True)
+    try:
+        while attempts_done < limit and start_index < total_slots:
+            wait_if_paused();
+            watchdog_enforce()
+            if _kb_pressed('f12'): break
+            idx_found, slot = find_next_filled_slot_from_index(start_index, used, "UPG")
+            if slot is None: break
+            gray = grab_gray_region("UPG");
+            tmpl = _load_empty_template();
+            c, r = slot
+            if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
+            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
+                f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
+            if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
+                f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
             res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
             if res == "DONE":
-                attempts_done += 1;
-                wrap_cursor = (idx + 1) % len(WRAP_SLOTS);
-                found_and_upgraded = True;
-                break
-            elif res == "SKIP_SCROLL":
-                skipped_due_to_scroll = True;
-                continue
+                used.add(slot);
+                attempts_done += 1
             elif res in ("EXIT_LOOP", "ABORT"):
                 return attempts_done
-        if not found_and_upgraded:
-            if skipped_due_to_scroll: print("[UPG] Scroll görünmüyor → kısa bekle."); time.sleep(0.15); continue
-            if not seen_item:
-                print(f"[UPG] Wrap alanında item yok. Deneme: {attempts_done}/{limit}");
-                ITEMS_DEPLETED_FLAG = True
-                if MODE != "BANK_PLUS8": REQUEST_RELAUNCH = True
-                break
-            if skip_plus7 and seen_only_plus7:
-                print("[UPG] Görünür tüm itemler +7 → relaunch.");
-                REQUEST_RELAUNCH = True;
-                FORCE_PLUS7_ONCE = True;
-                return attempts_done
-    print(f"[UPG] Basma bitti: {attempts_done}/{limit}");
-    return attempts_done
+            start_index = idx_found + 1
+        wrap_cursor = 0
+        while attempts_done < limit:
+            wait_if_paused();
+            watchdog_enforce()
+            if _kb_pressed('f12'): break
+            gray = grab_gray_region("UPG");
+            tmpl = _load_empty_template()
+            found_and_upgraded = False;
+            seen_item = False;
+            skipped_due_to_scroll = False;
+            seen_only_plus7 = True if skip_plus7 else False
+            for i in range(len(WRAP_SLOTS)):
+                idx = (wrap_cursor + i) % len(WRAP_SLOTS);
+                c, r = WRAP_SLOTS[idx]
+                if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
+                seen_item = True
+                if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
+                    print(f"[UPG] Slot ({c},{r}) +7 → atla.");
+                    continue
+                if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
+                    print(f"[UPG] Slot ({c},{r}) +8 → atla.");
+                    continue
+                else:
+                    if skip_plus7: seen_only_plus7 = False
+                res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
+                if res == "DONE":
+                    attempts_done += 1;
+                    wrap_cursor = (idx + 1) % len(WRAP_SLOTS);
+                    found_and_upgraded = True;
+                    break
+                elif res == "SKIP_SCROLL":
+                    skipped_due_to_scroll = True;
+                    continue
+                elif res in ("EXIT_LOOP", "ABORT"):
+                    return attempts_done
+            if not found_and_upgraded:
+                if skipped_due_to_scroll: print("[UPG] Scroll görünmüyor → kısa bekle."); time.sleep(0.15); continue
+                if not seen_item:
+                    print(f"[UPG] Wrap alanında item yok. Deneme: {attempts_done}/{limit}");
+                    ITEMS_DEPLETED_FLAG = True
+                    if MODE != "BANK_PLUS8": REQUEST_RELAUNCH = True
+                    break
+                if skip_plus7 and seen_only_plus7:
+                    print("[UPG] Görünür tüm itemler +7 → relaunch.");
+                    REQUEST_RELAUNCH = True;
+                    FORCE_PLUS7_ONCE = True;
+                    return attempts_done
+        print(f"[UPG] Basma bitti: {attempts_done}/{limit}");
+        return attempts_done
+    finally:
+        if plus8_idle_scope:
+            _set_plus8_idle_waiting(False)
 
 
 # ================== NPC SONRASI ANVIL ROTASI ==================
@@ -5672,6 +5749,9 @@ def _MERDIVEN_RUN_GUI():
                     value=str(getattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))),
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
+                "plus8_idle_message": tk.StringVar(value=str(getattr(m, "PLUS8_IDLE_MESSAGE", PLUS8_IDLE_MESSAGE))),
+                "plus8_idle_interval": tk.IntVar(
+                    value=int(getattr(m, "PLUS8_IDLE_MESSAGE_INTERVAL_MIN", PLUS8_IDLE_MESSAGE_INTERVAL_MIN))),
             }
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
@@ -5957,7 +6037,15 @@ def _MERDIVEN_RUN_GUI():
                                                                                      sticky="w", padx=4, pady=2)
             ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=6, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=6, column=1, columnspan=3,
-                                                                                       sticky="w", padx=4, pady=2)
+                                                                                      sticky="w", padx=4, pady=2)
+            ttk.Label(lf_bank, text="+8 item basma mesajı:").grid(row=7, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["plus8_idle_message"], width=32).grid(row=7, column=1, columnspan=3,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_bank, text="+8 mesaj gönderme süresi (dk):").grid(row=8, column=0, sticky="e", padx=4,
+                                                                             pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["plus8_idle_interval"], width=8).grid(row=8, column=1, sticky="w",
+                                                                                        padx=4, pady=2)
 
             lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
             lf_monitor.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
@@ -6337,6 +6425,11 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
             setattr(m, "TELEGRAM_CHAT_ID", self.v["telegram_chat_id"].get().strip())
+            setattr(m, "PLUS8_IDLE_MESSAGE", self.v["plus8_idle_message"].get())
+            try:
+                setattr(m, "PLUS8_IDLE_MESSAGE_INTERVAL_MIN", int(self.v["plus8_idle_interval"].get()))
+            except Exception:
+                setattr(m, "PLUS8_IDLE_MESSAGE_INTERVAL_MIN", PLUS8_IDLE_MESSAGE_INTERVAL_MIN)
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
