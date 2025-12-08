@@ -74,7 +74,7 @@ from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 # [PATCH_TOWN_LOCK_BEGIN]
@@ -1246,7 +1246,7 @@ def _iter_processes():
         ctypes.windll.kernel32.CloseHandle(snapshot)
 
 
-def _pids_by_image(names: set[str]) -> set[int]:
+def _pids_by_image(names: Set[str]) -> Set[int]:
     want = {n.lower() for n in names}
     pids = set()
     try:
@@ -1258,7 +1258,7 @@ def _pids_by_image(names: set[str]) -> set[int]:
     return pids
 
 
-def _pids_from_hwnds(hwnds: list[int]) -> set[int]:
+def _pids_from_hwnds(hwnds: List[int]) -> Set[int]:
     pids = set()
     for h in hwnds:
         try:
@@ -1271,7 +1271,7 @@ def _pids_from_hwnds(hwnds: list[int]) -> set[int]:
     return pids
 
 
-def _enum_launcher_hwnds() -> list[int]:
+def _enum_launcher_hwnds() -> List[int]:
     hwnds = []
     try:
         titles = []
@@ -1288,7 +1288,7 @@ def _enum_launcher_hwnds() -> list[int]:
     return hwnds
 
 
-def _wm_close_hwnds(hwnds: list[int]):
+def _wm_close_hwnds(hwnds: List[int]):
     WM_CLOSE = 0x0010
     user32 = ctypes.windll.user32
     for h in hwnds:
@@ -1298,7 +1298,7 @@ def _wm_close_hwnds(hwnds: list[int]):
             pass
 
 
-def _kill_pids(pids: set[int]):
+def _kill_pids(pids: Set[int]):
     k32 = ctypes.windll.kernel32
     PROCESS_TERMINATE = 0x0001
     for pid in list(pids):
