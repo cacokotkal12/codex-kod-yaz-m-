@@ -950,6 +950,7 @@ SC_ESC = 0x01;
 SC_O = 0x18
 VK_CONTROL = 0x11;
 VK_V = 0x56;
+VK_A = 0x41;
 VK_BACKSPACE = 0x08;
 VK_CAPITAL = 0x14
 
@@ -1138,15 +1139,27 @@ def release_vk(vk):
     time.sleep(tus_hizi)
 
 
-def paste_text_from_clipboard(text: str) -> bool:
-    if not pause_point(): return False
-    if set_clipboard_text(text):
-        press_vk(VK_CONTROL);
-        press_vk(VK_V);
-        release_vk(VK_V);
-        release_vk(VK_CONTROL);
-        time.sleep(0.05);
+def paste_text_from_clipboard(text: str, retries: int = 3, select_all: bool = True) -> bool:
+    if not pause_point():
+        return False
+    for attempt in range(1, retries + 1):
+        if not set_clipboard_text(text):
+            time.sleep(0.05)
+            continue
+        time.sleep(0.02)
+        if select_all:
+            press_vk(VK_CONTROL)
+            press_vk(VK_A)
+            release_vk(VK_A)
+            release_vk(VK_CONTROL)
+            time.sleep(0.05)
+        press_vk(VK_CONTROL)
+        press_vk(VK_V)
+        release_vk(VK_V)
+        release_vk(VK_CONTROL)
+        time.sleep(0.08)
         return True
+    print(f"[PASTE] Panoya yapıştırılamadı (deneme {retries}).")
     return False
 
 
@@ -1512,7 +1525,8 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
     time.sleep(0.1)
-    paste_text_from_clipboard(LOGIN_USERNAME);
+    if not paste_text_from_clipboard(LOGIN_USERNAME):
+        print("[LOGIN] Kullanıcı adı yapıştırılamadı.")
     time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
@@ -1521,7 +1535,8 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    paste_text_from_clipboard(LOGIN_PASSWORD);
+    if not paste_text_from_clipboard(LOGIN_PASSWORD):
+        print("[LOGIN] Şifre yapıştırılamadı.")
     time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
