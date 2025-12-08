@@ -1102,29 +1102,90 @@ CF_UNICODETEXT = 13;
 GMEM_MOVEABLE = 0x0002
 
 
-def set_clipboard_text(text: str) -> bool:
-    if not pause_point(): return False
-    user32 = ctypes.windll.user32;
+def _clipboard_win32_available() -> bool:
+    return bool(getattr(ctypes, "windll", None)) and hasattr(ctypes.windll, "user32") and hasattr(ctypes.windll, "kernel32")
+
+
+def _set_clipboard_text_via_user32(text: str, attempts: int = 5) -> bool:
+    user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
-    for _ in range(5):
-        if user32.OpenClipboard(0): break
-        time.sleep(0.02)
-    else:
-        return False
+    for _ in range(max(1, attempts)):
+        if not user32.OpenClipboard(None):
+            time.sleep(0.05)
+            continue
+        hGlobal = None
+        locked = False
+        freed = False
+        success = False
+        try:
+            user32.EmptyClipboard();
+            data = ctypes.create_unicode_buffer(text)
+            size_bytes = ctypes.sizeof(ctypes.c_wchar) * (len(text) + 1)
+            hGlobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_bytes)
+            if not hGlobal:
+                return False
+            lpGlobal = kernel32.GlobalLock(hGlobal)
+            if not lpGlobal:
+                kernel32.GlobalFree(hGlobal)
+                return False
+            locked = True
+            ctypes.memmove(lpGlobal, ctypes.addressof(data), size_bytes);
+            kernel32.GlobalUnlock(hGlobal)
+            locked = False
+            if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal):
+                kernel32.GlobalFree(hGlobal)
+                freed = True
+                return False
+            success = True
+            return True
+        except Exception:
+            time.sleep(0.05)
+        finally:
+            if locked and hGlobal:
+                try:
+                    kernel32.GlobalUnlock(hGlobal)
+                except Exception:
+                    pass
+            if hGlobal and not success and not freed:
+                try:
+                    kernel32.GlobalFree(hGlobal)
+                except Exception:
+                    pass
+            user32.CloseClipboard()
+    return False
+
+
+def _set_clipboard_text_via_powershell(text: str) -> bool:
     try:
-        user32.EmptyClipboard();
-        data = ctypes.create_unicode_buffer(text)
-        size_bytes = ctypes.sizeof(ctypes.c_wchar) * (len(text) + 1)
-        hGlobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_bytes)
-        if not hGlobal: return False
-        lpGlobal = kernel32.GlobalLock(hGlobal)
-        if not lpGlobal: kernel32.GlobalFree(hGlobal); return False
-        ctypes.memmove(lpGlobal, ctypes.addressof(data), size_bytes);
-        kernel32.GlobalUnlock(hGlobal)
-        if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal): kernel32.GlobalFree(hGlobal); return False
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+            ],
+            input=str(text or "").encode("utf-8"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
+
+
+def set_clipboard_text(text: str) -> bool:
+    if not pause_point():
+        return False
+    safe_text = "" if text is None else str(text)
+    if _clipboard_win32_available():
+        if _set_clipboard_text_via_user32(safe_text):
+            return True
+    if _set_clipboard_text_via_powershell(safe_text):
         return True
-    finally:
-        user32.CloseClipboard()
+    print("[PASTE] Panoya yazı yazılamadı (clipboard erişimi başarısız).")
+    return False
 
 
 def press_vk(vk):
