@@ -1661,7 +1661,7 @@ def perform_login_inputs(w):
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
-    time.sleep(0.1)
+    time.sleep(1)
     _fill_input_with_fallback(LOGIN_USERNAME, "Kullanıcı adı")
     time.sleep(0.1)
     press_key(SC_TAB);
