@@ -1224,6 +1224,66 @@ def paste_text_from_clipboard(text: str, retries: int = 3, select_all: bool = Tr
     return False
 
 
+# ---------- Hızlı metin yazma (SendInput) ----------
+INPUT_KEYBOARD = 1
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", wintypes.ULONG_PTR),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("ki", KEYBDINPUT),
+    ]
+
+
+def _sendinput_available() -> bool:
+    return hasattr(ctypes, "windll") and hasattr(ctypes.windll, "user32")
+
+
+def type_text_fast(text: str, clear: bool = True) -> bool:
+    """Panoyu kullanmadan Unicode destekli hızlı yazım yap."""
+    if not pause_point():
+        return False
+    safe_text = "" if text is None else str(text)
+    if not safe_text:
+        return False
+    if not _sendinput_available():
+        return paste_text_from_clipboard(safe_text, select_all=clear)
+    try:
+        if clear:
+            press_vk(VK_CONTROL)
+            press_vk(VK_A)
+            release_vk(VK_A)
+            release_vk(VK_CONTROL)
+            time.sleep(0.02)
+            press_vk(VK_BACKSPACE)
+            release_vk(VK_BACKSPACE)
+            time.sleep(0.02)
+        seq = []
+        for ch in safe_text:
+            code = ord(ch)
+            seq.append(INPUT(INPUT_KEYBOARD, KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, 0)))
+            seq.append(INPUT(INPUT_KEYBOARD, KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
+        arr = (INPUT * len(seq))(*seq)
+        sent = ctypes.windll.user32.SendInput(len(arr), arr, ctypes.sizeof(INPUT))
+        if sent != len(arr):
+            return paste_text_from_clipboard(safe_text, select_all=clear)
+        return True
+    except Exception:
+        return paste_text_from_clipboard(safe_text, select_all=clear)
+
+
 def send_telegram_message(text: str) -> bool:
     token = str(globals().get("TELEGRAM_TOKEN", "") or "").strip()
     chat_id = str(globals().get("TELEGRAM_CHAT_ID", "") or "").strip()
@@ -1601,20 +1661,20 @@ def perform_login_inputs(w):
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
-    time.sleep(0.1)
-    if not paste_text_from_clipboard(LOGIN_USERNAME):
-        print("[LOGIN] Kullanıcı adı yapıştırılamadı.")
-    time.sleep(0.1)
+    time.sleep(0.05)
+    if not type_text_fast(LOGIN_USERNAME):
+        print("[LOGIN] Kullanıcı adı yazılamadı.")
+    time.sleep(0.05)
     press_key(SC_TAB);
     release_key(SC_TAB);
-    time.sleep(0.1)
+    time.sleep(0.05)
     # Eğer TAB ile odak geçmiyorsa şifre alanını tıkla:
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    if not paste_text_from_clipboard(LOGIN_PASSWORD):
-        print("[LOGIN] Şifre yapıştırılamadı.")
-    time.sleep(0.1)
+    if not type_text_fast(LOGIN_PASSWORD):
+        print("[LOGIN] Şifre yazılamadı.")
+    time.sleep(0.05)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     time.sleep(0.4)
