@@ -6430,9 +6430,9 @@ def _MERDIVEN_RUN_GUI():
             path = self._cfg()
             # Şema garantisi
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {}
+                state = globals().get('_APP_CONFIG') or load_config_from_disk()
+                globals()['_APP_CONFIG'] = state
+                data = state.data
             except Exception:
                 data = {}
             if 'gui' not in data or not isinstance(data.get('gui'), dict): data['gui'] = {}
@@ -6444,19 +6444,16 @@ def _MERDIVEN_RUN_GUI():
                     adv[name] = var.get()
                 except Exception:
                     pass
-            # Atomik kaydet
-            tmp = path + '.tmp'
             try:
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
-                self._msg(f'Ayarlar kaydedildi: {path}')
+                update_config_from_ui(data)
+                ok = save_config_to_disk()
             except Exception as e:
                 self._msg(f'[GUI] Kaydetme hatası: {e}')
-                try:
-                    if os.path.exists(tmp): os.remove(tmp)
-                except:
-                    pass
+                ok = False
+            if ok:
+                self._msg(f'Ayarlar kaydedildi: {path}')
+            else:
+                self._msg(f'[GUI] Kaydetme hatası: {path}')
             # Uygula
             try:
                 self.apply_core()
@@ -6525,10 +6522,15 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                with open(self._cfg(), "r", encoding="utf-8") as f:
-                    j = json.load(f)
-            except:
-                j = {}
+                state = globals().get('_APP_CONFIG') or load_config_from_disk()
+                globals()['_APP_CONFIG'] = state
+                j = state.data
+            except Exception:
+                try:
+                    with open(self._cfg(), "r", encoding="utf-8") as f:
+                        j = json.load(f)
+                except Exception:
+                    j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if k in self.v:
@@ -6656,13 +6658,13 @@ def _MERDIVEN_RUN_GUI():
             path = self._cfg()
             data = {"gui": {}, "advanced": {}}
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {"gui": {}, "advanced": {}}
-                if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
-                if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
+                state = globals().get('_APP_CONFIG') or load_config_from_disk()
+                globals()['_APP_CONFIG'] = state
+                data = state.data
             except Exception:
                 data = {"gui": {}, "advanced": {}}
+            if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
+            if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
             for k, var in self.v.items():
                 try:
                     data["gui"][k] = var.get()
@@ -6676,11 +6678,15 @@ def _MERDIVEN_RUN_GUI():
                     adv[name] = var.get()
                 except Exception:
                     pass
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-            self._msg(f"Ayarlar kaydedildi: {path}")
+            try:
+                update_config_from_ui(data)
+                ok = save_config_to_disk()
+            except Exception:
+                ok = False
+            if ok:
+                self._msg(f"Ayarlar kaydedildi: {path}")
+            else:
+                self._msg(f"[GUI] Kaydetme hatası: {path}")
             self.apply_core()
 
         def _tick(self):
