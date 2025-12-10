@@ -4904,41 +4904,6 @@ def _serialize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {k: _serialize_value(v) for k, v in cfg.items()}
 
 
-@dataclass
-class AppConfig:
-    """Merdiven uygulamasının tekil konfigürasyon durumu."""
-
-    data: Dict[str, Any]
-    path: str
-
-
-def _extra_config_defaults() -> Dict[str, Any]:
-    """GUI/ hız/advanced varsayılanlarını tek yerde topla."""
-
-    defaults: Dict[str, Any] = {}
-    defaults.update(copy.deepcopy(globals().get("_YAMA_GUI_DEFAULTS", {})))
-    defaults.update({
-        "UPG_USE_FAST_MOUSE": bool(globals().get("UPG_USE_FAST_MOUSE", True)),
-        "UPG_MOUSE_HIZI": float(globals().get("UPG_MOUSE_HIZI", 0.015)),
-        "UPG_TUS_HIZI": float(globals().get("UPG_TUS_HIZI", 0.020)),
-        "ANVIL_CONFIRM_WAIT_MS": int(globals().get("ANVIL_CONFIRM_WAIT_MS", 45)),
-        "ROI_STALE_MS": int(globals().get("ROI_STALE_MS", 120)),
-        "PREC_Y598_TOWN_HARDLOCK": bool(globals().get("PREC_Y598_TOWN_HARDLOCK", True)),
-        "PREC_Y598_DBLCLICK": bool(globals().get("PREC_Y598_DBLCLICK", True)),
-        "PREC_Y598_CLICK_POS": tuple(globals().get("PREC_Y598_CLICK_POS", (200, 107))),
-        "PREC_Y598_CLICK_DELAY": float(globals().get("PREC_Y598_CLICK_DELAY", 0.1)),
-        "PREC_Y598_CLICK_COUNT": int(globals().get("PREC_Y598_CLICK_COUNT", 2)),
-        "ENABLE_YAMA_SLOT_CACHE": bool(globals().get("ENABLE_YAMA_SLOT_CACHE", True)),
-        "MAX_CACHE_SIZE_PER_SNAPSHOT": int(globals().get("MAX_CACHE_SIZE_PER_SNAPSHOT", 512)),
-        "YAMA_QC_ENABLE": bool(globals().get("YAMA_QC_ENABLE", True)),
-        "YAMA_QC_STD_MIN": float(globals().get("YAMA_QC_STD_MIN", 10.0)),
-        "YAMA_QC_EDGE_MIN": float(globals().get("YAMA_QC_EDGE_MIN", 0.002)),
-        "YAMA_QC_HEADER_RATIO": float(globals().get("YAMA_QC_HEADER_RATIO", 0.28)),
-        "GUI_AUTO_OPEN_SPEED": bool(globals().get("GUI_AUTO_OPEN_SPEED", False)),
-    })
-    return defaults
-
-
 def apply_config_values(cfg: Dict[str, Any]) -> None:
     g = globals()
     for field in _iter_config_fields():
@@ -4979,102 +4944,44 @@ _BASE_CONFIG_DEFAULTS = json.loads(
 
 
 # --- Config yükle/kaydet ---
-def _merge_defaults(target: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
-    for k, v in defaults.items():
-        if k not in target:
-            target[k] = copy.deepcopy(v)
-        elif isinstance(v, dict) and isinstance(target.get(k), dict):
-            _merge_defaults(target[k], v)
-    return target
-
-
-def _apply_updates(target: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    for k, v in updates.items():
-        if isinstance(target.get(k), dict) and isinstance(v, dict):
-            _apply_updates(target[k], v)
-        else:
-            target[k] = copy.deepcopy(v)
-    return target
-
-
-def _build_config_defaults(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    base = _schema_defaults(_BASE_CONFIG_DEFAULTS)
-    _merge_defaults(base, _extra_config_defaults())
-    if overrides:
-        _merge_defaults(base, overrides)
-    return base
-
-
-def load_config_from_disk(path: Optional[str] = None, defaults: Optional[Dict[str, Any]] = None) -> AppConfig:
-    path = path or _MERDIVEN_CFG_PATH()
-    defaults = _build_config_defaults(defaults)
-    cfg = copy.deepcopy(defaults)
+def load_config(path=None, defaults=None):
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
+    if defaults is None:
+        defaults = _schema_defaults(_BASE_CONFIG_DEFAULTS)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                loaded = json.load(f)
-            _apply_updates(cfg, loaded)
-        else:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, indent=2, ensure_ascii=False)
+        if not os.path.exists(path):
+            with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
+            return defaults
+        with open(path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+
+        def _merge(a, b):
+            for k, v in b.items():
+                if k not in a:
+                    a[k] = v
+                elif isinstance(v, dict) and isinstance(a.get(k), dict):
+                    _merge(a[k], v)
+
+        _merge(cfg, defaults)
+        return cfg
     except Exception as e:
-        try:
-            log(f"[config] load error: {e}", 'error')
-        except Exception:
-            print('[PATCH][config] load error:', e)
-    return AppConfig(cfg, path)
-
-
-def save_config_to_disk(state: Optional[AppConfig] = None) -> bool:
-    global _APP_CONFIG
-    state = state or _APP_CONFIG
-    if state is None:
-        return False
-    tmp_path = state.path + '.tmp'
-    try:
-        os.makedirs(os.path.dirname(state.path), exist_ok=True)
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(_serialize_config(state.data), f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, state.path)
-        return True
-    except Exception as e:
-        try:
-            log(f"[config] save error: {e}", 'error')
-        except Exception:
-            print('[PATCH][config] save error:', e)
-        return False
-
-
-def update_config_from_ui(updates: Dict[str, Any]) -> Dict[str, Any]:
-    global _APP_CONFIG
-    if _APP_CONFIG is None:
-        _APP_CONFIG = load_config_from_disk()
-    merged = copy.deepcopy(_APP_CONFIG.data)
-    _apply_updates(merged, updates)
-    _APP_CONFIG.data = merged
-    return merged
-
-
-def load_config(path=None, defaults=None):
-    global _APP_CONFIG
-    _APP_CONFIG = load_config_from_disk(path, defaults)
-    return _APP_CONFIG.data
+        print('[PATCH][config] load error:', e)
+        return defaults
 
 
 def save_config(cfg, path=None):
-    global _APP_CONFIG
-    if _APP_CONFIG is None:
-        _APP_CONFIG = AppConfig(cfg, path or _MERDIVEN_CFG_PATH())
-    else:
-        _APP_CONFIG.data = cfg
-        if path:
-            _APP_CONFIG.path = path
-    return save_config_to_disk(_APP_CONFIG)
-
-
-# Küresel tekil konfigürasyon durumu
-_APP_CONFIG: Optional[AppConfig] = None
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print('[PATCH][config] save error:', e)
+        return False
 
 
 # --- Retry yardımcı ---
@@ -5215,11 +5122,9 @@ def _wrap_buy_items():
 
 # --- Başlat: config/load, dir, fixes ---
 try:
-    _APP_CONFIG = load_config_from_disk()
-    _GLOBAL_PATCH_CFG = _APP_CONFIG.data
+    _GLOBAL_PATCH_CFG = load_config()
 except Exception:
-    _GLOBAL_PATCH_CFG = _build_config_defaults()
-    _APP_CONFIG = AppConfig(_GLOBAL_PATCH_CFG, _MERDIVEN_CFG_PATH())
+    _GLOBAL_PATCH_CFG = {}
 try:
     apply_config_values(_GLOBAL_PATCH_CFG)
 except Exception:
@@ -5241,10 +5146,6 @@ try:
     _wrap_buy_items()
 except Exception:
     pass
-try:
-    atexit.register(lambda: save_config_to_disk())
-except Exception:
-    pass
 
 # --- main() sarmalama ---
 if 'main' in globals() and callable(globals()['main']):
@@ -5254,9 +5155,7 @@ if 'main' in globals() and callable(globals()['main']):
     def _patched_main(*a, **k):
         t0 = time.time()
         try:
-            _app_cfg = load_config_from_disk()
-            globals()['_APP_CONFIG'] = _app_cfg
-            globals()['_GLOBAL_PATCH_CFG'] = _app_cfg.data
+            globals()['_GLOBAL_PATCH_CFG'] = load_config()
         except Exception:
             pass
         try:
@@ -5864,10 +5763,6 @@ def _MERDIVEN_RUN_GUI():
             root.geometry("1020x680")
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
-            self.var_caps = tk.StringVar(value="-")
-            self.var_watchdog = tk.StringVar(value="-")
-            self.var_plus7_bank = tk.StringVar(value=str(globals().get('PLUS7_COUNT', '-')))
-            self.var_plus8_bank = tk.StringVar(value=str(globals().get('PLUS8_COUNT', '-')))
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
                 "username": tk.StringVar(value=getattr(m, "LOGIN_USERNAME", "")),
@@ -6061,302 +5956,271 @@ def _MERDIVEN_RUN_GUI():
 
         # ---- UI kur ----
         def _build(self):
-            self.root.minsize(900, 600)
             nb = ttk.Notebook(self.root);
-            nb.pack(fill="both", expand=True, padx=10, pady=10)
+            nb.pack(fill="both", expand=True, padx=6, pady=6)
+            # GENEL
+            f1 = ttk.Frame(nb);
+            nb.add(f1, text="Genel");
+            r = 0
+            ttk.Label(f1, text="Durum / Makro Aşaması:").grid(row=r, column=0, sticky="e");
+            ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
+            ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=2, sticky="e", padx=4);
+            ttk.Label(f1, textvariable=self.sale_slot_var, foreground="blue").grid(row=r, column=3, sticky="w");
+            r += 1
+            ttk.Button(f1, text="Başlat", command=self.start).grid(row=r, column=0, sticky="we", padx=2, pady=2)
+            ttk.Button(f1, text="Durdur", command=self.stop).grid(row=r, column=1, sticky="we", padx=2, pady=2)
+            ttk.Button(f1, text="Ayarları Kaydet", command=self.save).grid(row=r, column=2, sticky="we", padx=2, pady=2)
+            ttk.Button(f1, text="Hepsini Kapat", command=self.kill_all).grid(row=r, column=3, sticky="we", padx=2,
+                                                                             pady=2);
+            r += 1
+            ttk.Label(f1, text="Kullanıcı Adı:").grid(row=r, column=0, sticky="e");
+            ttk.Entry(f1, textvariable=self.v["username"], width=28).grid(row=r, column=1, sticky="w");
+            r += 1
+            ttk.Label(f1, text="Şifre:").grid(row=r, column=0, sticky="e");
+            pw = ttk.Entry(f1, textvariable=self.v["password"], show="*", width=28);
+            pw.grid(row=r, column=1, sticky="w")
+            ttk.Button(f1, text="Göster/Gizle", command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")),
+                       width=14).grid(row=r, column=2, sticky="w");
+            r += 1
+            ttk.Button(f1, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=r, column=0, columnspan=2,
+                                                                                       sticky="w", pady=4)
+            r += 1
+            lf_mode = ttk.LabelFrame(f1, text="Mod Seçimi")
+            lf_mode.grid(row=r, column=0, columnspan=4, sticky="we", pady=6)
+            ttk.Radiobutton(lf_mode, text="Item Basma", value="ITEM_BASMA", variable=self.v["operation_mode"]).grid(
+                row=0, column=0, sticky="w", padx=4, pady=2)
+            ttk.Radiobutton(lf_mode, text="Item Satış", value="ITEM_SATIS", variable=self.v["operation_mode"]).grid(
+                row=0, column=1, sticky="w", padx=4, pady=2)
+            ttk.Radiobutton(lf_mode, text="Artı 7’ye item basma", value=PLUS7_BANK_MODE,
+                            variable=self.v["operation_mode"]).grid(row=0, column=2, sticky="w", padx=4, pady=2)
+            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, padx=6, pady=2)
 
-            tabs = {
-                "general": ttk.Frame(nb),
-                "upgrade": ttk.Frame(nb),
-                "sale": ttk.Frame(nb),
-                "speed": ttk.Frame(nb),
-                "advanced": ttk.Frame(nb),
-                "status": ttk.Frame(nb),
-            }
+            # SATIN ALMA
+            f2 = ttk.Frame(nb);
+            nb.add(f2, text="Satın Alma")
+            ttk.Label(f2, text="Mod:").grid(row=0, column=0, sticky="e")
+            ttk.Radiobutton(f2, text="LINEN", value="LINEN", variable=self.v["buy_mode"]).grid(row=0, column=1,
+                                                                                               sticky="w")
+            ttk.Radiobutton(f2, text="FABRIC", value="FABRIC", variable=self.v["buy_mode"]).grid(row=0, column=2,
+                                                                                                 sticky="w")
+            ttk.Label(f2, text=_tr_name("BUY_TURNS")).grid(row=1, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["buy_turns"], width=8).grid(row=1, column=1, sticky="w")
+            ttk.Label(f2, text=_tr_name("SCROLL_ALIM_ADET")).grid(row=2, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["scroll_low"], width=8).grid(row=2, column=1, sticky="w")
+            ttk.Label(f2, text=_tr_name("SCROLL_MID_ALIM_ADET")).grid(row=3, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["scroll_mid"], width=8).grid(row=3, column=1, sticky="w")
+            ttk.Label(f2, text=_tr_name("BASMA_HAKKI")).grid(row=4, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["basma_hakki"], width=8).grid(row=4, column=1, sticky="w")
+            lf_server = ttk.LabelFrame(f2, text="Item Basma / Server Seçimi")
+            lf_server.grid(row=5, column=0, columnspan=3, sticky="we", pady=6)
+            ttk.Radiobutton(lf_server, text="Server1", value="Server1", variable=self.v["item_basma_server"]).grid(
+                row=0, column=0, sticky="w", padx=4, pady=2)
+            ttk.Radiobutton(lf_server, text="Server2", value="Server2", variable=self.v["item_basma_server"]).grid(
+                row=0, column=1, sticky="w", padx=4, pady=2)
 
-            nb.add(tabs["general"], text="Genel")
-            nb.add(tabs["upgrade"], text="Item Basma (NPC / Anvil)")
-            nb.add(tabs["sale"], text="Item Satış / Pazar")
-            nb.add(tabs["speed"], text="Hız & Hassasiyet")
-            nb.add(tabs["advanced"], text="Gelişmiş Ayarlar")
-            nb.add(tabs["status"], text="Durum & Log")
+            lf_plus8_msg = ttk.LabelFrame(f2, text="+8 Bekleme Telegram")
+            lf_plus8_msg.grid(row=6, column=0, columnspan=3, sticky="we", pady=6)
+            ttk.Label(lf_plus8_msg, text="+8 item basma mesajı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_message"], width=42).grid(row=0, column=1,
+                                                                                                sticky="w", padx=4,
+                                                                                                pady=2)
+            ttk.Label(lf_plus8_msg, text="+8 item basma mesaj gönderme süresi (dk):").grid(row=1, column=0,
+                                                                                            sticky="e", padx=4,
+                                                                                            pady=2)
+            ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_interval"], width=10).grid(row=1, column=1,
+                                                                                                sticky="w", padx=4,
+                                                                                                pady=2)
 
-            self._build_general_tab(tabs["general"])
-            self._build_upgrade_tab(tabs["upgrade"])
-            self._build_sale_tab(tabs["sale"])
-            self._build_speed_tab(tabs["speed"])
-            self._build_advanced_tab(tabs["advanced"])
-            self._build_status_tab(tabs["status"])
-
-        def _labeled_entry(self, parent, text, variable, row, column, width=12, hint=None, **grid):
-            lbl = ttk.Label(parent, text=text)
-            lbl.grid(row=row, column=column, sticky="e", padx=4, pady=3)
-            ent = ttk.Entry(parent, textvariable=variable, width=width)
-            ent.grid(row=row, column=column + 1, sticky="we", padx=4, pady=3, **grid)
-            if hint:
-                try:
-                    _Tooltip(lbl, hint)
-                except Exception:
-                    pass
-            return ent
-
-        def _build_general_tab(self, frm):
-            frm.columnconfigure(1, weight=1)
-            frm.columnconfigure(3, weight=1)
-
-            status = ttk.LabelFrame(frm, text="Durum / Gösterge")
-            status.grid(row=0, column=0, columnspan=4, sticky="we", pady=(0, 10))
-            status.columnconfigure(1, weight=1)
-            status.columnconfigure(3, weight=1)
-            ttk.Label(status, text="Makro Aşaması:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
-            ttk.Label(status, textvariable=self.stage, foreground="blue", font=("Segoe UI", 11, "bold")).grid(
-                row=0, column=1, sticky="w", padx=4, pady=4)
-            ttk.Label(status, text="Boş Slot (Satış):").grid(row=0, column=2, sticky="e", padx=4, pady=4)
-            ttk.Label(status, textvariable=self.sale_slot_var, foreground="blue").grid(row=0, column=3, sticky="w",
-                                                                                         padx=4, pady=4)
-            ttk.Label(status, text="CapsLock Durumu:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Label(status, textvariable=self.var_caps).grid(row=1, column=1, sticky="w", padx=4, pady=2)
-            ttk.Label(status, text="Watchdog:").grid(row=1, column=2, sticky="e", padx=4, pady=2)
-            ttk.Label(status, textvariable=self.var_watchdog).grid(row=1, column=3, sticky="w", padx=4, pady=2)
-
-            controls = ttk.LabelFrame(frm, text="Kontroller")
-            controls.grid(row=1, column=0, columnspan=4, sticky="we", pady=6)
-            for i in range(4):
-                controls.columnconfigure(i, weight=1)
-            ttk.Button(controls, text="Başlat", command=self.start).grid(row=0, column=0, sticky="we", padx=4, pady=4)
-            ttk.Button(controls, text="Durdur", command=self.stop).grid(row=0, column=1, sticky="we", padx=4, pady=4)
-            ttk.Button(controls, text="Ayarları Kaydet", command=self.save).grid(row=0, column=2, sticky="we", padx=4,
-                                                                                  pady=4)
-            ttk.Button(controls, text="Ayarları Yükle", command=self.reload_config).grid(row=0, column=3, sticky="we",
-                                                                                        padx=4, pady=4)
-            ttk.Button(controls, text="Hepsini Kapat", command=self.kill_all).grid(row=1, column=0, columnspan=2,
-                                                                                   sticky="we", padx=4, pady=4)
-            ttk.Button(controls, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=1, column=2,
-                                                                                            columnspan=2, sticky="we",
-                                                                                            padx=4, pady=4)
-
-            credentials = ttk.LabelFrame(frm, text="Giriş")
-            credentials.grid(row=2, column=0, columnspan=4, sticky="we", pady=6)
-            credentials.columnconfigure(1, weight=1)
-            credentials.columnconfigure(3, weight=1)
-            ttk.Label(credentials, text="Kullanıcı Adı:").grid(row=0, column=0, sticky="e", padx=4, pady=3)
-            ttk.Entry(credentials, textvariable=self.v["username"], width=28).grid(row=0, column=1, sticky="we",
-                                                                                    padx=4, pady=3)
-            ttk.Label(credentials, text="Şifre:").grid(row=1, column=0, sticky="e", padx=4, pady=3)
-            pw = ttk.Entry(credentials, textvariable=self.v["password"], show="*", width=28)
-            pw.grid(row=1, column=1, sticky="we", padx=4, pady=3)
-            ttk.Button(credentials, text="Göster/Gizle",
-                       command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")), width=14).grid(
-                row=1, column=2, sticky="w", padx=4, pady=3)
-
-            modes = ttk.LabelFrame(frm, text="Mod Seçimi")
-            modes.grid(row=3, column=0, columnspan=4, sticky="we", pady=8)
-            for i in range(4):
-                modes.columnconfigure(i, weight=1)
-            ttk.Radiobutton(modes, text="Item Basma", value="ITEM_BASMA", variable=self.v["operation_mode"]).grid(
-                row=0, column=0, sticky="w", padx=6, pady=4)
-            ttk.Radiobutton(modes, text="Item Satış", value="ITEM_SATIS", variable=self.v["operation_mode"]).grid(
-                row=0, column=1, sticky="w", padx=6, pady=4)
-            ttk.Radiobutton(modes, text="Artı 7’ye item basma", value=PLUS7_BANK_MODE,
-                            variable=self.v["operation_mode"]).grid(row=0, column=2, sticky="w", padx=6, pady=4)
-            ttk.Button(modes, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, sticky="e",
-                                                                                    padx=6, pady=4)
-
-        def _build_upgrade_tab(self, frm):
-            frm.columnconfigure(0, weight=1)
-            frm.columnconfigure(1, weight=1)
-
-            lf_buy = ttk.LabelFrame(frm, text="NPC Alış Ayarları")
-            lf_buy.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-            lf_buy.columnconfigure(1, weight=1)
-            ttk.Label(lf_buy, text="Mod:").grid(row=0, column=0, sticky="e", padx=4, pady=3)
-            ttk.Radiobutton(lf_buy, text="LINEN", value="LINEN", variable=self.v["buy_mode"]).grid(row=0, column=1,
-                                                                                                      sticky="w",
-                                                                                                      padx=4, pady=3)
-            ttk.Radiobutton(lf_buy, text="FABRIC", value="FABRIC", variable=self.v["buy_mode"]).grid(row=0,
-                                                                                                        column=2,
-                                                                                                        sticky="w",
-                                                                                                        padx=4,
-                                                                                                        pady=3)
-            self._labeled_entry(lf_buy, _tr_name("BUY_TURNS"), self.v["buy_turns"], row=1, column=0,
-                                hint="Kaç tur alış yapılacağını seçin")
-            self._labeled_entry(lf_buy, _tr_name("SCROLL_ALIM_ADET"), self.v["scroll_low"], row=2, column=0,
-                                hint="Low scroll alım adedi")
-            self._labeled_entry(lf_buy, _tr_name("SCROLL_MID_ALIM_ADET"), self.v["scroll_mid"], row=3, column=0,
-                                hint="Mid scroll alım adedi")
-
-            lf_anvil = ttk.LabelFrame(frm, text="Anvil / Upgrade Ayarları")
-            lf_anvil.grid(row=0, column=1, sticky="nsew", padx=6, pady=6)
-            lf_anvil.columnconfigure(1, weight=1)
-            self._labeled_entry(lf_anvil, _tr_name("BASMA_HAKKI"), self.v["basma_hakki"], row=0, column=0,
-                                hint="Toplam upgrade deneme sayısı")
-            ttk.Label(lf_anvil, text="Sunucu Seçimi").grid(row=1, column=0, sticky="w", padx=4, pady=(6, 2))
-            ttk.Radiobutton(lf_anvil, text="Server1", value="Server1", variable=self.v["item_basma_server"]).grid(
-                row=2, column=0, sticky="w", padx=6, pady=2)
-            ttk.Radiobutton(lf_anvil, text="Server2", value="Server2", variable=self.v["item_basma_server"]).grid(
-                row=2, column=1, sticky="w", padx=6, pady=2)
-
-            lf_cycle = ttk.LabelFrame(frm, text="+7 / +8 Döngü Ayarları")
-            lf_cycle.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=6, pady=6)
-            lf_cycle.columnconfigure(1, weight=1)
-            self._labeled_entry(lf_cycle, "+8 item basma mesajı:", self.v["plus8_wait_message"], row=0, column=0,
-                                width=42, hint="+8 beklemesinde Telegram mesajı")
-            self._labeled_entry(lf_cycle, "+8 mesaj aralığı (dk):", self.v["plus8_wait_interval"], row=1, column=0,
-                                width=12, hint="Mesaj tekrar süresi")
-
-            counters = ttk.Frame(lf_cycle)
-            counters.grid(row=2, column=0, columnspan=2, sticky="we", pady=(6, 2))
-            ttk.Label(counters, text="Bankadaki +7 Adedi:").grid(row=0, column=0, sticky="w", padx=4)
-            ttk.Label(counters, textvariable=self.var_plus7_bank, foreground="blue").grid(row=0, column=1, sticky="w")
-            ttk.Label(counters, text="Bankadaki +8 Adedi:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
-            ttk.Label(counters, textvariable=self.var_plus8_bank, foreground="blue").grid(row=1, column=1, sticky="w")
-
-        def _build_sale_tab(self, frm):
-            frm.columnconfigure(0, weight=1)
-            frm.columnconfigure(1, weight=1)
-
-            header = ttk.Label(frm, text="Pazar kurma ve satış akışı için tüm ayarlar bu sekmede toplanmıştır.",
-                               foreground="#333")
-            header.grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 6))
-            krallik_lbl = ttk.Label(frm, text="Krallık bağlantısını aç", foreground="blue", cursor="hand2")
-            krallik_lbl.grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
+            # ITEM SATIŞ
+            f_sale = ttk.Frame(nb)
+            nb.add(f_sale, text="Item Satış")
+            f_sale.columnconfigure(1, weight=1)
+            krallik_lbl = ttk.Label(f_sale, text="Krallık", foreground="blue", cursor="hand2")
+            krallik_lbl.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 0))
             krallik_lbl.bind("<Button-1>", self._open_krallik)
 
-            lf_sale = ttk.LabelFrame(frm, text="Pazar Kurma Ayarları")
-            lf_sale.grid(row=2, column=0, sticky="nsew", padx=6, pady=6)
-            lf_sale.columnconfigure(1, weight=1)
-            self._labeled_entry(lf_sale, "Pazar Fiyat Metni:", self.v["sale_price_text"], row=0, column=0, width=28)
-            self._labeled_entry(lf_sale, "Pazar Eşik 1:", self.v["sale_threshold_1"], row=1, column=0, width=10)
-            self._labeled_entry(lf_sale, "Pazar Eşik 2:", self.v["sale_threshold_2"], row=2, column=0, width=10)
-            self._labeled_entry(lf_sale, "Pazar Eşik 3:", self.v["sale_threshold_3"], row=3, column=0, width=10)
-            self._labeled_entry(lf_sale, "Park X Koordinatı:", self.v["sale_park_x"], row=4, column=0, width=10,
-                                hint="Pazar kurarken park edilen X koordinatı")
+            lf_sale = ttk.LabelFrame(f_sale, text="Pazar Ayarları")
+            lf_sale.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_sale, text="Pazar Fiyat Metni:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale, textvariable=self.v["sale_price_text"], width=32).grid(row=0, column=1, sticky="w",
+                                                                                      padx=4,
+                                                                                      pady=2)
+            ttk.Label(lf_sale, text="Pazar Eşik 1:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale, textvariable=self.v["sale_threshold_1"], width=8).grid(row=1, column=1, sticky="w",
+                                                                                      padx=4,
+                                                                                      pady=2)
+            ttk.Label(lf_sale, text="Pazar Eşik 2:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale, textvariable=self.v["sale_threshold_2"], width=8).grid(row=2, column=1, sticky="w",
+                                                                                      padx=4,
+                                                                                      pady=2)
+            ttk.Label(lf_sale, text="Pazar Eşik 3:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale, textvariable=self.v["sale_threshold_3"], width=8).grid(row=3, column=1, sticky="w",
+                                                                                      padx=4,
+                                                                                      pady=2)
+            ttk.Label(lf_sale, text="Park X Koordinatı:").grid(row=4, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale, textvariable=self.v["sale_park_x"], width=8).grid(row=4, column=1, sticky="w", padx=4,
+                                                                                 pady=2)
 
-            lf_timing = ttk.LabelFrame(frm, text="Bekleme / Tıklama Ayarları")
-            lf_timing.grid(row=2, column=1, sticky="nsew", padx=6, pady=6)
-            lf_timing.columnconfigure(1, weight=1)
-            self._labeled_entry(lf_timing, "Yenileme Bekleme Min (sn):", self.v["sale_refresh_min"], row=0, column=0)
-            self._labeled_entry(lf_timing, "Yenileme Bekleme Maks (sn):", self.v["sale_refresh_max"], row=1, column=0)
-            self._labeled_entry(lf_timing, "İlk Bekleme (sn):", self.v["sale_initial_wait"], row=2, column=0,
-                                hint="Pazar kurulurken ilk bekleme süresi")
-            self._labeled_entry(lf_timing, "902,135 Tıklama Adet:", self.v["sale_click_902_count"], row=3, column=0)
-            self._labeled_entry(lf_timing, "902,135 Hız (sn):", self.v["sale_click_902_speed"], row=4, column=0)
-            self._labeled_entry(lf_timing, "899,399 Tıklama Adet:", self.v["sale_click_899_count"], row=5, column=0)
-            self._labeled_entry(lf_timing, "899,399 Hız (sn):", self.v["sale_click_899_speed"], row=6, column=0)
-            self._labeled_entry(lf_timing, "Slot Tarama Aralığı (sn):", self.v["sale_slot_interval"], row=7, column=0)
-            self._labeled_entry(lf_timing, "Çıkış Delay Min (sn):", self.v["sale_exit_delay_min"], row=8, column=0)
-            self._labeled_entry(lf_timing, "Çıkış Delay Maks (sn):", self.v["sale_exit_delay_max"], row=9, column=0)
+            lf_timing = ttk.LabelFrame(f_sale, text="Bekleme / Tıklama")
+            lf_timing.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_timing, text="Yenileme Bekleme Min (sn):").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_refresh_min"], width=8).grid(row=0, column=1, sticky="w",
+                                                                                        padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_timing, text="Maks (sn):").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_refresh_max"], width=8).grid(row=0, column=3, sticky="w",
+                                                                                        padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_timing, text="İlk Bekleme (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_initial_wait"], width=8).grid(row=1, column=1, sticky="w",
+                                                                                         padx=4,
+                                                                                         pady=2)
+            ttk.Label(lf_timing, text="902,135 Tıklama Adet:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_click_902_count"], width=8).grid(row=2, column=1, sticky="w",
+                                                                                            padx=4, pady=2)
+            ttk.Label(lf_timing, text="902,135 Hız (sn):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_click_902_speed"], width=8).grid(row=2, column=3, sticky="w",
+                                                                                            padx=4, pady=2)
+            ttk.Label(lf_timing, text="899,399 Tıklama Adet:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_click_899_count"], width=8).grid(row=3, column=1, sticky="w",
+                                                                                            padx=4, pady=2)
+            ttk.Label(lf_timing, text="899,399 Hız (sn):").grid(row=3, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_timing, textvariable=self.v["sale_click_899_speed"], width=8).grid(row=3, column=3, sticky="w",
+                                                                                            padx=4, pady=2)
 
-            lf_slots = ttk.LabelFrame(frm, text="Envanter / Slot Takibi")
-            lf_slots.grid(row=3, column=0, sticky="nsew", padx=6, pady=6)
-            lf_slots.columnconfigure(1, weight=1)
-            self._labeled_entry(lf_slots, "Boş Slot Eşiği:", self.v["sale_bank_threshold"], row=0, column=0,
-                                hint="Bu eşiğin altına inince bankaya gider")
-            self._labeled_entry(lf_slots, "Bankadan Çekilecek Adet:", self.v["sale_bank_withdraw"], row=1, column=0,
-                                hint="Satış modunda bankadan alınacak item sayısı")
-            ttk.Label(lf_slots, text="Boş Slot / Satış Sayacı:").grid(row=2, column=0, sticky="w", padx=4, pady=3)
-            ttk.Label(lf_slots, textvariable=self.sale_slot_var, foreground="blue").grid(row=2, column=1, sticky="w",
-                                                                                           padx=4, pady=3)
+            lf_bank = ttk.LabelFrame(f_sale, text="Banka")
+            lf_bank.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_bank, text="Bankaya Git Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w",
+                                                                                         padx=4,
+                                                                                         pady=2)
+            ttk.Label(lf_bank, text="Bankadan Alınacak Adet:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_withdraw"], width=8).grid(row=1, column=1, sticky="w",
+                                                                                        padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_bank, text="Çıkış Süresi Min (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_min"], width=8).grid(row=2, column=1, sticky="w",
+                                                                                         padx=4,
+                                                                                         pady=2)
+            ttk.Label(lf_bank, text="Maks (sn):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_max"], width=8).grid(row=2, column=3, sticky="w",
+                                                                                         padx=4,
+                                                                                         pady=2)
+            ttk.Checkbutton(lf_bank, text="Banka boşsa Telegram gönder", variable=self.v["sale_bank_notify"],
+                            onvalue=True, offvalue=False).grid(row=3, column=0, columnspan=4, sticky="w", padx=4,
+                                                               pady=2)
+            ttk.Label(lf_bank, text="Telegram Mesajı:").grid(row=4, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_message"], width=32).grid(row=4, column=1, columnspan=3,
+                                                                                        sticky="w", padx=4, pady=2)
+            ttk.Label(lf_bank, text="Telegram Token:").grid(row=5, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["telegram_token"], width=32).grid(row=5, column=1, columnspan=3,
+                                                                                     sticky="w", padx=4, pady=2)
+            ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=6, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=6, column=1, columnspan=3,
+                                                                                       sticky="w", padx=4, pady=2)
 
-            lf_click = ttk.LabelFrame(frm, text="Krallık Yazısı Tıklama")
-            lf_click.grid(row=3, column=1, sticky="nsew", padx=6, pady=6)
-            lf_click.columnconfigure(1, weight=1)
-            self._labeled_entry(lf_click, "Click X:", self.v["krallik_click_x"], row=0, column=0, width=10)
-            self._labeled_entry(lf_click, "Click Y:", self.v["krallik_click_y"], row=1, column=0, width=10)
-            self._labeled_entry(lf_click, "Tıklama Aralığı (sn):", self.v["krallik_click_interval"], row=2, column=0)
-            self._labeled_entry(lf_click, "Basılı Tutma (sn):", self.v["krallik_click_hold"], row=3, column=0)
+            lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
+            lf_monitor.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_monitor, text="Boş Slot Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Label(lf_monitor, textvariable=self.sale_slot_var, width=6, foreground="blue").grid(row=0, column=1,
+                                                                                                    sticky="w",
+                                                                                                    padx=4, pady=2)
+            ttk.Label(lf_monitor, text="Envanter Tarama Süresi (sn):").grid(row=1, column=0, sticky="e", padx=4,
+                                                                            pady=2)
+            ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
+                                                                                           padx=4, pady=2)
+            lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
+            lf_auto_refresh.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
+                            variable=self.v["auto_market_refresh_enabled"], onvalue=True,
+                            offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_auto_refresh, text="Yenileme aralığı (saat):").grid(row=1, column=0, sticky="e", padx=4,
+                                                                             pady=2)
+            ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
+                row=1, column=1, sticky="w", padx=4, pady=2)
 
-            lf_auto = ttk.LabelFrame(frm, text="Telegram / Oto Yenileme")
-            lf_auto.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=6, pady=6)
-            lf_auto.columnconfigure(1, weight=1)
-            ttk.Checkbutton(lf_auto, text="Otomatik yenileme", variable=self.v["auto_market_refresh_enabled"]).grid(
-                row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
-            self._labeled_entry(lf_auto, "Yenileme Aralığı (saat):", self.v["auto_market_refresh_interval_hours"],
-                                row=1, column=0)
-            ttk.Checkbutton(lf_auto, text="Bankası boşsa Telegram uyarı", variable=self.v["sale_bank_notify"]).grid(
-                row=2, column=0, columnspan=2, sticky="w", padx=4, pady=2)
-            self._labeled_entry(lf_auto, "Banka boş mesajı:", self.v["sale_bank_message"], row=3, column=0, width=40)
-            self._labeled_entry(lf_auto, "Telegram Token:", self.v["telegram_token"], row=4, column=0, width=36)
-            self._labeled_entry(lf_auto, "Telegram Chat ID:", self.v["telegram_chat_id"], row=5, column=0, width=36)
+            lf_krallik = ttk.LabelFrame(f_sale, text="Krallık Yazısı Tıklama")
+            lf_krallik.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_krallik, text="X Koordinatı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_x"], width=8).grid(row=0, column=1,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_krallik, text="Y Koordinatı:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_y"], width=8).grid(row=1, column=1,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_krallik, text="Tıklama Aralığı (sn):").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_interval"], width=8).grid(row=0, column=3,
+                                                                                               sticky="w", padx=4,
+                                                                                               pady=2)
+            ttk.Label(lf_krallik, text="Tıklama Süresi (sn):").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_hold"], width=8).grid(row=1, column=3,
+                                                                                           sticky="w", padx=4,
+                                                                                           pady=2)
 
-            ttk.Button(frm, text="Tüm Ayarları Kaydet", command=self.save).grid(row=5, column=0, columnspan=2,
-                                                                                sticky="we", padx=6, pady=8)
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=7, column=0, columnspan=2,
+                                                                                   sticky="we", padx=6, pady=6)
 
-        def _build_speed_tab(self, frm):
-            frm.columnconfigure(0, weight=1)
-            frm.columnconfigure(1, weight=1)
+            # HIZ
+            f3 = ttk.Frame(nb);
+            nb.add(f3, text="Hız")
+            ttk.Label(f3, text=_tr_name("SPEED_PROFILE")).grid(row=0, column=0, sticky="e")
+            ttk.Combobox(f3, textvariable=self.v["speed_profile"], values=["FAST", "BALANCED", "SAFE"],
+                         state="readonly", width=12).grid(row=0, column=1, sticky="w")
+            ttk.Label(f3, text="Mikro Adım (PRESS_MIN/MAX):").grid(row=1, column=0, sticky="e")
+            ttk.Entry(f3, textvariable=self.v["press_min"], width=8).grid(row=1, column=1, sticky="w")
+            ttk.Entry(f3, textvariable=self.v["press_max"], width=8).grid(row=1, column=2, sticky="w")
+            ttk.Label(f3, text="Fren Δ (FAST/BAL/SAFE):").grid(row=2, column=0, sticky="e")
+            ttk.Entry(f3, textvariable=self.v["brake_fast"], width=6).grid(row=2, column=1, sticky="w")
+            ttk.Entry(f3, textvariable=self.v["brake_bal"], width=6).grid(row=2, column=2, sticky="w")
+            ttk.Entry(f3, textvariable=self.v["brake_safe"], width=6).grid(row=2, column=3, sticky="w")
 
-            lf_speed = ttk.LabelFrame(frm, text="Hız Profili")
-            lf_speed.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-            lf_speed.columnconfigure(1, weight=1)
-            ttk.Label(lf_speed, text=_tr_name("SPEED_PROFILE")).grid(row=0, column=0, sticky="e", padx=4, pady=4)
-            ttk.Combobox(lf_speed, textvariable=self.v["speed_profile"], values=["FAST", "BALANCED", "SAFE"],
-                         state="readonly", width=14).grid(row=0, column=1, sticky="w", padx=4, pady=4)
-            self._labeled_entry(lf_speed, "Mikro Adım Min:", self.v["press_min"], row=1, column=0,
-                                hint="PRESS_MIN değeri")
-            self._labeled_entry(lf_speed, "Mikro Adım Max:", self.v["press_max"], row=2, column=0,
-                                hint="PRESS_MAX değeri")
-            self._labeled_entry(lf_speed, "Fren Δ FAST:", self.v["brake_fast"], row=3, column=0,
-                                hint="FAST profil fren katsayısı")
-            self._labeled_entry(lf_speed, "Fren Δ BALANCED:", self.v["brake_bal"], row=4, column=0,
-                                hint="BALANCED profil fren katsayısı")
-            self._labeled_entry(lf_speed, "Fren Δ SAFE:", self.v["brake_safe"], row=5, column=0,
-                                hint="SAFE profil fren katsayısı")
-
-            lf_prec = ttk.LabelFrame(frm, text="Hassas Ayarlar / Anvil")
-            lf_prec.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=6, pady=6)
-            lf_prec.columnconfigure(0, weight=1)
-            canvas = tk.Canvas(lf_prec, highlightthickness=0)
-            vs = ttk.Scrollbar(lf_prec, orient="vertical", command=canvas.yview)
-            canvas.configure(yscrollcommand=vs.set)
-            inner = ttk.Frame(canvas)
-            frm_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-            canvas.bind("<Configure>", lambda e: canvas.itemconfigure(frm_id, width=e.width))
-            canvas.pack(side="left", fill="both", expand=True)
-            vs.pack(side="right", fill="y")
-            try:
-                _build_speed_prec598_tab(inner, tk, ttk)
-            except Exception as _e:
-                print("[GUI] PREC 598 sekme hata:", _e)
-            inner.update_idletasks()
-            try:
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            except Exception:
-                pass
-
-        def _build_advanced_tab(self, frm):
-            frm.columnconfigure(0, weight=1)
-            top = ttk.Frame(frm)
-            top.pack(fill="x", padx=6, pady=6)
-            ttk.Label(top, text="Ayar Ara:").pack(side="left")
-            self.adv_filter = tk.StringVar()
-            ttk.Entry(top, textvariable=self.adv_filter, width=28).pack(side="left", padx=6)
+            # GELİŞMİŞ (büyük harfli public değişkenler)
+            f4 = ttk.Frame(nb);
+            nb.add(f4, text="Gelişmiş")
+            top = ttk.Frame(f4);
+            top.pack(fill="x", padx=4, pady=4)
+            ttk.Label(top, text="Filtre:").pack(side="left")
+            self.filter = tk.StringVar();
+            ttk.Entry(top, textvariable=self.filter, width=24).pack(side="left", padx=6)
             ttk.Button(top, text="Yenile", command=self._build_adv).pack(side="left")
             ttk.Button(top, text="Tümünü Uygula", command=self._apply_all_adv).pack(side="left", padx=6)
+            c = tk.Canvas(f4, highlightthickness=0);
+            vs = ttk.Scrollbar(f4, orient="vertical", command=c.yview);
+            c.configure(yscrollcommand=vs.set)
+            frm = ttk.Frame(c);
+            self._frm_id = c.create_window((0, 0), window=frm, anchor="nw")
+            c.bind("<Configure>", lambda e: c.itemconfigure(self._frm_id, width=e.width))
+            c.pack(side="left", fill="both", expand=True);
+            vs.pack(side="right", fill="y");
+            self.adv_container = frm
 
-            canvas = tk.Canvas(frm, highlightthickness=0)
-            vs = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
-            canvas.configure(yscrollcommand=vs.set)
-            adv_frame = ttk.Frame(canvas)
-            self._frm_id = canvas.create_window((0, 0), window=adv_frame, anchor="nw")
-            canvas.bind("<Configure>", lambda e: canvas.itemconfigure(self._frm_id, width=e.width))
-            canvas.pack(side="left", fill="both", expand=True)
-            vs.pack(side="right", fill="y")
-            self.adv_container = adv_frame
+            # DURUM
+            f5 = ttk.Frame(nb);
+            nb.add(f5, text="Durum")
+            ttk.Label(f5, text="Anlık Aşama:").pack(anchor="w", padx=6, pady=4)
+            ttk.Label(f5, textvariable=self.stage, foreground="blue", font=("Segoe UI", 11, "bold")).pack(anchor="w",
+                                                                                                          padx=10)
+            ttk.Label(f5, text="Son 30 Aşama:").pack(anchor="w", padx=6, pady=6)
+            self.lb = tk.Listbox(f5, height=14);
+            self.lb.pack(fill="both", expand=True, padx=8, pady=4)
 
-        def _build_status_tab(self, frm):
-            frm.columnconfigure(0, weight=1)
-            ttk.Label(frm, text="Anlık Aşama:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-            ttk.Label(frm, textvariable=self.stage, foreground="blue", font=("Segoe UI", 12, "bold")).grid(row=1,
-                                                                                                              column=0,
-                                                                                                              sticky="w",
-                                                                                                              padx=10,
-                                                                                                              pady=(0,
-                                                                                                                    6))
-            ttk.Label(frm, text="Son 30 Aşama ve Log:").grid(row=2, column=0, sticky="w", padx=6, pady=(10, 4))
-            self.lb = tk.Listbox(frm, height=18)
-            self.lb.grid(row=3, column=0, sticky="nsew", padx=8, pady=4)
-            frm.rowconfigure(3, weight=1)
+            # --- Hız/Anvil/PREC 598 (sekme) ---
+            try:
+                f6 = ttk.Frame(nb);
+                nb.add(f6, text="Hız/Anvil/PREC 598")
+                c6 = tk.Canvas(f6, highlightthickness=0);
+                vs6 = ttk.Scrollbar(f6, orient="vertical", command=c6.yview)
+                c6.configure(yscrollcommand=vs6.set)
+                frm6 = ttk.Frame(c6);
+                _frm6_id = c6.create_window((0, 0), window=frm6, anchor="nw")
+                c6.bind("<Configure>", lambda e: c6.itemconfigure(_frm6_id, width=e.width))
+                c6.pack(side="left", fill="both", expand=True);
+                vs6.pack(side="right", fill="y")
+                _build_speed_prec598_tab(frm6, tk, ttk)
+            except Exception as _e:
+                print("[GUI] PREC 598 sekme hata:", _e)
+
         # ---- LOG kutusu ----
         def _refresh_log(self):
             if hasattr(self, "lb"):
@@ -6390,7 +6254,7 @@ def _MERDIVEN_RUN_GUI():
         def _build_adv(self):
             for w in self.adv_container.winfo_children(): w.destroy()
             self.adv_rows = []
-            F = (self.adv_filter.get().strip().upper() if hasattr(self, "adv_filter") else "")
+            F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
             grouped = {}
             for name, val in self._adv_items():
                 if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
@@ -6465,9 +6329,9 @@ def _MERDIVEN_RUN_GUI():
             path = self._cfg()
             # Şema garantisi
             try:
-                state = globals().get('_APP_CONFIG') or load_config_from_disk()
-                globals()['_APP_CONFIG'] = state
-                data = state.data
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, dict): data = {}
             except Exception:
                 data = {}
             if 'gui' not in data or not isinstance(data.get('gui'), dict): data['gui'] = {}
@@ -6479,16 +6343,19 @@ def _MERDIVEN_RUN_GUI():
                     adv[name] = var.get()
                 except Exception:
                     pass
+            # Atomik kaydet
+            tmp = path + '.tmp'
             try:
-                update_config_from_ui(data)
-                ok = save_config_to_disk()
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+                self._msg(f'Ayarlar kaydedildi: {path}')
             except Exception as e:
                 self._msg(f'[GUI] Kaydetme hatası: {e}')
-                ok = False
-            if ok:
-                self._msg(f'Ayarlar kaydedildi: {path}')
-            else:
-                self._msg(f'[GUI] Kaydetme hatası: {path}')
+                try:
+                    if os.path.exists(tmp): os.remove(tmp)
+                except:
+                    pass
             # Uygula
             try:
                 self.apply_core()
@@ -6557,15 +6424,10 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                state = globals().get('_APP_CONFIG') or load_config_from_disk()
-                globals()['_APP_CONFIG'] = state
-                j = state.data
-            except Exception:
-                try:
-                    with open(self._cfg(), "r", encoding="utf-8") as f:
-                        j = json.load(f)
-                except Exception:
-                    j = {}
+                with open(self._cfg(), "r", encoding="utf-8") as f:
+                    j = json.load(f)
+            except:
+                j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if k in self.v:
@@ -6605,13 +6467,6 @@ def _MERDIVEN_RUN_GUI():
                 except:
                     pass
             self._build_adv()
-
-        def reload_config(self):
-            try:
-                self._load_json()
-                self._msg("Ayarlar yüklendi.")
-            except Exception as e:
-                self._msg(f"[GUI] Ayarları yüklerken hata: {e}")
 
         def save_mode_selection(self):
             self.save()
@@ -6700,13 +6555,13 @@ def _MERDIVEN_RUN_GUI():
             path = self._cfg()
             data = {"gui": {}, "advanced": {}}
             try:
-                state = globals().get('_APP_CONFIG') or load_config_from_disk()
-                globals()['_APP_CONFIG'] = state
-                data = state.data
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict): data = {"gui": {}, "advanced": {}}
+                if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
+                if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
             except Exception:
                 data = {"gui": {}, "advanced": {}}
-            if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
-            if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
             for k, var in self.v.items():
                 try:
                     data["gui"][k] = var.get()
@@ -6720,42 +6575,15 @@ def _MERDIVEN_RUN_GUI():
                     adv[name] = var.get()
                 except Exception:
                     pass
-            try:
-                update_config_from_ui(data)
-                ok = save_config_to_disk()
-            except Exception:
-                ok = False
-            if ok:
-                self._msg(f"Ayarlar kaydedildi: {path}")
-            else:
-                self._msg(f"[GUI] Kaydetme hatası: {path}")
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            self._msg(f"Ayarlar kaydedildi: {path}")
             self.apply_core()
 
         def _tick(self):
-            try:
-                caps_fn = getattr(m, "is_capslock_on", None)
-                if callable(caps_fn):
-                    self.var_caps.set("Açık" if caps_fn() else "Kapalı")
-            except Exception:
-                self.var_caps.set("-")
-            try:
-                suspended = bool(globals().get("_WATCHDOG_SUSPENDED", False))
-                reason = globals().get("_WATCHDOG_SUSPEND_REASON") or ""
-                if suspended:
-                    txt = "Askıda"
-                    if reason:
-                        txt += f" ({reason})"
-                else:
-                    txt = "Aktif"
-                self.var_watchdog.set(txt)
-            except Exception:
-                self.var_watchdog.set("-")
-            try:
-                self.var_plus7_bank.set(str(globals().get('PLUS7_COUNT', '-')))
-                self.var_plus8_bank.set(str(globals().get('PLUS8_COUNT', '-')))
-            except Exception:
-                pass
-            self.root.after(500, self._tick)
+            self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
 
     # Pencereyi başlat
     root = tk.Tk()
@@ -7053,14 +6881,20 @@ __yama_install_fast_anvil()
 # === [YAMA FAST GUI] start ===
 # Hız / Anvil / PREC 598 / Cache / QC ayar penceresi (tek pencerede)
 def _speed_cfg_path():
-    return _MERDIVEN_CFG_PATH()
+    try:
+        return PERSIST_PATH('speed_config.json')  # Uygulama verileri altında
+    except Exception:
+        import os
+        return os.path.join(os.path.expanduser('~'), 'speed_config.json')
 
 
 def load_speed_config():
     try:
-        state = _APP_CONFIG or load_config_from_disk()
-        conf = state.data
-        defaults = _extra_config_defaults()
+        import json, os
+        p = _speed_cfg_path()
+        if not os.path.exists(p): return False
+        with open(p, 'r', encoding='utf-8') as f:
+            conf = json.load(f)
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -7068,10 +6902,7 @@ def load_speed_config():
                   'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
-            if k in conf:
-                globals()[k] = conf[k]
-            elif k in defaults:
-                globals()[k] = defaults[k]
+            if k in conf: globals()[k] = conf[k]
         return True
     except Exception as e:
         print('[GUI] speed_config yüklenemedi:', e);
@@ -7080,7 +6911,13 @@ def load_speed_config():
 
 def save_speed_config():
     try:
-        updates = {}
+        import json, os
+        p = _speed_cfg_path()
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                conf = json.load(f)
+        except Exception:
+            conf = {}
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -7088,14 +6925,13 @@ def save_speed_config():
                   'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
-            updates[k] = globals().get(k)
-        update_config_from_ui(updates)
-        ok = save_config_to_disk()
-        if ok:
-            print('[GUI] speed_config kaydedildi:', _speed_cfg_path());
-        else:
-            print('[GUI] Kayıt hatası: speed_config kaydedilemedi')
-        return ok
+            conf[k] = globals().get(k)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            import json;
+            json.dump(conf, f, indent=2, ensure_ascii=False)
+        print('[GUI] speed_config kaydedildi:', p);
+        return True
     except Exception as e:
         print('[GUI] speed_config kaydetme hata:', e);
         return False
@@ -7570,17 +7406,15 @@ def _y_coerce_tuple(val):
 def _y_load_store():
     def _load():
         try:
-            state = _APP_CONFIG or load_config_from_disk()
-            return copy.deepcopy(state.data)
+            return load_config()
         except Exception as e:
             print('[GUI] config yüklenemedi:', e)
-            return _build_config_defaults()
+            return _schema_defaults(_BASE_CONFIG_DEFAULTS)
 
     def _save(data):
         try:
             cfg = data if isinstance(data, dict) else {}
-            update_config_from_ui(cfg)
-            ok = save_config_to_disk()
+            ok = save_config(cfg)
             if ok:
                 print('[GUI] Ayarlar kaydedildi:', _MERDIVEN_CFG_PATH())
             else:
@@ -7894,118 +7728,114 @@ def _y_build_and_attach_gui(root):
     btns = ttk.Frame(outer);
     btns.pack(fill="x", pady=6)
 
-    def _collect_updates():
-        general_updates = {}
-        for field in _iter_config_fields():
-            var = general_vars.get(field.key)
-            if not var:
-                continue
-            if field.runtime_only:
-                continue
-            if field.field_type == "bool":
-                value = bool(var.get())
-            else:
-                raw = var.get()
-                text_val = str(raw).strip()
-                if text_val == "":
-                    if field.field_type == "str":
-                        value = ""
-                    elif field.field_type in ("list_str", "list_pairs"):
-                        value = []
-                    else:
-                        general_updates[field.key] = _serialize_value(field.default)
-                        continue
-                else:
-                    value = _parse_field_value(field, text_val)
-            general_updates[field.key] = _serialize_value(value)
-
-        new = dict(general_updates)
-        new.update({
-            "BUY_MODE": buy_mode.get().strip(),
-            "BUY_TURNS": _y_to_int(buy_turns.get(), 2),
-            "NPC_MENU_PAGE2_POS": _y_coerce_tuple(page2_pos.get()),
-            "NPC_CONTEXT_RIGHTCLICK_POS": _y_coerce_tuple(ctx_pos.get()),
-            "NPC_OPEN_TEXT_TEMPLATE_PATH": tmpl_path.get().strip(),
-            "NPC_OPEN_MATCH_THRESHOLD": _y_to_float(match_thr.get(), 0.7),
-            "NPC_OPEN_FIND_TIMEOUT": _y_to_float(find_to.get(), 4.0),
-            "NPC_OPEN_SCALES": [_y_to_float(s, 1.0) for s in str(scales.get()).split(",") if s.strip()],
-
-            "SCROLL_VENDOR_MID_POS": _y_coerce_tuple(mid_pos.get()),
-            "SCROLL_ALIM_ADET": _y_to_int(low_adet.get(), 2),
-            "SCROLL_MID_ALIM_ADET": _y_to_int(mid_adet.get(), 2),
-
-            "TARGET_NPC_X": _y_to_int(target_x.get(), 766),
-            "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(), 6.0),
-            "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(), 795),
-            "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(), 0.35),
-            "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(), 814),
-            "NPC_POSTBUY_SECOND_A_DURATION": _y_to_float(a2.get(), 0.2),
-            "NPC_POSTBUY_FINAL_W_DURATION": _y_to_float(wf.get(), 0.8),
-            "TARGET_Y_AFTER_TURN": _y_to_int(ty.get(), 597),
-            "TURN_LEFT_SEC": _y_to_float(tl.get(), 1.36),
-            "NPC_GIDIS_SURESI": _y_to_float(ngs.get(), 5.0),
-
-            "BASMA_HAKKI": _y_to_int(basmahk.get(), 31),
-            "SCROLL_POS": _y_coerce_tuple(scpos.get()),
-            "UPGRADE_BTN_POS": _y_coerce_tuple(upbtn.get()),
-            "CONFIRM_BTN_POS": _y_coerce_tuple(confbtn.get()),
-            "UPG_STEP_DELAY": _y_to_float(stepd.get(), 0.10),
-            "SCROLL_PANEL_REOPEN_MAX": _y_to_int(scmax.get(), 10),
-            "SCROLL_PANEL_REOPEN_DELAY": _y_to_float(scdel.get(), 0.10),
-
-            "EMPTY_SLOT_TEMPLATE_PATH": estpl.get().strip(),
-            "EMPTY_SLOT_MATCH_THRESHOLD": _y_to_float(esthr.get(), 0.85),
-            "FALLBACK_MEAN_THRESHOLD": _y_to_float(fbmean.get(), 55.0),
-            "FALLBACK_EDGE_DENSITY_THRESHOLD": _y_to_float(fbedge.get(), 0.030),
-            "EMPTY_SLOT_THRESHOLD": _y_to_int(estcnt.get(), 24),
-
-            "ROI_STALE_MS": _y_to_int(roi1.get(), 120),
-            "UPG_ROI_STALE_MS": _y_to_int(roi2.get(), 120),
-            "ENABLE_YAMA_SLOT_CACHE": str(ycache.get()) == "True",
-            "MAX_CACHE_SIZE_PER_SNAPSHOT": _y_to_int(maxss.get(), 512),
-
-            "AUTO_SPEED_PROFILE": auto.get().strip(),
-            "AUTO_TUNE_INTERVAL": _y_to_float(tune.get(), 30.0),
-            "SPEED_PROFILE": forced.get().strip(),
-
-            "PLUS7_START_FROM_TURN_AFTER_PURCHASE": _y_to_int(pstart.get(), 4),
-            "GLOBAL_CYCLE": _y_to_int(gcyc.get(), 1),
-            "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(), 1),
-
-            "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(), 1.2),
-        })
-
-        fsteps = []
-        lsteps = []
-        for i, (fx, fy, fc, fb) in enumerate(f_vars, 1):
-            fsteps.append((_y_to_int(fx.get(), 671), _y_to_int(fy.get(), 459), _y_to_int(fc.get(), 1), fb.get()))
-        for i, (lx, ly, lc, lb) in enumerate(l_vars, 1):
-            lsteps.append((_y_to_int(lx.get(), 671), _y_to_int(ly.get(), 459), _y_to_int(lc.get(), 1), lb.get()))
-        new["FABRIC_STEPS"] = fsteps
-        new["LINEN_STEPS"] = lsteps
-        return new
-
     def _save_clicked():
+        last_field = None
         try:
-            updates = _collect_updates()
-            merged = update_config_from_ui(updates)
-            data.clear(); data.update(merged)
-            ok = save_config_to_disk()
-            if ok:
-                messagebox and messagebox.showinfo("Kaydedildi", "Ayarlar kaydedildi.")
-            else:
-                messagebox and messagebox.showerror("Hata", "Ayarlar kaydedilemedi.")
+            general_updates = {}
+            for field in _iter_config_fields():
+                var = general_vars.get(field.key)
+                if not var:
+                    continue
+                last_field = field
+                if field.field_type == "bool":
+                    value = bool(var.get())
+                else:
+                    raw = var.get()
+                    text_val = str(raw).strip()
+                    if text_val == "":
+                        if field.field_type == "str":
+                            value = ""
+                        elif field.field_type in ("list_str", "list_pairs"):
+                            value = []
+                        else:
+                            general_updates[field.key] = _serialize_value(field.default)
+                            continue
+                    else:
+                        value = _parse_field_value(field, text_val)
+                general_updates[field.key] = _serialize_value(value)
+
+            last_field = None
+            new = dict(general_updates)
+            new.update({
+                "BUY_MODE": buy_mode.get().strip(),
+                "BUY_TURNS": _y_to_int(buy_turns.get(), 2),
+                "NPC_MENU_PAGE2_POS": _y_coerce_tuple(page2_pos.get()),
+                "NPC_CONTEXT_RIGHTCLICK_POS": _y_coerce_tuple(ctx_pos.get()),
+                "NPC_OPEN_TEXT_TEMPLATE_PATH": tmpl_path.get().strip(),
+                "NPC_OPEN_MATCH_THRESHOLD": _y_to_float(match_thr.get(), 0.7),
+                "NPC_OPEN_FIND_TIMEOUT": _y_to_float(find_to.get(), 4.0),
+                "NPC_OPEN_SCALES": [_y_to_float(s, 1.0) for s in str(scales.get()).split(",") if s.strip()],
+
+                "SCROLL_VENDOR_MID_POS": _y_coerce_tuple(mid_pos.get()),
+                "SCROLL_ALIM_ADET": _y_to_int(low_adet.get(), 2),
+                "SCROLL_MID_ALIM_ADET": _y_to_int(mid_adet.get(), 2),
+
+                "TARGET_NPC_X": _y_to_int(target_x.get(), 766),
+                "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(), 6.0),
+                "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(), 795),
+                "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(), 0.35),
+                "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(), 814),
+                "NPC_POSTBUY_SECOND_A_DURATION": _y_to_float(a2.get(), 0.2),
+                "NPC_POSTBUY_FINAL_W_DURATION": _y_to_float(wf.get(), 0.8),
+                "TARGET_Y_AFTER_TURN": _y_to_int(ty.get(), 597),
+                "TURN_LEFT_SEC": _y_to_float(tl.get(), 1.36),
+                "NPC_GIDIS_SURESI": _y_to_float(ngs.get(), 5.0),
+
+                "BASMA_HAKKI": _y_to_int(basmahk.get(), 31),
+                "SCROLL_POS": _y_coerce_tuple(scpos.get()),
+                "UPGRADE_BTN_POS": _y_coerce_tuple(upbtn.get()),
+                "CONFIRM_BTN_POS": _y_coerce_tuple(confbtn.get()),
+                "UPG_STEP_DELAY": _y_to_float(stepd.get(), 0.10),
+                "SCROLL_PANEL_REOPEN_MAX": _y_to_int(scmax.get(), 10),
+                "SCROLL_PANEL_REOPEN_DELAY": _y_to_float(scdel.get(), 0.10),
+
+                "EMPTY_SLOT_TEMPLATE_PATH": estpl.get().strip(),
+                "EMPTY_SLOT_MATCH_THRESHOLD": _y_to_float(esthr.get(), 0.85),
+                "FALLBACK_MEAN_THRESHOLD": _y_to_float(fbmean.get(), 55.0),
+                "FALLBACK_EDGE_DENSITY_THRESHOLD": _y_to_float(fbedge.get(), 0.030),
+                "EMPTY_SLOT_THRESHOLD": _y_to_int(estcnt.get(), 24),
+
+                "ROI_STALE_MS": _y_to_int(roi1.get(), 120),
+                "UPG_ROI_STALE_MS": _y_to_int(roi2.get(), 120),
+                "ENABLE_YAMA_SLOT_CACHE": str(ycache.get()) == "True",
+                "MAX_CACHE_SIZE_PER_SNAPSHOT": _y_to_int(maxss.get(), 512),
+
+                "AUTO_SPEED_PROFILE": auto.get().strip(),
+                "AUTO_TUNE_INTERVAL": _y_to_float(tune.get(), 30.0),
+                "SPEED_PROFILE": forced.get().strip(),
+
+                "PLUS7_START_FROM_TURN_AFTER_PURCHASE": _y_to_int(pstart.get(), 4),
+                "GLOBAL_CYCLE": _y_to_int(gcyc.get(), 1),
+                "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(), 1),
+
+                "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(), 1.2),
+            })
+
+            fsteps = []
+            lsteps = []
+            for i, (fx, fy, fc, fb) in enumerate(f_vars, 1):
+                fsteps.append((_y_to_int(fx.get(), 671), _y_to_int(fy.get(), 459), _y_to_int(fc.get(), 1), fb.get()))
+            for i, (lx, ly, lc, lb) in enumerate(l_vars, 1):
+                lsteps.append((_y_to_int(lx.get(), 671), _y_to_int(ly.get(), 459), _y_to_int(lc.get(), 1), lb.get()))
+            new["FABRIC_STEPS"] = fsteps
+            new["LINEN_STEPS"] = lsteps
+
+            data.update(new)
+            save(data)
+            messagebox and messagebox.showinfo("Kaydedildi", "Ayarlar kaydedildi.")
         except Exception as e:
-            print("[GUI] Kayıt hata:", e)
-            messagebox and messagebox.showerror("Hata", str(e))
+            if last_field is not None:
+                label = getattr(last_field, 'label', last_field.key)
+                err = f"{label}: {e}"
+            else:
+                err = str(e)
+            print("[GUI] Kayıt hata:", err)
+            messagebox and messagebox.showerror("Hata", err)
 
     def _apply_clicked():
         # Global değişkenlere uygula + listeleri rebuild et + wrapper'ları hazırla
         try:
-            updates = _collect_updates()
-            cfg = update_config_from_ui(updates)
-            data.clear(); data.update(cfg)
-            save_config_to_disk()
+            cfg = data  # kaydedilmiş (son)
             apply_config_values(cfg)
             g = globals()
             for k, v in cfg.items():
