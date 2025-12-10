@@ -74,7 +74,7 @@ from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 # [PATCH_TOWN_LOCK_BEGIN]
@@ -111,71 +111,6 @@ def _MERDIVEN_CFG_PATH():
     except Exception:
         pass
     return path
-
-
-_CONFIG_LOCK = threading.RLock()
-
-
-def _ensure_cfg_sections(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    base: Dict[str, Any] = raw if isinstance(raw, dict) else {}
-    if "gui" not in base or not isinstance(base.get("gui"), dict):
-        base["gui"] = {}
-    if "advanced" not in base or not isinstance(base.get("advanced"), dict):
-        base["advanced"] = {}
-    if "speed_config" not in base or not isinstance(base.get("speed_config"), dict):
-        base["speed_config"] = {}
-    return base
-
-
-def _load_full_config(path: Optional[str] = None) -> Dict[str, Any]:
-    path = path or _MERDIVEN_CFG_PATH()
-    with _CONFIG_LOCK:
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-        return _ensure_cfg_sections(data)
-
-
-def _atomic_save_json(path: str, payload: Dict[str, Any]) -> bool:
-    tmp = path + ".tmp"
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(_serialize_config(payload), f, indent=2, ensure_ascii=False)
-            try:
-                f.flush(); os.fsync(f.fileno())
-            except Exception:
-                pass
-        os.replace(tmp, path)
-        try:
-            dir_fd = os.open(os.path.dirname(path) or '.', os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except Exception:
-            pass
-        return True
-    except Exception as e:
-        try:
-            print('[PATCH][config] atomic save error:', e)
-        except Exception:
-            pass
-        return False
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-
-
-def _save_full_config(payload: Dict[str, Any], path: Optional[str] = None) -> bool:
-    path = path or _MERDIVEN_CFG_PATH()
-    with _CONFIG_LOCK:
-        return _atomic_save_json(path, _ensure_cfg_sections(payload))
 
 
 try:
@@ -455,11 +390,6 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
-KING_TEXT_CLICK_ENABLED = False
-KING_TEXT_CLICK_POS = (0, 0)
-KING_TEXT_CLICK_INTERVAL = 120.0
-KING_TEXT_CLICK_HOLD = 0.05
-_KING_TEXT_LAST_CLICK_TS = 0.0
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ITEM_SALE_BANK_NOTIFY = True
@@ -497,7 +427,7 @@ HP_RED_DELTA = 35.0
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-X_TOL_READ_DELAY = 0.02  # X okuma aralığı (sn)
+X_TOL_READ_DELAY = 0.015  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
@@ -610,7 +540,7 @@ NPC_MENU_PAGE2_POS = (968, 328)
 NPC_POSTBUY_FIRST_A_DURATION = 3.1;
 NPC_POSTBUY_TARGET_X1 = 795;
 NPC_POSTBUY_A_WHILE_W_DURATION = 0.08;
-NPC_POSTBUY_TARGET_X2 = 814
+NPC_POSTBUY_TARGET_X2 = 815
 NPC_POSTBUY_SECOND_A_DURATION = 1.4;
 NPC_POSTBUY_FINAL_W_DURATION = 4.0;
 NPC_POSTBUY_SEEK_TIMEOUT = 20.0
@@ -711,74 +641,6 @@ BANK_OPEN = False;
 FORCE_PLUS7_ONCE = False
 NEED_STAIRS_REALIGN = True  # relaunch/yeniden giriş sonrası merdiven başlangıcı zorunlu
 
-# --- +8 F bekleme bildirimi ayarları ve durumu ---
-PLUS8_IDLE_MESSAGE = str(globals().get("PLUS8_IDLE_MESSAGE", "+8 basma döngüsü devam ediyor, lütfen kontrol et."))
-PLUS8_IDLE_MESSAGE_INTERVAL_MIN = int(globals().get("PLUS8_IDLE_MESSAGE_INTERVAL_MIN", 10))
-_PLUS8_IDLE_WAITING = False
-_PLUS8_IDLE_LAST_SENT = 0.0
-_PLUS8_IDLE_NOTIFY_STOP = threading.Event()
-_PLUS8_IDLE_LOCK = threading.Lock()
-_PLUS8_IDLE_THREAD = None
-
-
-def _set_plus8_idle_waiting(active: bool):
-    """+8 F bekleme durum bayrağını günceller (interval reset içerir)."""
-    global _PLUS8_IDLE_WAITING, _PLUS8_IDLE_LAST_SENT
-    _ensure_plus8_idle_thread()
-    with _PLUS8_IDLE_LOCK:
-        changed = (_PLUS8_IDLE_WAITING != bool(active))
-        _PLUS8_IDLE_WAITING = bool(active)
-        if not _PLUS8_IDLE_WAITING:
-            _PLUS8_IDLE_LAST_SENT = time.time()
-        elif changed:
-            _PLUS8_IDLE_LAST_SENT = time.time()
-
-
-def _plus8_idle_can_notify() -> bool:
-    return MODE == "BANK_PLUS8" and _PLUS8_IDLE_WAITING
-
-
-def _plus8_idle_loop():
-    global _PLUS8_IDLE_LAST_SENT
-    while not _PLUS8_IDLE_NOTIFY_STOP.is_set():
-        try:
-            if _plus8_idle_can_notify():
-                try:
-                    interval = float(globals().get("PLUS8_IDLE_MESSAGE_INTERVAL_MIN", PLUS8_IDLE_MESSAGE_INTERVAL_MIN))
-                except Exception:
-                    interval = float(PLUS8_IDLE_MESSAGE_INTERVAL_MIN)
-                interval_sec = max(60.0, interval * 60.0)
-                now = time.time()
-                with _PLUS8_IDLE_LOCK:
-                    last = _PLUS8_IDLE_LAST_SENT
-                if now - last >= interval_sec:
-                    msg = str(globals().get("PLUS8_IDLE_MESSAGE", PLUS8_IDLE_MESSAGE))
-                    for _ in range(3):
-                        send_telegram_message(msg)
-                    with _PLUS8_IDLE_LOCK:
-                        _PLUS8_IDLE_LAST_SENT = time.time()
-        except Exception as exc:
-            try:
-                print(f"[TELEGRAM] +8 idle bildirim hata: {exc}")
-            except Exception:
-                pass
-        _PLUS8_IDLE_NOTIFY_STOP.wait(5.0)
-
-
-def _ensure_plus8_idle_thread():
-    global _PLUS8_IDLE_THREAD
-    if _PLUS8_IDLE_THREAD is not None:
-        return
-    try:
-        t = threading.Thread(target=_plus8_idle_loop, name="plus8_idle_notifier", daemon=True)
-        t.start();
-        _PLUS8_IDLE_THREAD = t
-    except Exception as exc:
-        try:
-            print(f"[TELEGRAM] +8 idle thread başlatılamadı: {exc}")
-        except Exception:
-            pass
-
 
 def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
     """MODE'u NORMAL yapar; istenirse +8 devam bayrağını da temizler."""
@@ -786,7 +648,6 @@ def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
     MODE = "NORMAL"
     if reset_plus8_state:
         PLUS8_RESUME = False
-    _set_plus8_idle_waiting(False)
     if reason:
         print(f"[MODE] NORMAL ({reason})")
 
@@ -796,7 +657,6 @@ def _set_mode_bank_plus8(reason: str = None):
     global MODE, PLUS8_RESUME
     MODE = "BANK_PLUS8"
     PLUS8_RESUME = True
-    _set_plus8_idle_waiting(False)
     if reason:
         print(f"[MODE] BANK_PLUS8 ({reason})")
 
@@ -916,10 +776,6 @@ def _wait_with_stage_detail(total_seconds: float, detail_builder: Optional[Calla
             if msg and msg != last_msg:
                 stage_detail(msg)
                 last_msg = msg
-        try:
-            _item_sale_maybe_click_king_text()
-        except Exception:
-            pass
         time.sleep(min(1.0, remaining, 0.5))
 
 
@@ -950,7 +806,6 @@ SC_ESC = 0x01;
 SC_O = 0x18
 VK_CONTROL = 0x11;
 VK_V = 0x56;
-VK_A = 0x41;
 VK_BACKSPACE = 0x08;
 VK_CAPITAL = 0x14
 
@@ -1072,22 +927,6 @@ def repeated_click(pos, count, delay):
         time.sleep(max(0.0, float(delay)))
 
 
-def _mouse_click_with_hold(x: int, y: int, hold: float):
-    mouse_move(x, y)
-    if not pause_point():
-        return
-    extra = ctypes.c_ulong(0)
-    ii_ = Input_I()
-    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, ctypes.pointer(extra))
-    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
-    time.sleep(max(0.0, float(hold)))
-    if not pause_point():
-        return
-    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
-    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
-    time.sleep(mouse_hizi / 2)
-
-
 def right_click_enter_at(x, y):
     mouse_move(x, y);
     mouse_click("right");
@@ -1102,90 +941,29 @@ CF_UNICODETEXT = 13;
 GMEM_MOVEABLE = 0x0002
 
 
-def _clipboard_win32_available() -> bool:
-    return bool(getattr(ctypes, "windll", None)) and hasattr(ctypes.windll, "user32") and hasattr(ctypes.windll, "kernel32")
-
-
-def _set_clipboard_text_via_user32(text: str, attempts: int = 5) -> bool:
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    for _ in range(max(1, attempts)):
-        if not user32.OpenClipboard(None):
-            time.sleep(0.05)
-            continue
-        hGlobal = None
-        locked = False
-        freed = False
-        success = False
-        try:
-            user32.EmptyClipboard();
-            data = ctypes.create_unicode_buffer(text)
-            size_bytes = ctypes.sizeof(ctypes.c_wchar) * (len(text) + 1)
-            hGlobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_bytes)
-            if not hGlobal:
-                return False
-            lpGlobal = kernel32.GlobalLock(hGlobal)
-            if not lpGlobal:
-                kernel32.GlobalFree(hGlobal)
-                return False
-            locked = True
-            ctypes.memmove(lpGlobal, ctypes.addressof(data), size_bytes);
-            kernel32.GlobalUnlock(hGlobal)
-            locked = False
-            if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal):
-                kernel32.GlobalFree(hGlobal)
-                freed = True
-                return False
-            success = True
-            return True
-        except Exception:
-            time.sleep(0.05)
-        finally:
-            if locked and hGlobal:
-                try:
-                    kernel32.GlobalUnlock(hGlobal)
-                except Exception:
-                    pass
-            if hGlobal and not success and not freed:
-                try:
-                    kernel32.GlobalFree(hGlobal)
-                except Exception:
-                    pass
-            user32.CloseClipboard()
-    return False
-
-
-def _set_clipboard_text_via_powershell(text: str) -> bool:
-    try:
-        completed = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "Set-Clipboard -Value ([Console]::In.ReadToEnd())",
-            ],
-            input=str(text or "").encode("utf-8"),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-            check=True,
-        )
-        return completed.returncode == 0
-    except Exception:
-        return False
-
-
 def set_clipboard_text(text: str) -> bool:
-    if not pause_point():
+    if not pause_point(): return False
+    user32 = ctypes.windll.user32;
+    kernel32 = ctypes.windll.kernel32
+    for _ in range(5):
+        if user32.OpenClipboard(0): break
+        time.sleep(0.02)
+    else:
         return False
-    safe_text = "" if text is None else str(text)
-    if _clipboard_win32_available():
-        if _set_clipboard_text_via_user32(safe_text):
-            return True
-    if _set_clipboard_text_via_powershell(safe_text):
+    try:
+        user32.EmptyClipboard();
+        data = ctypes.create_unicode_buffer(text)
+        size_bytes = ctypes.sizeof(ctypes.c_wchar) * (len(text) + 1)
+        hGlobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, size_bytes)
+        if not hGlobal: return False
+        lpGlobal = kernel32.GlobalLock(hGlobal)
+        if not lpGlobal: kernel32.GlobalFree(hGlobal); return False
+        ctypes.memmove(lpGlobal, ctypes.addressof(data), size_bytes);
+        kernel32.GlobalUnlock(hGlobal)
+        if not user32.SetClipboardData(CF_UNICODETEXT, hGlobal): kernel32.GlobalFree(hGlobal); return False
         return True
-    print("[PASTE] Panoya yazı yazılamadı (clipboard erişimi başarısız).")
-    return False
+    finally:
+        user32.CloseClipboard()
 
 
 def press_vk(vk):
@@ -1200,88 +978,16 @@ def release_vk(vk):
     time.sleep(tus_hizi)
 
 
-def paste_text_from_clipboard(text: str, retries: int = 3, select_all: bool = True) -> bool:
-    if not pause_point():
-        return False
-    for attempt in range(1, retries + 1):
-        if not set_clipboard_text(text):
-            time.sleep(0.05)
-            continue
-        time.sleep(0.02)
-        if select_all:
-            press_vk(VK_CONTROL)
-            press_vk(VK_A)
-            release_vk(VK_A)
-            release_vk(VK_CONTROL)
-            time.sleep(0.05)
-        press_vk(VK_CONTROL)
-        press_vk(VK_V)
-        release_vk(VK_V)
-        release_vk(VK_CONTROL)
-        time.sleep(0.08)
+def paste_text_from_clipboard(text: str) -> bool:
+    if not pause_point(): return False
+    if set_clipboard_text(text):
+        press_vk(VK_CONTROL);
+        press_vk(VK_V);
+        release_vk(VK_V);
+        release_vk(VK_CONTROL);
+        time.sleep(0.05);
         return True
-    print(f"[PASTE] Panoya yapıştırılamadı (deneme {retries}).")
     return False
-
-
-# ---------- Hızlı metin yazma (SendInput) ----------
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_UNICODE = 0x0004
-
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD),
-        ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", wintypes.ULONG_PTR),
-    ]
-
-
-class INPUT(ctypes.Structure):
-    _fields_ = [
-        ("type", wintypes.DWORD),
-        ("ki", KEYBDINPUT),
-    ]
-
-
-def _sendinput_available() -> bool:
-    return hasattr(ctypes, "windll") and hasattr(ctypes.windll, "user32")
-
-
-def type_text_fast(text: str, clear: bool = True) -> bool:
-    """Panoyu kullanmadan Unicode destekli hızlı yazım yap."""
-    if not pause_point():
-        return False
-    safe_text = "" if text is None else str(text)
-    if not safe_text:
-        return False
-    if not _sendinput_available():
-        return paste_text_from_clipboard(safe_text, select_all=clear)
-    try:
-        if clear:
-            press_vk(VK_CONTROL)
-            press_vk(VK_A)
-            release_vk(VK_A)
-            release_vk(VK_CONTROL)
-            time.sleep(0.02)
-            press_vk(VK_BACKSPACE)
-            release_vk(VK_BACKSPACE)
-            time.sleep(0.02)
-        seq = []
-        for ch in safe_text:
-            code = ord(ch)
-            seq.append(INPUT(INPUT_KEYBOARD, KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, 0)))
-            seq.append(INPUT(INPUT_KEYBOARD, KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
-        arr = (INPUT * len(seq))(*seq)
-        sent = ctypes.windll.user32.SendInput(len(arr), arr, ctypes.sizeof(INPUT))
-        if sent != len(arr):
-            return paste_text_from_clipboard(safe_text, select_all=clear)
-        return True
-    except Exception:
-        return paste_text_from_clipboard(safe_text, select_all=clear)
 
 
 def send_telegram_message(text: str) -> bool:
@@ -1362,14 +1068,7 @@ class PROCESSENTRY32W(ctypes.Structure):
 
 
 def _iter_processes():
-    # Windows API erişimi yoksa (örn. Linux/macOS) sessizce çık
-    if not hasattr(ctypes, "windll"):
-        return
-
-    try:
-        k32 = ctypes.windll.kernel32
-    except Exception:
-        return
+    k32 = ctypes.windll.kernel32
     snapshot = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     INVALID = ctypes.c_void_p(-1).value
     if snapshot == INVALID:
@@ -1387,7 +1086,7 @@ def _iter_processes():
         ctypes.windll.kernel32.CloseHandle(snapshot)
 
 
-def _pids_by_image(names: Set[str]) -> Set[int]:
+def _pids_by_image(names: set[str]) -> set[int]:
     want = {n.lower() for n in names}
     pids = set()
     try:
@@ -1399,10 +1098,7 @@ def _pids_by_image(names: Set[str]) -> Set[int]:
     return pids
 
 
-def _pids_from_hwnds(hwnds: List[int]) -> Set[int]:
-    if not hasattr(ctypes, "windll"):
-        return set()
-
+def _pids_from_hwnds(hwnds: list[int]) -> set[int]:
     pids = set()
     for h in hwnds:
         try:
@@ -1415,7 +1111,7 @@ def _pids_from_hwnds(hwnds: List[int]) -> Set[int]:
     return pids
 
 
-def _enum_launcher_hwnds() -> List[int]:
+def _enum_launcher_hwnds() -> list[int]:
     hwnds = []
     try:
         titles = []
@@ -1432,10 +1128,7 @@ def _enum_launcher_hwnds() -> List[int]:
     return hwnds
 
 
-def _wm_close_hwnds(hwnds: List[int]):
-    if not hasattr(ctypes, "windll"):
-        return
-
+def _wm_close_hwnds(hwnds: list[int]):
     WM_CLOSE = 0x0010
     user32 = ctypes.windll.user32
     for h in hwnds:
@@ -1445,10 +1138,7 @@ def _wm_close_hwnds(hwnds: List[int]):
             pass
 
 
-def _kill_pids(pids: Set[int]):
-    if not hasattr(ctypes, "windll"):
-        return
-
+def _kill_pids(pids: set[int]):
     k32 = ctypes.windll.kernel32
     PROCESS_TERMINATE = 0x0001
     for pid in list(pids):
@@ -1661,20 +1351,18 @@ def perform_login_inputs(w):
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
-    time.sleep(0.05)
-    if not type_text_fast(LOGIN_USERNAME):
-        print("[LOGIN] Kullanıcı adı yazılamadı.")
-    time.sleep(0.05)
+    time.sleep(0.1)
+    paste_text_from_clipboard(LOGIN_USERNAME);
+    time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
-    time.sleep(0.05)
+    time.sleep(0.1)
     # Eğer TAB ile odak geçmiyorsa şifre alanını tıkla:
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    if not type_text_fast(LOGIN_PASSWORD):
-        print("[LOGIN] Şifre yazılamadı.")
-    time.sleep(0.05)
+    paste_text_from_clipboard(LOGIN_PASSWORD);
+    time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     time.sleep(0.4)
@@ -3085,14 +2773,7 @@ def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 
                             hover_has_plusN(win, "BANK_PANEL", c, r, 8, hover_wait=HOVER_WAIT_BANK):
                         continue
                     roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
-                    if roi is None:
-                        continue
-                    allowed = False
-                    for n in range(int(min_plus), int(max_plus) + 1):
-                        if _roi_has_plusN(roi, n):
-                            allowed = True
-                            break
-                    if not allowed:
+                    if roi is not None and (_roi_has_plusN(roi, 7) or _roi_has_plusN(roi, 8)):
                         continue
                     x, y = slot_center("BANK_PANEL", c, r)
                     mouse_move(x, y)
@@ -3222,10 +2903,10 @@ def _item_sale_fill_market(price_text: str) -> int:
         time.sleep(0.2)
     mouse_move(476, 644)
     mouse_click("left")
-    _wait_with_stage_detail(61.0)
+    time.sleep(61.0)
     mouse_move(476, 644)
     mouse_click("left")
-    _wait_with_stage_detail(2.0)
+    time.sleep(2.0)
     mouse_move(806, 776)
     mouse_click("left")
     time.sleep(key_delay)
@@ -3242,41 +2923,6 @@ def _item_sale_report_slot_count(empty_slots: int):
             cb(int(empty_slots))
     except Exception:
         pass
-
-
-def _item_sale_maybe_click_king_text(now: Optional[float] = None) -> bool:
-    try:
-        enabled = bool(globals().get("KING_TEXT_CLICK_ENABLED", KING_TEXT_CLICK_ENABLED))
-    except Exception:
-        enabled = KING_TEXT_CLICK_ENABLED
-    if not enabled:
-        return False
-    try:
-        pos = globals().get("KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS)
-        x, y = int(pos[0]), int(pos[1])
-    except Exception:
-        return False
-    try:
-        interval = float(globals().get("KING_TEXT_CLICK_INTERVAL", KING_TEXT_CLICK_INTERVAL))
-    except Exception:
-        interval = KING_TEXT_CLICK_INTERVAL
-    try:
-        hold = float(globals().get("KING_TEXT_CLICK_HOLD", KING_TEXT_CLICK_HOLD))
-    except Exception:
-        hold = KING_TEXT_CLICK_HOLD
-    if interval <= 0:
-        return False
-    if now is None:
-        now = time.time()
-    last = float(globals().get("_KING_TEXT_LAST_CLICK_TS", _KING_TEXT_LAST_CLICK_TS) or 0.0)
-    if now - last < interval:
-        return False
-    globals()["_KING_TEXT_LAST_CLICK_TS"] = now
-    try:
-        _mouse_click_with_hold(x, y, hold)
-    except Exception:
-        return False
-    return True
 
 
 def _item_sale_refresh_market(initial=False) -> int:
@@ -3404,7 +3050,6 @@ def _item_sale_run_cycle(w):
     if refresh_lock is None:
         refresh_lock = threading.Lock()
         globals()["_AUTO_MARKET_REFRESH_LOCK"] = refresh_lock
-    globals()["_KING_TEXT_LAST_CLICK_TS"] = 0.0
 
     def open_inventory():
         nonlocal inv_open, next_scan
@@ -3477,7 +3122,6 @@ def _item_sale_run_cycle(w):
 
         open_inventory()
         now = time.time()
-        _item_sale_maybe_click_king_text(now)
         if now < next_scan:
             time.sleep(0.2)
             continue
@@ -3738,83 +3382,76 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
     # >>> YENİ: LOW akışı için global reopen sayacı sıfırla
     if scroll_required == "LOW":
         _reset_scroll_reopen_budget("LOW")
-    plus8_idle_scope = (scroll_required == "MID")
-    if plus8_idle_scope:
-        _set_plus8_idle_waiting(True)
-    try:
-        while attempts_done < limit and start_index < total_slots:
-            wait_if_paused();
-            watchdog_enforce()
-            if _kb_pressed('f12'): break
-            idx_found, slot = find_next_filled_slot_from_index(start_index, used, "UPG")
-            if slot is None: break
-            gray = grab_gray_region("UPG");
-            tmpl = _load_empty_template();
-            c, r = slot
-            if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
-            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
-                f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
-            if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
-                f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
+    while attempts_done < limit and start_index < total_slots:
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'): break
+        idx_found, slot = find_next_filled_slot_from_index(start_index, used, "UPG")
+        if slot is None: break
+        gray = grab_gray_region("UPG");
+        tmpl = _load_empty_template();
+        c, r = slot
+        if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
+        if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
+            f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
+        if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
+            f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
+        res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
+        if res == "DONE":
+            used.add(slot);
+            attempts_done += 1
+        elif res in ("EXIT_LOOP", "ABORT"):
+            return attempts_done
+        start_index = idx_found + 1
+    wrap_cursor = 0
+    while attempts_done < limit:
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'): break
+        gray = grab_gray_region("UPG");
+        tmpl = _load_empty_template()
+        found_and_upgraded = False;
+        seen_item = False;
+        skipped_due_to_scroll = False;
+        seen_only_plus7 = True if skip_plus7 else False
+        for i in range(len(WRAP_SLOTS)):
+            idx = (wrap_cursor + i) % len(WRAP_SLOTS);
+            c, r = WRAP_SLOTS[idx]
+            if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
+            seen_item = True
+            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
+                print(f"[UPG] Slot ({c},{r}) +7 → atla.");
+                continue
+            if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
+                print(f"[UPG] Slot ({c},{r}) +8 → atla.");
+                continue
+            else:
+                if skip_plus7: seen_only_plus7 = False
             res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
             if res == "DONE":
-                used.add(slot);
-                attempts_done += 1
+                attempts_done += 1;
+                wrap_cursor = (idx + 1) % len(WRAP_SLOTS);
+                found_and_upgraded = True;
+                break
+            elif res == "SKIP_SCROLL":
+                skipped_due_to_scroll = True;
+                continue
             elif res in ("EXIT_LOOP", "ABORT"):
                 return attempts_done
-            start_index = idx_found + 1
-        wrap_cursor = 0
-        while attempts_done < limit:
-            wait_if_paused();
-            watchdog_enforce()
-            if _kb_pressed('f12'): break
-            gray = grab_gray_region("UPG");
-            tmpl = _load_empty_template()
-            found_and_upgraded = False;
-            seen_item = False;
-            skipped_due_to_scroll = False;
-            seen_only_plus7 = True if skip_plus7 else False
-            for i in range(len(WRAP_SLOTS)):
-                idx = (wrap_cursor + i) % len(WRAP_SLOTS);
-                c, r = WRAP_SLOTS[idx]
-                if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
-                seen_item = True
-                if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
-                    print(f"[UPG] Slot ({c},{r}) +7 → atla.");
-                    continue
-                if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
-                    print(f"[UPG] Slot ({c},{r}) +8 → atla.");
-                    continue
-                else:
-                    if skip_plus7: seen_only_plus7 = False
-                res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
-                if res == "DONE":
-                    attempts_done += 1;
-                    wrap_cursor = (idx + 1) % len(WRAP_SLOTS);
-                    found_and_upgraded = True;
-                    break
-                elif res == "SKIP_SCROLL":
-                    skipped_due_to_scroll = True;
-                    continue
-                elif res in ("EXIT_LOOP", "ABORT"):
-                    return attempts_done
-            if not found_and_upgraded:
-                if skipped_due_to_scroll: print("[UPG] Scroll görünmüyor → kısa bekle."); time.sleep(0.15); continue
-                if not seen_item:
-                    print(f"[UPG] Wrap alanında item yok. Deneme: {attempts_done}/{limit}");
-                    ITEMS_DEPLETED_FLAG = True
-                    if MODE != "BANK_PLUS8": REQUEST_RELAUNCH = True
-                    break
-                if skip_plus7 and seen_only_plus7:
-                    print("[UPG] Görünür tüm itemler +7 → relaunch.");
-                    REQUEST_RELAUNCH = True;
-                    FORCE_PLUS7_ONCE = True;
-                    return attempts_done
-        print(f"[UPG] Basma bitti: {attempts_done}/{limit}");
-        return attempts_done
-    finally:
-        if plus8_idle_scope:
-            _set_plus8_idle_waiting(False)
+        if not found_and_upgraded:
+            if skipped_due_to_scroll: print("[UPG] Scroll görünmüyor → kısa bekle."); time.sleep(0.15); continue
+            if not seen_item:
+                print(f"[UPG] Wrap alanında item yok. Deneme: {attempts_done}/{limit}");
+                ITEMS_DEPLETED_FLAG = True
+                if MODE != "BANK_PLUS8": REQUEST_RELAUNCH = True
+                break
+            if skip_plus7 and seen_only_plus7:
+                print("[UPG] Görünür tüm itemler +7 → relaunch.");
+                REQUEST_RELAUNCH = True;
+                FORCE_PLUS7_ONCE = True;
+                return attempts_done
+    print(f"[UPG] Basma bitti: {attempts_done}/{limit}");
+    return attempts_done
 
 
 # ================== NPC SONRASI ANVIL ROTASI ==================
@@ -4099,7 +3736,7 @@ def run_bank_plus7_mode(w):
             start_x = None
         go_to_anvil_from_top(start_x)
         attempts_limit = min(int(BASMA_HAKKI), int(taken))
-        attempts_done = basma_dongusu(attempts_limit=attempts_limit, scroll_required="LOW", win=w, skip_plus8=True)
+        attempts_done = basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w, skip_plus8=True)
         print(f"[BANK_PLUS7] +7 deneme: {attempts_done}/{attempts_limit}")
         exit_game_fast(w)
         w = relaunch_and_login_to_ingame()
@@ -4908,18 +4545,6 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("PAZAR_YENILEME_BEKELEME_MAX", "Pazar yenileme bekleme maks", "Item Satış", "float",
                 _cfg_default("PAZAR_YENILEME_BEKELEME_MAX", 120.0),
                 "Pazar yenileme öncesi maksimum bekleme süresi."),
-    ConfigField("KING_TEXT_CLICK_ENABLED", "Krallık tıklama aktif", "Item Satış", "bool",
-                _cfg_default("KING_TEXT_CLICK_ENABLED", KING_TEXT_CLICK_ENABLED),
-                "Krallık yazısı için periyodik tıklamayı aç/kapat."),
-    ConfigField("KING_TEXT_CLICK_POS", "Krallık tık (x,y)", "Item Satış", "int_pair",
-                _cfg_default("KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS),
-                "Krallık yazısı için tıklama koordinatı.", apply=_ensure_int_pair),
-    ConfigField("KING_TEXT_CLICK_INTERVAL", "Krallık tıklama aralığı", "Item Satış", "float",
-                _cfg_default("KING_TEXT_CLICK_INTERVAL", KING_TEXT_CLICK_INTERVAL),
-                "Krallık yazısı tıklama sıklığı (sn)."),
-    ConfigField("KING_TEXT_CLICK_HOLD", "Krallık tıklama süresi", "Item Satış", "float",
-                _cfg_default("KING_TEXT_CLICK_HOLD", KING_TEXT_CLICK_HOLD),
-                "Krallık yazısı tıklamasında basılı kalma süresi (sn)."),
     ConfigField("auto_market_refresh_enabled", "Pazar yenileme aktif", "Item Satış", "bool",
                 _cfg_default("auto_market_refresh_enabled", False),
                 "Zamanlı otomatik pazar yenilemeyi aç/kapat."),
@@ -5100,12 +4725,12 @@ def load_config(path=None, defaults=None):
     if defaults is None:
         defaults = _schema_defaults(_BASE_CONFIG_DEFAULTS)
     try:
-        base = _load_full_config(path)
-        cfg = copy.deepcopy(defaults)
-        for k, v in base.items():
-            if k in ("gui", "advanced", "speed_config"):
-                continue
-            cfg[k] = v
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
+            return defaults
+        with open(path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
 
         def _merge(a, b):
             for k, v in b.items():
@@ -5115,8 +4740,6 @@ def load_config(path=None, defaults=None):
                     _merge(a[k], v)
 
         _merge(cfg, defaults)
-        base.update(_serialize_config(cfg))
-        _save_full_config(base, path)
         return cfg
     except Exception as e:
         print('[PATCH][config] load error:', e)
@@ -5127,9 +4750,10 @@ def save_config(cfg, path=None):
     if path is None:
         path = _MERDIVEN_CFG_PATH()
     try:
-        base = _load_full_config(path)
-        base.update(_serialize_config(cfg))
-        return _save_full_config(base, path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
+        return True
     except Exception as e:
         print('[PATCH][config] save error:', e)
         return False
@@ -5938,13 +5562,6 @@ def _MERDIVEN_RUN_GUI():
                 "sale_click_902_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_902_135_HIZ", CLICK_902_135_HIZ))),
                 "sale_click_899_count": tk.IntVar(value=int(getattr(m, "CLICK_899_399_ADET", CLICK_899_399_ADET))),
                 "sale_click_899_speed": tk.DoubleVar(value=float(getattr(m, "CLICK_899_399_HIZ", CLICK_899_399_HIZ))),
-                "king_click_enabled": tk.BooleanVar(
-                    value=bool(getattr(m, "KING_TEXT_CLICK_ENABLED", KING_TEXT_CLICK_ENABLED))),
-                "king_click_x": tk.IntVar(value=int(getattr(m, "KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS)[0])),
-                "king_click_y": tk.IntVar(value=int(getattr(m, "KING_TEXT_CLICK_POS", KING_TEXT_CLICK_POS)[1])),
-                "king_click_interval": tk.DoubleVar(
-                    value=float(getattr(m, "KING_TEXT_CLICK_INTERVAL", KING_TEXT_CLICK_INTERVAL))),
-                "king_click_hold": tk.DoubleVar(value=float(getattr(m, "KING_TEXT_CLICK_HOLD", KING_TEXT_CLICK_HOLD))),
                 "auto_market_refresh_enabled": tk.BooleanVar(
                     value=bool(getattr(m, "auto_market_refresh_enabled", AUTO_MARKET_REFRESH_ENABLED))),
                 "auto_market_refresh_interval_hours": tk.DoubleVar(
@@ -5967,9 +5584,6 @@ def _MERDIVEN_RUN_GUI():
                     value=str(getattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))),
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
-                "plus8_idle_message": tk.StringVar(value=str(getattr(m, "PLUS8_IDLE_MESSAGE", PLUS8_IDLE_MESSAGE))),
-                "plus8_idle_interval": tk.IntVar(
-                    value=int(getattr(m, "PLUS8_IDLE_MESSAGE_INTERVAL_MIN", PLUS8_IDLE_MESSAGE_INTERVAL_MIN))),
             }
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
@@ -6210,24 +5824,8 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_timing, textvariable=self.v["sale_click_899_speed"], width=8).grid(row=3, column=3, sticky="w",
                                                                                             padx=4, pady=2)
 
-            lf_king = ttk.LabelFrame(f_sale, text="Krallık Yazısı Tıklama")
-            lf_king.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
-            ttk.Checkbutton(lf_king, text="Aktif", variable=self.v["king_click_enabled"], onvalue=True,
-                            offvalue=False).grid(row=0, column=0, columnspan=4, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_king, text="Koordinat (x,y):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_king, textvariable=self.v["king_click_x"], width=8).grid(row=1, column=1, sticky="w", padx=4,
-                                                                                  pady=2)
-            ttk.Entry(lf_king, textvariable=self.v["king_click_y"], width=8).grid(row=1, column=2, sticky="w", padx=4,
-                                                                                  pady=2)
-            ttk.Label(lf_king, text="Aralık (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_king, textvariable=self.v["king_click_interval"], width=8).grid(row=2, column=1, sticky="w",
-                                                                                          padx=4, pady=2)
-            ttk.Label(lf_king, text="Basılı tut (sn):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_king, textvariable=self.v["king_click_hold"], width=8).grid(row=2, column=3, sticky="w",
-                                                                                       padx=4, pady=2)
-
             lf_bank = ttk.LabelFrame(f_sale, text="Banka")
-            lf_bank.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_bank.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_bank, text="Bankaya Git Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w",
                                                                                          padx=4,
@@ -6255,18 +5853,10 @@ def _MERDIVEN_RUN_GUI():
                                                                                      sticky="w", padx=4, pady=2)
             ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=6, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=6, column=1, columnspan=3,
-                                                                                      sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="+8 item basma mesajı:").grid(row=7, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["plus8_idle_message"], width=32).grid(row=7, column=1, columnspan=3,
-                                                                                        sticky="w", padx=4,
-                                                                                        pady=2)
-            ttk.Label(lf_bank, text="+8 mesaj gönderme süresi (dk):").grid(row=8, column=0, sticky="e", padx=4,
-                                                                             pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["plus8_idle_interval"], width=8).grid(row=8, column=1, sticky="w",
-                                                                                        padx=4, pady=2)
+                                                                                       sticky="w", padx=4, pady=2)
 
             lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
-            lf_monitor.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_monitor.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_monitor, text="Boş Slot Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Label(lf_monitor, textvariable=self.sale_slot_var, width=6, foreground="blue").grid(row=0, column=1,
                                                                                                     sticky="w",
@@ -6276,7 +5866,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
                                                                                            padx=4, pady=2)
             lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
-            lf_auto_refresh.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_auto_refresh.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
                             variable=self.v["auto_market_refresh_enabled"], onvalue=True,
                             offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
@@ -6285,7 +5875,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
                 row=1, column=1, sticky="w", padx=4, pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=6, column=0, columnspan=2,
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=5, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
@@ -6551,9 +6141,10 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                j = _load_full_config(self._cfg())
-            except Exception:
-                j = _ensure_cfg_sections({})
+                with open(self._cfg(), "r", encoding="utf-8") as f:
+                    j = json.load(f)
+            except:
+                j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if k in self.v:
@@ -6615,14 +6206,6 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "CLICK_902_135_HIZ", float(self.v["sale_click_902_speed"].get()))
             setattr(m, "CLICK_899_399_ADET", int(self.v["sale_click_899_count"].get()))
             setattr(m, "CLICK_899_399_HIZ", float(self.v["sale_click_899_speed"].get()))
-            setattr(m, "KING_TEXT_CLICK_ENABLED", bool(self.v["king_click_enabled"].get()))
-            try:
-                kx = int(self.v["king_click_x"].get()); ky = int(self.v["king_click_y"].get())
-            except Exception:
-                kx, ky = KING_TEXT_CLICK_POS
-            setattr(m, "KING_TEXT_CLICK_POS", (kx, ky))
-            setattr(m, "KING_TEXT_CLICK_INTERVAL", float(self.v["king_click_interval"].get()))
-            setattr(m, "KING_TEXT_CLICK_HOLD", float(self.v["king_click_hold"].get()))
             setattr(m, "auto_market_refresh_enabled", bool(self.v["auto_market_refresh_enabled"].get()))
             setattr(m, "auto_market_refresh_interval_hours",
                     float(self.v["auto_market_refresh_interval_hours"].get()))
@@ -6642,11 +6225,6 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
             setattr(m, "TELEGRAM_CHAT_ID", self.v["telegram_chat_id"].get().strip())
-            setattr(m, "PLUS8_IDLE_MESSAGE", self.v["plus8_idle_message"].get())
-            try:
-                setattr(m, "PLUS8_IDLE_MESSAGE_INTERVAL_MIN", int(self.v["plus8_idle_interval"].get()))
-            except Exception:
-                setattr(m, "PLUS8_IDLE_MESSAGE_INTERVAL_MIN", PLUS8_IDLE_MESSAGE_INTERVAL_MIN)
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
@@ -6705,15 +6283,11 @@ def _MERDIVEN_RUN_GUI():
                     adv[name] = var.get()
                 except Exception:
                     pass
-            if _save_full_config(data, path):
-                try:
-                    cfg_section = {k: v for k, v in data.items() if k not in ("gui", "advanced", "speed_config")}
-                    globals()['_GLOBAL_PATCH_CFG'] = cfg_section
-                except Exception:
-                    pass
-                self._msg(f"Ayarlar kaydedildi: {path}")
-            else:
-                self._msg(f"[GUI] Kayıt hatası: {path}")
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            self._msg(f"Ayarlar kaydedildi: {path}")
             self.apply_core()
 
         def _tick(self):
@@ -7015,28 +6589,20 @@ __yama_install_fast_anvil()
 # === [YAMA FAST GUI] start ===
 # Hız / Anvil / PREC 598 / Cache / QC ayar penceresi (tek pencerede)
 def _speed_cfg_path():
-    return _MERDIVEN_CFG_PATH()
+    try:
+        return PERSIST_PATH('speed_config.json')  # Uygulama verileri altında
+    except Exception:
+        import os
+        return os.path.join(os.path.expanduser('~'), 'speed_config.json')
 
 
 def load_speed_config():
     try:
         import json, os
         p = _speed_cfg_path()
-        full = _load_full_config(p)
-        speed_conf = full.get('speed_config', {}) or {}
-        legacy_path = None
-        try:
-            legacy_path = PERSIST_PATH('speed_config.json')
-        except Exception:
-            legacy_path = None
-        if not speed_conf and legacy_path and os.path.exists(legacy_path) and legacy_path != p:
-            try:
-                with open(legacy_path, 'r', encoding='utf-8') as f:
-                    speed_conf = json.load(f)
-                full['speed_config'] = speed_conf
-                _save_full_config(full, p)
-            except Exception:
-                pass
+        if not os.path.exists(p): return False
+        with open(p, 'r', encoding='utf-8') as f:
+            conf = json.load(f)
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -7044,8 +6610,7 @@ def load_speed_config():
                   'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
-            if k in speed_conf:
-                globals()[k] = speed_conf[k]
+            if k in conf: globals()[k] = conf[k]
         return True
     except Exception as e:
         print('[GUI] speed_config yüklenemedi:', e);
@@ -7054,10 +6619,13 @@ def load_speed_config():
 
 def save_speed_config():
     try:
-        import os
+        import json, os
         p = _speed_cfg_path()
-        full = _load_full_config(p)
-        conf = full.get('speed_config', {}) or {}
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                conf = json.load(f)
+        except Exception:
+            conf = {}
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -7066,12 +6634,12 @@ def save_speed_config():
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
             conf[k] = globals().get(k)
-        full['speed_config'] = conf
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        if _save_full_config(full, p):
-            print('[GUI] speed_config kaydedildi:', p);
-            return True
-        return False
+        with open(p, 'w', encoding='utf-8') as f:
+            import json;
+            json.dump(conf, f, indent=2, ensure_ascii=False)
+        print('[GUI] speed_config kaydedildi:', p);
+        return True
     except Exception as e:
         print('[GUI] speed_config kaydetme hata:', e);
         return False
@@ -7343,11 +6911,10 @@ def _yama_speed_cfg_path():
 def yama_load_extra_cfg():
     import json, os
     p = _yama_speed_cfg_path()
+    if not os.path.exists(p): return False
     try:
-        cfg_all = _load_full_config(p)
-        cfg = cfg_all.get('speed_config', {}) or {}
-        if not cfg:
-            return False
+        with open(p, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
         if 'ANVIL_HOVER_GUARD' in cfg: globals()['ANVIL_HOVER_GUARD'] = bool(cfg['ANVIL_HOVER_GUARD'])
         if 'ANVIL_MOUSE_PARK_POS' in cfg:
             try:
@@ -7367,20 +6934,22 @@ def yama_save_extra_cfg():
     import json, os
     p = _yama_speed_cfg_path()
     try:
-        cfg_all = _load_full_config(p)
-        cfg = cfg_all.get('speed_config', {}) or {}
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
         cfg.update({
             'ANVIL_HOVER_GUARD': bool(globals().get('ANVIL_HOVER_GUARD', True)),
             'ANVIL_MOUSE_PARK_POS': list(globals().get('ANVIL_MOUSE_PARK_POS', (5, 5))),
             'ANVIL_HOVER_CLEAR_SEC': float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.035)),
             'ROI_STALE_MS': int(globals().get('ROI_STALE_MS', 120)),
         })
-        cfg_all['speed_config'] = cfg
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        if _save_full_config(cfg_all, p):
-            print('[YAMA CFG] kaydedildi:', p);
-            return True
-        return False
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
+        print('[YAMA CFG] kaydedildi:', p);
+        return True
     except Exception as e:
         print('[YAMA CFG] save hata:', e);
         return False
