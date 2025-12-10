@@ -701,7 +701,11 @@ def _is_in_plus8_wait_state() -> bool:
             return False
     except Exception:
         return False
+    if not globals().get("BANK_FULL_FLAG", BANK_FULL_FLAG):
+        return False
     if globals().get("MODE", MODE) == "BANK_PLUS8":
+        return False
+    if globals().get("MODE", MODE) != "NORMAL":
         return False
     if globals().get("PLUS8_RESUME", PLUS8_RESUME):
         return False
@@ -2764,49 +2768,55 @@ def after_deposit_check_and_decide_mode(w):
         print(f"[BANK] 8.sayfa {empties} boş → NORMAL.")
         _set_mode_normal("8.sayfa boş")
         BANK_FULL_FLAG = False
+        _stop_plus8_wait_notifier()
         return "NORMAL"
 
     # 8. sayfa FULL
     print(f"[BANK] 8.sayfa full.")
     _set_mode_normal("8.sayfa full", reset_plus8_state=True)
     BANK_FULL_FLAG = True
+    stage_detail("+8 bekleme: Banka full, F tuşu için Telegram bildirimi aktif")
+    _start_plus8_wait_notifier()
 
-    if AUTO_BANK_PLUS8:
-        print(f"[BANK] {int(AUTO_BANK_PLUS8_DELAY)} sn içinde +8 döngüsü otomatik başlayacak "
-              f"(erken başlatmak için 'F', iptal için F12).")
-        deadline = time.time() + float(AUTO_BANK_PLUS8_DELAY)
-        while time.time() < deadline:
-            wait_if_paused();
-            watchdog_enforce()
-            if _kb_pressed('f'):
-                _set_mode_bank_plus8("F alındı")
-                print("[BANK] 'F' alındı → BANK_PLUS8.")
-                return "BANK_PLUS8"
-            if _kb_pressed('f12'):
-                print("[BANK] F12 alındı → ABORT.")
-                return "ABORT"
-            time.sleep(0.1)
-        _set_mode_bank_plus8("Süre doldu")
-        print("[BANK] Süre doldu → otomatik BANK_PLUS8.")
-        return "BANK_PLUS8"
-    else:
-        # Eski davranış: 'F' bekle, süre dolarsa NORMAL
-        print(f"[BANK] 'F' bekleniyor ({int(F_WAIT_TIMEOUT_SECONDS)} sn).")
-        deadline = time.time() + float(F_WAIT_TIMEOUT_SECONDS)
-        while time.time() < deadline:
-            wait_if_paused();
-            watchdog_enforce()
-            if _kb_pressed('f'):
-                _set_mode_bank_plus8("F alındı")
-                print("[BANK] 'F' alındı → BANK_PLUS8.")
-                return "BANK_PLUS8"
-            if _kb_pressed('f12'):
-                print("[BANK] F12 alındı → ABORT.")
-                return "ABORT"
-            time.sleep(0.1)
-        print("[BANK] Süre doldu → NORMAL.")
-        _set_mode_normal("F süresi doldu")
-        return "NORMAL"
+    try:
+        if AUTO_BANK_PLUS8:
+            print(f"[BANK] {int(AUTO_BANK_PLUS8_DELAY)} sn içinde +8 döngüsü otomatik başlayacak "
+                  f"(erken başlatmak için 'F', iptal için F12).")
+            deadline = time.time() + float(AUTO_BANK_PLUS8_DELAY)
+            while time.time() < deadline:
+                wait_if_paused();
+                watchdog_enforce()
+                if _kb_pressed('f'):
+                    _set_mode_bank_plus8("F alındı")
+                    print("[BANK] 'F' alındı → BANK_PLUS8.")
+                    return "BANK_PLUS8"
+                if _kb_pressed('f12'):
+                    print("[BANK] F12 alındı → ABORT.")
+                    return "ABORT"
+                time.sleep(0.1)
+            _set_mode_bank_plus8("Süre doldu")
+            print("[BANK] Süre doldu → otomatik BANK_PLUS8.")
+            return "BANK_PLUS8"
+        else:
+            # Eski davranış: 'F' bekle, süre dolarsa NORMAL
+            print(f"[BANK] 'F' bekleniyor ({int(F_WAIT_TIMEOUT_SECONDS)} sn).")
+            deadline = time.time() + float(F_WAIT_TIMEOUT_SECONDS)
+            while time.time() < deadline:
+                wait_if_paused();
+                watchdog_enforce()
+                if _kb_pressed('f'):
+                    _set_mode_bank_plus8("F alındı")
+                    print("[BANK] 'F' alındı → BANK_PLUS8.")
+                    return "BANK_PLUS8"
+                if _kb_pressed('f12'):
+                    print("[BANK] F12 alındı → ABORT.")
+                    return "ABORT"
+                time.sleep(0.1)
+            print("[BANK] Süre doldu → NORMAL.")
+            _set_mode_normal("F süresi doldu")
+            return "NORMAL"
+    finally:
+        _stop_plus8_wait_notifier()
 
 
 def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
@@ -3911,10 +3921,6 @@ def run_stairs_and_workflow(w):
         while True:
             wait_if_paused();
             watchdog_enforce()
-            if _is_in_plus8_wait_state():
-                _start_plus8_wait_notifier()
-            else:
-                _stop_plus8_wait_notifier()
             if _kb_pressed('f12'):
                 print("[LOOP] F12 iptal.")
                 return (False, False)
