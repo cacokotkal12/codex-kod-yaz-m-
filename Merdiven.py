@@ -3058,6 +3058,10 @@ def _item_sale_krallik_click(pos, hold):
     ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
     SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
     time.sleep(mouse_hizi / 2)
+    try:
+        stage_detail("Krallık yazısı tıklandı")
+    except Exception:
+        pass
 
 
 def _item_sale_run_cycle(w):
