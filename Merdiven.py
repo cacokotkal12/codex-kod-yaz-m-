@@ -4904,6 +4904,41 @@ def _serialize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {k: _serialize_value(v) for k, v in cfg.items()}
 
 
+@dataclass
+class AppConfig:
+    """Merdiven uygulamasının tekil konfigürasyon durumu."""
+
+    data: Dict[str, Any]
+    path: str
+
+
+def _extra_config_defaults() -> Dict[str, Any]:
+    """GUI/ hız/advanced varsayılanlarını tek yerde topla."""
+
+    defaults: Dict[str, Any] = {}
+    defaults.update(copy.deepcopy(globals().get("_YAMA_GUI_DEFAULTS", {})))
+    defaults.update({
+        "UPG_USE_FAST_MOUSE": bool(globals().get("UPG_USE_FAST_MOUSE", True)),
+        "UPG_MOUSE_HIZI": float(globals().get("UPG_MOUSE_HIZI", 0.015)),
+        "UPG_TUS_HIZI": float(globals().get("UPG_TUS_HIZI", 0.020)),
+        "ANVIL_CONFIRM_WAIT_MS": int(globals().get("ANVIL_CONFIRM_WAIT_MS", 45)),
+        "ROI_STALE_MS": int(globals().get("ROI_STALE_MS", 120)),
+        "PREC_Y598_TOWN_HARDLOCK": bool(globals().get("PREC_Y598_TOWN_HARDLOCK", True)),
+        "PREC_Y598_DBLCLICK": bool(globals().get("PREC_Y598_DBLCLICK", True)),
+        "PREC_Y598_CLICK_POS": tuple(globals().get("PREC_Y598_CLICK_POS", (200, 107))),
+        "PREC_Y598_CLICK_DELAY": float(globals().get("PREC_Y598_CLICK_DELAY", 0.1)),
+        "PREC_Y598_CLICK_COUNT": int(globals().get("PREC_Y598_CLICK_COUNT", 2)),
+        "ENABLE_YAMA_SLOT_CACHE": bool(globals().get("ENABLE_YAMA_SLOT_CACHE", True)),
+        "MAX_CACHE_SIZE_PER_SNAPSHOT": int(globals().get("MAX_CACHE_SIZE_PER_SNAPSHOT", 512)),
+        "YAMA_QC_ENABLE": bool(globals().get("YAMA_QC_ENABLE", True)),
+        "YAMA_QC_STD_MIN": float(globals().get("YAMA_QC_STD_MIN", 10.0)),
+        "YAMA_QC_EDGE_MIN": float(globals().get("YAMA_QC_EDGE_MIN", 0.002)),
+        "YAMA_QC_HEADER_RATIO": float(globals().get("YAMA_QC_HEADER_RATIO", 0.28)),
+        "GUI_AUTO_OPEN_SPEED": bool(globals().get("GUI_AUTO_OPEN_SPEED", False)),
+    })
+    return defaults
+
+
 def apply_config_values(cfg: Dict[str, Any]) -> None:
     g = globals()
     for field in _iter_config_fields():
@@ -4944,44 +4979,108 @@ _BASE_CONFIG_DEFAULTS = json.loads(
 
 
 # --- Config yükle/kaydet ---
-def load_config(path=None, defaults=None):
-    if path is None:
-        path = _MERDIVEN_CFG_PATH()
-    if defaults is None:
-        defaults = _schema_defaults(_BASE_CONFIG_DEFAULTS)
+def _merge_defaults(target: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    for k, v in defaults.items():
+        if k not in target:
+            target[k] = copy.deepcopy(v)
+        elif isinstance(v, dict) and isinstance(target.get(k), dict):
+            _merge_defaults(target[k], v)
+    return target
+
+
+def _apply_updates(target: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    for k, v in updates.items():
+        if isinstance(target.get(k), dict) and isinstance(v, dict):
+            _apply_updates(target[k], v)
+        else:
+            target[k] = copy.deepcopy(v)
+    return target
+
+
+def _build_config_defaults(overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    base = _schema_defaults(_BASE_CONFIG_DEFAULTS)
+    _merge_defaults(base, _extra_config_defaults())
+    if overrides:
+        _merge_defaults(base, overrides)
+    return base
+
+
+def load_config_from_disk(path: Optional[str] = None, defaults: Optional[Dict[str, Any]] = None) -> AppConfig:
+    path = path or _MERDIVEN_CFG_PATH()
+    defaults = _build_config_defaults(defaults)
+    cfg = copy.deepcopy(defaults)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if not os.path.exists(path):
-            with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
-            return defaults
-        with open(path, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
-
-        def _merge(a, b):
-            for k, v in b.items():
-                if k not in a:
-                    a[k] = v
-                elif isinstance(v, dict) and isinstance(a.get(k), dict):
-                    _merge(a[k], v)
-
-        _merge(cfg, defaults)
-        return cfg
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            _apply_updates(cfg, loaded)
+        else:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print('[PATCH][config] load error:', e)
-        return defaults
+        try:
+            log(f"[config] load error: {e}", 'error')
+        except Exception:
+            print('[PATCH][config] load error:', e)
+    return AppConfig(cfg, path)
+
+
+def save_config_to_disk(state: Optional[AppConfig] = None) -> bool:
+    global _APP_CONFIG
+    state = state or _APP_CONFIG
+    if state is None:
+        return False
+    tmp_path = state.path + '.tmp'
+    try:
+        os.makedirs(os.path.dirname(state.path), exist_ok=True)
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(_serialize_config(state.data), f, indent=2, ensure_ascii=False)
+        try:
+            os.replace(tmp_path, state.path)
+        except Exception:
+            # Windows'ta açık dosya kilidi varsa rename başarısız olabilir; doğrudan yazmayı dene.
+            with open(state.path, 'w', encoding='utf-8') as f:
+                json.dump(_serialize_config(state.data), f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        try:
+            log(f"[config] save error: {e}", 'error')
+        except Exception:
+            print('[PATCH][config] save error:', e)
+        return False
+
+
+def update_config_from_ui(updates: Dict[str, Any]) -> Dict[str, Any]:
+    global _APP_CONFIG
+    # Diskteki son değerleri baz al; eksikse defaults ile doldur.
+    base_state = load_config_from_disk(_APP_CONFIG.path if _APP_CONFIG else None)
+    _APP_CONFIG = base_state
+    merged = copy.deepcopy(base_state.data)
+    _apply_updates(merged, updates)
+    _APP_CONFIG.data = merged
+    return merged
+
+
+def load_config(path=None, defaults=None):
+    global _APP_CONFIG
+    _APP_CONFIG = load_config_from_disk(path, defaults)
+    return _APP_CONFIG.data
 
 
 def save_config(cfg, path=None):
-    if path is None:
-        path = _MERDIVEN_CFG_PATH()
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
-        return True
-    except Exception as e:
-        print('[PATCH][config] save error:', e)
-        return False
+    global _APP_CONFIG
+    if _APP_CONFIG is None:
+        _APP_CONFIG = AppConfig(cfg, path or _MERDIVEN_CFG_PATH())
+    else:
+        _APP_CONFIG.data = cfg
+        if path:
+            _APP_CONFIG.path = path
+    return save_config_to_disk(_APP_CONFIG)
+
+
+# Küresel tekil konfigürasyon durumu
+_APP_CONFIG: Optional[AppConfig] = None
 
 
 # --- Retry yardımcı ---
@@ -5122,9 +5221,11 @@ def _wrap_buy_items():
 
 # --- Başlat: config/load, dir, fixes ---
 try:
-    _GLOBAL_PATCH_CFG = load_config()
+    _APP_CONFIG = load_config_from_disk()
+    _GLOBAL_PATCH_CFG = _APP_CONFIG.data
 except Exception:
-    _GLOBAL_PATCH_CFG = {}
+    _GLOBAL_PATCH_CFG = _build_config_defaults()
+    _APP_CONFIG = AppConfig(_GLOBAL_PATCH_CFG, _MERDIVEN_CFG_PATH())
 try:
     apply_config_values(_GLOBAL_PATCH_CFG)
 except Exception:
@@ -5146,6 +5247,10 @@ try:
     _wrap_buy_items()
 except Exception:
     pass
+try:
+    atexit.register(lambda: save_config_to_disk())
+except Exception:
+    pass
 
 # --- main() sarmalama ---
 if 'main' in globals() and callable(globals()['main']):
@@ -5155,7 +5260,9 @@ if 'main' in globals() and callable(globals()['main']):
     def _patched_main(*a, **k):
         t0 = time.time()
         try:
-            globals()['_GLOBAL_PATCH_CFG'] = load_config()
+            _app_cfg = load_config_from_disk()
+            globals()['_APP_CONFIG'] = _app_cfg
+            globals()['_GLOBAL_PATCH_CFG'] = _app_cfg.data
         except Exception:
             pass
         try:
@@ -5866,20 +5973,6 @@ def _MERDIVEN_RUN_GUI():
 
             self.root.after(0, _apply)
 
-        def _on_close(self):
-            try:
-                if getattr(m, "_GUI_UPDATE_SALE_SLOT", None) is self._update_sale_slot:
-                    m._GUI_UPDATE_SALE_SLOT = None
-            except Exception:
-                pass
-            try:
-                queue_obj = getattr(self, "_stage_queue", None)
-                if queue_obj is not None and getattr(m, "_GUI_STAGE_DETAIL", None) is queue_obj.append:
-                    m._GUI_STAGE_DETAIL = None
-            except Exception:
-                m._GUI_STAGE_DETAIL = None
-            self.root.destroy()
-
         # ---- set_stage hook'u GUI'ye bağla ----
         def _hook_stage(self):
             # Thread-safe: set_stage -> kuyruk, Tk güncellemesi ana thread
@@ -6327,41 +6420,37 @@ def _MERDIVEN_RUN_GUI():
         def _apply_all_adv(self):
             import json, os
             path = self._cfg()
-            # Şema garantisi
+            updates = self._collect_ui_config()
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {}
-            except Exception:
-                data = {}
-            if 'gui' not in data or not isinstance(data.get('gui'), dict): data['gui'] = {}
-            if 'advanced' not in data or not isinstance(data.get('advanced'), dict): data['advanced'] = {}
-            adv = data['advanced']
-            # Değerleri topla
-            for name, var in getattr(self, 'adv_rows', []):
-                try:
-                    adv[name] = var.get()
-                except Exception:
-                    pass
-            # Atomik kaydet
-            tmp = path + '.tmp'
-            try:
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
-                self._msg(f'Ayarlar kaydedildi: {path}')
+                update_config_from_ui(updates)
+                ok = save_config_to_disk()
             except Exception as e:
                 self._msg(f'[GUI] Kaydetme hatası: {e}')
-                try:
-                    if os.path.exists(tmp): os.remove(tmp)
-                except:
-                    pass
+                ok = False
+            if ok:
+                self._msg(f'Ayarlar kaydedildi: {path}')
+            else:
+                self._msg(f'[GUI] Kaydetme hatası: {path}')
             # Uygula
             try:
                 self.apply_core()
                 self._msg('Tüm gelişmiş ayarlar uygulandı.')
             except Exception as e:
                 self._msg(f'[GUI] apply_core hatası: {e}')
+
+        def _collect_ui_config(self):
+            data = {"gui": {}, "advanced": {}}
+            for k, var in self.v.items():
+                try:
+                    data["gui"][k] = var.get()
+                except Exception:
+                    pass
+            for name, var in getattr(self, 'adv_rows', []):
+                try:
+                    data["advanced"][name] = var.get()
+                except Exception:
+                    pass
+            return data
 
         def start(self):
             if getattr(self, "thr", None) and self.thr.is_alive(): self._msg("Zaten çalışıyor."); return
@@ -6424,10 +6513,15 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                with open(self._cfg(), "r", encoding="utf-8") as f:
-                    j = json.load(f)
-            except:
-                j = {}
+                state = globals().get('_APP_CONFIG') or load_config_from_disk()
+                globals()['_APP_CONFIG'] = state
+                j = state.data
+            except Exception:
+                try:
+                    with open(self._cfg(), "r", encoding="utf-8") as f:
+                        j = json.load(f)
+                except Exception:
+                    j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if k in self.v:
@@ -6553,34 +6647,35 @@ def _MERDIVEN_RUN_GUI():
         def save(self):
             import json, os
             path = self._cfg()
-            data = {"gui": {}, "advanced": {}}
+            updates = self._collect_ui_config()
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {"gui": {}, "advanced": {}}
-                if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
-                if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
+                update_config_from_ui(updates)
+                ok = save_config_to_disk()
             except Exception:
-                data = {"gui": {}, "advanced": {}}
-            for k, var in self.v.items():
-                try:
-                    data["gui"][k] = var.get()
-                except Exception:
-                    pass
-            adv = data.get("advanced")
-            if not isinstance(adv, dict): adv = {}
-            data["advanced"] = adv
-            for name, var in self.adv_rows:
-                try:
-                    adv[name] = var.get()
-                except Exception:
-                    pass
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-            self._msg(f"Ayarlar kaydedildi: {path}")
+                ok = False
+            if ok:
+                self._msg(f"Ayarlar kaydedildi: {path}")
+            else:
+                self._msg(f"[GUI] Kaydetme hatası: {path}")
             self.apply_core()
+
+        def _on_close(self):
+            try:
+                self.save()
+            except Exception:
+                pass
+            try:
+                if getattr(m, "_GUI_UPDATE_SALE_SLOT", None) is self._update_sale_slot:
+                    m._GUI_UPDATE_SALE_SLOT = None
+            except Exception:
+                pass
+            try:
+                queue_obj = getattr(self, "_stage_queue", None)
+                if queue_obj is not None and getattr(m, "_GUI_STAGE_DETAIL", None) is queue_obj.append:
+                    m._GUI_STAGE_DETAIL = None
+            except Exception:
+                m._GUI_STAGE_DETAIL = None
+            self.root.destroy()
 
         def _tick(self):
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
@@ -6881,20 +6976,14 @@ __yama_install_fast_anvil()
 # === [YAMA FAST GUI] start ===
 # Hız / Anvil / PREC 598 / Cache / QC ayar penceresi (tek pencerede)
 def _speed_cfg_path():
-    try:
-        return PERSIST_PATH('speed_config.json')  # Uygulama verileri altında
-    except Exception:
-        import os
-        return os.path.join(os.path.expanduser('~'), 'speed_config.json')
+    return _MERDIVEN_CFG_PATH()
 
 
 def load_speed_config():
     try:
-        import json, os
-        p = _speed_cfg_path()
-        if not os.path.exists(p): return False
-        with open(p, 'r', encoding='utf-8') as f:
-            conf = json.load(f)
+        state = _APP_CONFIG or load_config_from_disk()
+        conf = state.data
+        defaults = _extra_config_defaults()
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -6902,7 +6991,10 @@ def load_speed_config():
                   'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
-            if k in conf: globals()[k] = conf[k]
+            if k in conf:
+                globals()[k] = conf[k]
+            elif k in defaults:
+                globals()[k] = defaults[k]
         return True
     except Exception as e:
         print('[GUI] speed_config yüklenemedi:', e);
@@ -6911,13 +7003,7 @@ def load_speed_config():
 
 def save_speed_config():
     try:
-        import json, os
-        p = _speed_cfg_path()
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                conf = json.load(f)
-        except Exception:
-            conf = {}
+        updates = {}
         for k in ('UPG_USE_FAST_MOUSE', 'UPG_MOUSE_HIZI', 'UPG_TUS_HIZI',
                   'ANVIL_CONFIRM_WAIT_MS', 'ROI_STALE_MS',
                   'PREC_Y598_TOWN_HARDLOCK', 'PREC_Y598_DBLCLICK', 'PREC_Y598_CLICK_POS',
@@ -6925,13 +7011,14 @@ def save_speed_config():
                   'ENABLE_YAMA_SLOT_CACHE', 'MAX_CACHE_SIZE_PER_SNAPSHOT',
                   'YAMA_QC_ENABLE', 'YAMA_QC_STD_MIN', 'YAMA_QC_EDGE_MIN', 'YAMA_QC_HEADER_RATIO',
                   'GUI_AUTO_OPEN_SPEED'):
-            conf[k] = globals().get(k)
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, 'w', encoding='utf-8') as f:
-            import json;
-            json.dump(conf, f, indent=2, ensure_ascii=False)
-        print('[GUI] speed_config kaydedildi:', p);
-        return True
+            updates[k] = globals().get(k)
+        update_config_from_ui(updates)
+        ok = save_config_to_disk()
+        if ok:
+            print('[GUI] speed_config kaydedildi:', _speed_cfg_path());
+        else:
+            print('[GUI] Kayıt hatası: speed_config kaydedilemedi')
+        return ok
     except Exception as e:
         print('[GUI] speed_config kaydetme hata:', e);
         return False
@@ -7406,15 +7493,17 @@ def _y_coerce_tuple(val):
 def _y_load_store():
     def _load():
         try:
-            return load_config()
+            state = _APP_CONFIG or load_config_from_disk()
+            return copy.deepcopy(state.data)
         except Exception as e:
             print('[GUI] config yüklenemedi:', e)
-            return _schema_defaults(_BASE_CONFIG_DEFAULTS)
+            return _build_config_defaults()
 
     def _save(data):
         try:
             cfg = data if isinstance(data, dict) else {}
-            ok = save_config(cfg)
+            update_config_from_ui(cfg)
+            ok = save_config_to_disk()
             if ok:
                 print('[GUI] Ayarlar kaydedildi:', _MERDIVEN_CFG_PATH())
             else:
@@ -7728,114 +7817,118 @@ def _y_build_and_attach_gui(root):
     btns = ttk.Frame(outer);
     btns.pack(fill="x", pady=6)
 
-    def _save_clicked():
-        last_field = None
-        try:
-            general_updates = {}
-            for field in _iter_config_fields():
-                var = general_vars.get(field.key)
-                if not var:
-                    continue
-                last_field = field
-                if field.field_type == "bool":
-                    value = bool(var.get())
-                else:
-                    raw = var.get()
-                    text_val = str(raw).strip()
-                    if text_val == "":
-                        if field.field_type == "str":
-                            value = ""
-                        elif field.field_type in ("list_str", "list_pairs"):
-                            value = []
-                        else:
-                            general_updates[field.key] = _serialize_value(field.default)
-                            continue
-                    else:
-                        value = _parse_field_value(field, text_val)
-                general_updates[field.key] = _serialize_value(value)
-
-            last_field = None
-            new = dict(general_updates)
-            new.update({
-                "BUY_MODE": buy_mode.get().strip(),
-                "BUY_TURNS": _y_to_int(buy_turns.get(), 2),
-                "NPC_MENU_PAGE2_POS": _y_coerce_tuple(page2_pos.get()),
-                "NPC_CONTEXT_RIGHTCLICK_POS": _y_coerce_tuple(ctx_pos.get()),
-                "NPC_OPEN_TEXT_TEMPLATE_PATH": tmpl_path.get().strip(),
-                "NPC_OPEN_MATCH_THRESHOLD": _y_to_float(match_thr.get(), 0.7),
-                "NPC_OPEN_FIND_TIMEOUT": _y_to_float(find_to.get(), 4.0),
-                "NPC_OPEN_SCALES": [_y_to_float(s, 1.0) for s in str(scales.get()).split(",") if s.strip()],
-
-                "SCROLL_VENDOR_MID_POS": _y_coerce_tuple(mid_pos.get()),
-                "SCROLL_ALIM_ADET": _y_to_int(low_adet.get(), 2),
-                "SCROLL_MID_ALIM_ADET": _y_to_int(mid_adet.get(), 2),
-
-                "TARGET_NPC_X": _y_to_int(target_x.get(), 766),
-                "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(), 6.0),
-                "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(), 795),
-                "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(), 0.35),
-                "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(), 814),
-                "NPC_POSTBUY_SECOND_A_DURATION": _y_to_float(a2.get(), 0.2),
-                "NPC_POSTBUY_FINAL_W_DURATION": _y_to_float(wf.get(), 0.8),
-                "TARGET_Y_AFTER_TURN": _y_to_int(ty.get(), 597),
-                "TURN_LEFT_SEC": _y_to_float(tl.get(), 1.36),
-                "NPC_GIDIS_SURESI": _y_to_float(ngs.get(), 5.0),
-
-                "BASMA_HAKKI": _y_to_int(basmahk.get(), 31),
-                "SCROLL_POS": _y_coerce_tuple(scpos.get()),
-                "UPGRADE_BTN_POS": _y_coerce_tuple(upbtn.get()),
-                "CONFIRM_BTN_POS": _y_coerce_tuple(confbtn.get()),
-                "UPG_STEP_DELAY": _y_to_float(stepd.get(), 0.10),
-                "SCROLL_PANEL_REOPEN_MAX": _y_to_int(scmax.get(), 10),
-                "SCROLL_PANEL_REOPEN_DELAY": _y_to_float(scdel.get(), 0.10),
-
-                "EMPTY_SLOT_TEMPLATE_PATH": estpl.get().strip(),
-                "EMPTY_SLOT_MATCH_THRESHOLD": _y_to_float(esthr.get(), 0.85),
-                "FALLBACK_MEAN_THRESHOLD": _y_to_float(fbmean.get(), 55.0),
-                "FALLBACK_EDGE_DENSITY_THRESHOLD": _y_to_float(fbedge.get(), 0.030),
-                "EMPTY_SLOT_THRESHOLD": _y_to_int(estcnt.get(), 24),
-
-                "ROI_STALE_MS": _y_to_int(roi1.get(), 120),
-                "UPG_ROI_STALE_MS": _y_to_int(roi2.get(), 120),
-                "ENABLE_YAMA_SLOT_CACHE": str(ycache.get()) == "True",
-                "MAX_CACHE_SIZE_PER_SNAPSHOT": _y_to_int(maxss.get(), 512),
-
-                "AUTO_SPEED_PROFILE": auto.get().strip(),
-                "AUTO_TUNE_INTERVAL": _y_to_float(tune.get(), 30.0),
-                "SPEED_PROFILE": forced.get().strip(),
-
-                "PLUS7_START_FROM_TURN_AFTER_PURCHASE": _y_to_int(pstart.get(), 4),
-                "GLOBAL_CYCLE": _y_to_int(gcyc.get(), 1),
-                "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(), 1),
-
-                "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(), 1.2),
-            })
-
-            fsteps = []
-            lsteps = []
-            for i, (fx, fy, fc, fb) in enumerate(f_vars, 1):
-                fsteps.append((_y_to_int(fx.get(), 671), _y_to_int(fy.get(), 459), _y_to_int(fc.get(), 1), fb.get()))
-            for i, (lx, ly, lc, lb) in enumerate(l_vars, 1):
-                lsteps.append((_y_to_int(lx.get(), 671), _y_to_int(ly.get(), 459), _y_to_int(lc.get(), 1), lb.get()))
-            new["FABRIC_STEPS"] = fsteps
-            new["LINEN_STEPS"] = lsteps
-
-            data.update(new)
-            save(data)
-            messagebox and messagebox.showinfo("Kaydedildi", "Ayarlar kaydedildi.")
-        except Exception as e:
-            if last_field is not None:
-                label = getattr(last_field, 'label', last_field.key)
-                err = f"{label}: {e}"
+    def _collect_updates():
+        general_updates = {}
+        for field in _iter_config_fields():
+            var = general_vars.get(field.key)
+            if not var:
+                continue
+            if field.runtime_only:
+                continue
+            if field.field_type == "bool":
+                value = bool(var.get())
             else:
-                err = str(e)
-            print("[GUI] Kayıt hata:", err)
-            messagebox and messagebox.showerror("Hata", err)
+                raw = var.get()
+                text_val = str(raw).strip()
+                if text_val == "":
+                    if field.field_type == "str":
+                        value = ""
+                    elif field.field_type in ("list_str", "list_pairs"):
+                        value = []
+                    else:
+                        general_updates[field.key] = _serialize_value(field.default)
+                        continue
+                else:
+                    value = _parse_field_value(field, text_val)
+            general_updates[field.key] = _serialize_value(value)
+
+        new = dict(general_updates)
+        new.update({
+            "BUY_MODE": buy_mode.get().strip(),
+            "BUY_TURNS": _y_to_int(buy_turns.get(), 2),
+            "NPC_MENU_PAGE2_POS": _y_coerce_tuple(page2_pos.get()),
+            "NPC_CONTEXT_RIGHTCLICK_POS": _y_coerce_tuple(ctx_pos.get()),
+            "NPC_OPEN_TEXT_TEMPLATE_PATH": tmpl_path.get().strip(),
+            "NPC_OPEN_MATCH_THRESHOLD": _y_to_float(match_thr.get(), 0.7),
+            "NPC_OPEN_FIND_TIMEOUT": _y_to_float(find_to.get(), 4.0),
+            "NPC_OPEN_SCALES": [_y_to_float(s, 1.0) for s in str(scales.get()).split(",") if s.strip()],
+
+            "SCROLL_VENDOR_MID_POS": _y_coerce_tuple(mid_pos.get()),
+            "SCROLL_ALIM_ADET": _y_to_int(low_adet.get(), 2),
+            "SCROLL_MID_ALIM_ADET": _y_to_int(mid_adet.get(), 2),
+
+            "TARGET_NPC_X": _y_to_int(target_x.get(), 766),
+            "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(), 6.0),
+            "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(), 795),
+            "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(), 0.35),
+            "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(), 814),
+            "NPC_POSTBUY_SECOND_A_DURATION": _y_to_float(a2.get(), 0.2),
+            "NPC_POSTBUY_FINAL_W_DURATION": _y_to_float(wf.get(), 0.8),
+            "TARGET_Y_AFTER_TURN": _y_to_int(ty.get(), 597),
+            "TURN_LEFT_SEC": _y_to_float(tl.get(), 1.36),
+            "NPC_GIDIS_SURESI": _y_to_float(ngs.get(), 5.0),
+
+            "BASMA_HAKKI": _y_to_int(basmahk.get(), 31),
+            "SCROLL_POS": _y_coerce_tuple(scpos.get()),
+            "UPGRADE_BTN_POS": _y_coerce_tuple(upbtn.get()),
+            "CONFIRM_BTN_POS": _y_coerce_tuple(confbtn.get()),
+            "UPG_STEP_DELAY": _y_to_float(stepd.get(), 0.10),
+            "SCROLL_PANEL_REOPEN_MAX": _y_to_int(scmax.get(), 10),
+            "SCROLL_PANEL_REOPEN_DELAY": _y_to_float(scdel.get(), 0.10),
+
+            "EMPTY_SLOT_TEMPLATE_PATH": estpl.get().strip(),
+            "EMPTY_SLOT_MATCH_THRESHOLD": _y_to_float(esthr.get(), 0.85),
+            "FALLBACK_MEAN_THRESHOLD": _y_to_float(fbmean.get(), 55.0),
+            "FALLBACK_EDGE_DENSITY_THRESHOLD": _y_to_float(fbedge.get(), 0.030),
+            "EMPTY_SLOT_THRESHOLD": _y_to_int(estcnt.get(), 24),
+
+            "ROI_STALE_MS": _y_to_int(roi1.get(), 120),
+            "UPG_ROI_STALE_MS": _y_to_int(roi2.get(), 120),
+            "ENABLE_YAMA_SLOT_CACHE": str(ycache.get()) == "True",
+            "MAX_CACHE_SIZE_PER_SNAPSHOT": _y_to_int(maxss.get(), 512),
+
+            "AUTO_SPEED_PROFILE": auto.get().strip(),
+            "AUTO_TUNE_INTERVAL": _y_to_float(tune.get(), 30.0),
+            "SPEED_PROFILE": forced.get().strip(),
+
+            "PLUS7_START_FROM_TURN_AFTER_PURCHASE": _y_to_int(pstart.get(), 4),
+            "GLOBAL_CYCLE": _y_to_int(gcyc.get(), 1),
+            "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(), 1),
+
+            "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(), 1.2),
+        })
+
+        fsteps = []
+        lsteps = []
+        for i, (fx, fy, fc, fb) in enumerate(f_vars, 1):
+            fsteps.append((_y_to_int(fx.get(), 671), _y_to_int(fy.get(), 459), _y_to_int(fc.get(), 1), fb.get()))
+        for i, (lx, ly, lc, lb) in enumerate(l_vars, 1):
+            lsteps.append((_y_to_int(lx.get(), 671), _y_to_int(ly.get(), 459), _y_to_int(lc.get(), 1), lb.get()))
+        new["FABRIC_STEPS"] = fsteps
+        new["LINEN_STEPS"] = lsteps
+        return new
+
+    def _save_clicked():
+        try:
+            updates = _collect_updates()
+            merged = update_config_from_ui(updates)
+            data.clear(); data.update(merged)
+            ok = save_config_to_disk()
+            if ok:
+                messagebox and messagebox.showinfo("Kaydedildi", "Ayarlar kaydedildi.")
+            else:
+                messagebox and messagebox.showerror("Hata", "Ayarlar kaydedilemedi.")
+        except Exception as e:
+            print("[GUI] Kayıt hata:", e)
+            messagebox and messagebox.showerror("Hata", str(e))
 
     def _apply_clicked():
         # Global değişkenlere uygula + listeleri rebuild et + wrapper'ları hazırla
         try:
-            cfg = data  # kaydedilmiş (son)
+            updates = _collect_updates()
+            cfg = update_config_from_ui(updates)
+            data.clear(); data.update(cfg)
+            save_config_to_disk()
             apply_config_values(cfg)
             g = globals()
             for k, v in cfg.items():
