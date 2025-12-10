@@ -396,6 +396,10 @@ ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
 KRALLIK_URL = os.getenv("KRALLIK_URL", "https://krallik.app")
+KRALLIK_CLICK_X = 0
+KRALLIK_CLICK_Y = 0
+KRALLIK_TIKLAMA_ARALIGI = 0.0
+KRALLIK_TIKLAMA_SURESI = 0.05
 
 _GUI_UPDATE_SALE_SLOT = None
 
@@ -3027,6 +3031,35 @@ def _item_sale_handle_bank(w):
     return True
 
 
+def _item_sale_krallik_click(pos, hold):
+    if not pos:
+        return
+    try:
+        x, y = int(pos[0]), int(pos[1])
+    except Exception:
+        return
+    if x == 0 and y == 0:
+        return
+    try:
+        hold_s = max(0.0, float(hold))
+    except Exception:
+        hold_s = 0.0
+
+    if not pause_point():
+        return
+    mouse_move(x, y)
+    extra = ctypes.c_ulong(0)
+    ii_ = Input_I()
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, ctypes.pointer(extra))
+    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+    time.sleep(hold_s)
+    if _abort_requested():
+        return
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
+    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+    time.sleep(mouse_hizi / 2)
+
+
 def _item_sale_run_cycle(w):
     global _AUTO_MARKET_LAST_REFRESH_TS
     thresholds = [
@@ -3043,6 +3076,26 @@ def _item_sale_run_cycle(w):
         interval = ITEM_SALE_SLOT_SCAN_INTERVAL
     if interval < 1.0:
         interval = 1.0
+
+    try:
+        krallik_interval = max(0.0, float(globals().get("KRALLIK_TIKLAMA_ARALIGI", KRALLIK_TIKLAMA_ARALIGI)))
+    except Exception:
+        krallik_interval = max(0.0, float(KRALLIK_TIKLAMA_ARALIGI))
+    try:
+        krallik_pos = (
+            int(globals().get("KRALLIK_CLICK_X", KRALLIK_CLICK_X)),
+            int(globals().get("KRALLIK_CLICK_Y", KRALLIK_CLICK_Y)),
+        )
+    except Exception:
+        krallik_pos = None
+    try:
+        krallik_hold = float(globals().get("KRALLIK_TIKLAMA_SURESI", KRALLIK_TIKLAMA_SURESI))
+    except Exception:
+        krallik_hold = KRALLIK_TIKLAMA_SURESI
+
+    next_krallik_click = None
+    if krallik_interval > 0 and krallik_pos is not None and not (krallik_pos[0] == 0 and krallik_pos[1] == 0):
+        next_krallik_click = time.time() + krallik_interval
 
     set_stage("ITEM_SATIS_SLOT_TAKIP")
     next_scan = 0.0
@@ -3062,6 +3115,18 @@ def _item_sale_run_cycle(w):
         nonlocal inv_open
         if inv_open:
             inv_open = False
+
+    def _maybe_krallik_click(now_ts):
+        nonlocal next_krallik_click
+        if next_krallik_click is None:
+            return
+        if now_ts < next_krallik_click:
+            return
+        try:
+            _item_sale_krallik_click(krallik_pos, krallik_hold)
+        except Exception as exc:
+            print(f"[ITEM_SATIS] Krallık tıklama hata: {exc}")
+        next_krallik_click = time.time() + krallik_interval
 
     def _try_auto_market_refresh() -> bool:
         nonlocal next_scan
@@ -3123,6 +3188,7 @@ def _item_sale_run_cycle(w):
 
         open_inventory()
         now = time.time()
+        _maybe_krallik_click(now)
         if now < next_scan:
             time.sleep(0.2)
             continue
@@ -4574,6 +4640,18 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("TELEGRAM_CHAT_ID", "Telegram Chat ID", "Item Satış", "str",
                 _cfg_default("TELEGRAM_CHAT_ID", ""),
                 "Telegram sohbet ID'si."),
+    ConfigField("KRALLIK_CLICK_X", "Krallık tıklama X", "Item Satış", "int",
+                _cfg_default("KRALLIK_CLICK_X", 0),
+                "Krallık yazısı için tıklanacak X koordinatı."),
+    ConfigField("KRALLIK_CLICK_Y", "Krallık tıklama Y", "Item Satış", "int",
+                _cfg_default("KRALLIK_CLICK_Y", 0),
+                "Krallık yazısı için tıklanacak Y koordinatı."),
+    ConfigField("KRALLIK_TIKLAMA_ARALIGI", "Krallık tıklama aralığı", "Item Satış", "float",
+                _cfg_default("KRALLIK_TIKLAMA_ARALIGI", 0.0),
+                "Krallık yazısı tıklama periyodu (sn)."),
+    ConfigField("KRALLIK_TIKLAMA_SURESI", "Krallık tıklama süresi", "Item Satış", "float",
+                _cfg_default("KRALLIK_TIKLAMA_SURESI", 0.05),
+                "Krallık tıklamasının basılı kalma süresi (sn)."),
 ]
 
 
@@ -5583,6 +5661,12 @@ def _MERDIVEN_RUN_GUI():
                     value=bool(getattr(m, "ITEM_SALE_BANK_NOTIFY", ITEM_SALE_BANK_NOTIFY))),
                 "sale_bank_message": tk.StringVar(
                     value=str(getattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))),
+                "krallik_click_x": tk.IntVar(value=int(getattr(m, "KRALLIK_CLICK_X", KRALLIK_CLICK_X))),
+                "krallik_click_y": tk.IntVar(value=int(getattr(m, "KRALLIK_CLICK_Y", KRALLIK_CLICK_Y))),
+                "krallik_click_interval": tk.DoubleVar(
+                    value=float(getattr(m, "KRALLIK_TIKLAMA_ARALIGI", KRALLIK_TIKLAMA_ARALIGI))),
+                "krallik_click_hold": tk.DoubleVar(
+                    value=float(getattr(m, "KRALLIK_TIKLAMA_SURESI", KRALLIK_TIKLAMA_SURESI))),
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
             }
@@ -5890,7 +5974,26 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
                 row=1, column=1, sticky="w", padx=4, pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=6, column=0, columnspan=2,
+            lf_krallik = ttk.LabelFrame(f_sale, text="Krallık Yazısı Tıklama")
+            lf_krallik.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_krallik, text="X Koordinatı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_x"], width=8).grid(row=0, column=1,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_krallik, text="Y Koordinatı:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_y"], width=8).grid(row=1, column=1,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_krallik, text="Tıklama Aralığı (sn):").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_interval"], width=8).grid(row=0, column=3,
+                                                                                               sticky="w", padx=4,
+                                                                                               pady=2)
+            ttk.Label(lf_krallik, text="Tıklama Süresi (sn):").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_hold"], width=8).grid(row=1, column=3,
+                                                                                           sticky="w", padx=4,
+                                                                                           pady=2)
+
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=7, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
@@ -6238,6 +6341,10 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "ITEM_SALE_EXIT_DELAY_MAX", float(self.v["sale_exit_delay_max"].get()))
             setattr(m, "ITEM_SALE_BANK_NOTIFY", bool(self.v["sale_bank_notify"].get()))
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
+            setattr(m, "KRALLIK_CLICK_X", int(self.v["krallik_click_x"].get()))
+            setattr(m, "KRALLIK_CLICK_Y", int(self.v["krallik_click_y"].get()))
+            setattr(m, "KRALLIK_TIKLAMA_ARALIGI", float(self.v["krallik_click_interval"].get()))
+            setattr(m, "KRALLIK_TIKLAMA_SURESI", float(self.v["krallik_click_hold"].get()))
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
             setattr(m, "TELEGRAM_CHAT_ID", self.v["telegram_chat_id"].get().strip())
             # buy mode + adetler
