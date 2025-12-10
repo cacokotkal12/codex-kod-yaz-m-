@@ -392,6 +392,8 @@ PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+PLUS8_WAIT_MESSAGE = ""
+PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
@@ -660,6 +662,7 @@ def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
 def _set_mode_bank_plus8(reason: str = None):
     """MODE'u BANK_PLUS8 yapar ve yeniden girişlerde devam için bayrağı ayarlar."""
     global MODE, PLUS8_RESUME
+    _stop_plus8_wait_notifier()
     MODE = "BANK_PLUS8"
     PLUS8_RESUME = True
     if reason:
@@ -672,6 +675,83 @@ def _set_mode_bank_plus7(reason: str = None):
     MODE = "BANK_PLUS7"
     if reason:
         print(f"[MODE] BANK_PLUS7 ({reason})")
+
+
+# ---- +8 bekleme Telegram bildirimi ----
+_PLUS8_WAIT_STOP = threading.Event()
+_PLUS8_WAIT_THREAD = None
+
+
+def _plus8_wait_feature_enabled() -> bool:
+    try:
+        interval = float(globals().get("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 0))
+    except Exception:
+        interval = 0
+    msg = str(globals().get("PLUS8_WAIT_MESSAGE", "") or "").strip()
+    return bool(msg) and interval > 0
+
+
+def _is_in_plus8_wait_state() -> bool:
+    if not _plus8_wait_feature_enabled():
+        return False
+    if _abort_requested():
+        return False
+    try:
+        if str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper() != "ITEM_BASMA":
+            return False
+    except Exception:
+        return False
+    if globals().get("MODE", MODE) == "BANK_PLUS8":
+        return False
+    if globals().get("PLUS8_RESUME", PLUS8_RESUME):
+        return False
+    if _kb_pressed('f'):
+        return False
+    return True
+
+
+def _plus8_wait_notifier_loop():
+    while not _PLUS8_WAIT_STOP.is_set():
+        try:
+            interval_min = float(globals().get("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 0))
+        except Exception:
+            interval_min = 0
+        if interval_min <= 0 or not _is_in_plus8_wait_state():
+            _PLUS8_WAIT_STOP.wait(1.0)
+            continue
+        if _PLUS8_WAIT_STOP.wait(interval_min * 60):
+            break
+        if not _is_in_plus8_wait_state():
+            continue
+        msg = str(globals().get("PLUS8_WAIT_MESSAGE", "") or "").strip()
+        if not msg:
+            continue
+        for _ in range(3):
+            if _PLUS8_WAIT_STOP.is_set() or not _is_in_plus8_wait_state():
+                break
+            send_telegram_message(msg)
+            time.sleep(0.4)
+
+
+def _start_plus8_wait_notifier():
+    global _PLUS8_WAIT_THREAD
+    if _PLUS8_WAIT_THREAD and _PLUS8_WAIT_THREAD.is_alive():
+        return
+    if not _plus8_wait_feature_enabled():
+        return
+    _PLUS8_WAIT_STOP.clear()
+    t = threading.Thread(target=_plus8_wait_notifier_loop, daemon=True)
+    _PLUS8_WAIT_THREAD = t
+    t.start()
+
+
+def _stop_plus8_wait_notifier():
+    global _PLUS8_WAIT_THREAD
+    _PLUS8_WAIT_STOP.set()
+    thr = _PLUS8_WAIT_THREAD
+    if thr and thr.is_alive():
+        thr.join(timeout=0.2)
+    _PLUS8_WAIT_THREAD = None
 
 # ---- LOW scroll genel reopen limiti (anvil) ----
 SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 5
@@ -3827,95 +3907,123 @@ def run_stairs_and_workflow(w):
     set_stage("WORKFLOW_LOOP")
     print(f">>> Akış başlıyor (tur={GLOBAL_CYCLE}, +7_kontrol_turu>={NEXT_PLUS7_CHECK_AT})")
 
-    while True:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'):
-            print("[LOOP] F12 iptal.")
-            return (False, False)
-
-        if NEED_STAIRS_REALIGN:
-            set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
-            TOWN_LOCKED = False
-            town_until_valid_x(w)
-            ascend_stairs_to_top(w)
-            continue
-
-        if keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME:
-            _set_mode_bank_plus8("Klavye/Resume")
-            print("[KAMPANYA] +8 modu (F/Resume).")
-            if not BANK_OPEN:
-                if not move_to_769_and_turn_from_top(w):
-                    print("[KAMPANYA] Banka yok; town & retry.")
-                    send_town_command()
-                    continue
-            run_bank_plus8_cycle(w, bank_is_open=BANK_OPEN)
-            print("[KAMPANYA] +8 modu tamam → NORMAL.")
-            _set_mode_normal("BANK_PLUS8 döngü tamam")
-            continue
-
-        try:
-            x, y = read_coordinates(w)
-        except Exception:
-            x, y = None, None
-        if x is None or y is None:
-            continue
-
-        if x not in VALID_X:
-            print(f"[CHECK] X={x} geçersiz → town.")
-            send_town_command()
-            continue
-
-        start_x = x
-        ascend_stairs_to_top(w)
-
-        press_key(SC_I);
-        release_key(SC_I);
-        time.sleep(0.6)
-        empty_slots = count_empty_slots("INV")
-
-        do_plus7 = FORCE_PLUS7_ONCE or (GLOBAL_CYCLE >= NEXT_PLUS7_CHECK_AT)
-        plus7_count = -1
-        if do_plus7:
-            if FORCE_PLUS7_ONCE:
-                print("[Karar] Bu tur +7 taraması **ZORUNLU**.")
+    try:
+        while True:
+            wait_if_paused();
+            watchdog_enforce()
+            if _is_in_plus8_wait_state():
+                _start_plus8_wait_notifier()
             else:
-                print("[Karar] Bu tur +7 taraması AKTİF.")
-            plus7_count = count_inventory_plusN(w, 7, "INV")
-            FORCE_PLUS7_ONCE = False
-        else:
-            print("[Karar] Bu tur +7 taraması PASİF.")
-
-        press_key(SC_I);
-        release_key(SC_I);
-        time.sleep(0.3)
-
-        if do_plus7 and plus7_count >= 3:
-            print("[Karar] Üzerinde ≥3 +7 → STORAGE akışı.")
-            if move_to_769_and_turn_from_top(w):
-                deposit_inventory_plusN_to_bank(w, 7)
-                md = after_deposit_check_and_decide_mode(w)
-                if md == "BANK_PLUS8":
-                    run_bank_plus8_cycle(w, bank_is_open=True)
-                    ensure_ui_closed()
-                    return (True, False)
-                elif md == "ABORT":
-                    return (False, False)
-                else:
-                    ensure_ui_closed()
-                    return (True, False)
-            else:
+                _stop_plus8_wait_notifier()
+            if _kb_pressed('f12'):
+                print("[LOOP] F12 iptal.")
                 return (False, False)
 
-        if empty_slots >= EMPTY_SLOT_THRESHOLD:
-            print("[Karar] Boş slot ≥ eşik → NPC'den item al.")
-            purchased, w = go_to_npc_from_top(w)
-            if purchased:
-                NEXT_PLUS7_CHECK_AT = GLOBAL_CYCLE + PLUS7_START_FROM_TURN_AFTER_PURCHASE
-                print(f"[PLAN] NPC alış yapıldı. +7 taraması {NEXT_PLUS7_CHECK_AT}. turdan itibaren.")
-                attempts_done = npc_post_purchase_route_to_anvil_and_upgrade(w)
+            if NEED_STAIRS_REALIGN:
+                set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
+                TOWN_LOCKED = False
+                town_until_valid_x(w)
+                ascend_stairs_to_top(w)
+                continue
+
+            if keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME:
+                _set_mode_bank_plus8("Klavye/Resume")
+                print("[KAMPANYA] +8 modu (F/Resume).")
+                if not BANK_OPEN:
+                    if not move_to_769_and_turn_from_top(w):
+                        print("[KAMPANYA] Banka yok; town & retry.")
+                        send_town_command()
+                        continue
+                run_bank_plus8_cycle(w, bank_is_open=BANK_OPEN)
+                print("[KAMPANYA] +8 modu tamam → NORMAL.")
+                _set_mode_normal("BANK_PLUS8 döngü tamam")
+                continue
+
+            try:
+                x, y = read_coordinates(w)
+            except Exception:
+                x, y = None, None
+            if x is None or y is None:
+                continue
+
+            if x not in VALID_X:
+                print(f"[CHECK] X={x} geçersiz → town.")
+                send_town_command()
+                continue
+
+            start_x = x
+            ascend_stairs_to_top(w)
+
+            press_key(SC_I);
+            release_key(SC_I);
+            time.sleep(0.6)
+            empty_slots = count_empty_slots("INV")
+
+            do_plus7 = FORCE_PLUS7_ONCE or (GLOBAL_CYCLE >= NEXT_PLUS7_CHECK_AT)
+            plus7_count = -1
+            if do_plus7:
+                if FORCE_PLUS7_ONCE:
+                    print("[Karar] Bu tur +7 taraması **ZORUNLU**.")
+                else:
+                    print("[Karar] Bu tur +7 taraması AKTİF.")
+                plus7_count = count_inventory_plusN(w, 7, "INV")
+                FORCE_PLUS7_ONCE = False
+            else:
+                print("[Karar] Bu tur +7 taraması PASİF.")
+
+            press_key(SC_I);
+            release_key(SC_I);
+            time.sleep(0.3)
+
+            if do_plus7 and plus7_count >= 3:
+                print("[Karar] Üzerinde ≥3 +7 → STORAGE akışı.")
+                if move_to_769_and_turn_from_top(w):
+                    deposit_inventory_plusN_to_bank(w, 7)
+                    md = after_deposit_check_and_decide_mode(w)
+                    if md == "BANK_PLUS8":
+                        run_bank_plus8_cycle(w, bank_is_open=True)
+                        ensure_ui_closed()
+                        return (True, False)
+                    elif md == "ABORT":
+                        return (False, False)
+                    else:
+                        ensure_ui_closed()
+                        return (True, False)
+                else:
+                    return (False, False)
+
+            if empty_slots >= EMPTY_SLOT_THRESHOLD:
+                print("[Karar] Boş slot ≥ eşik → NPC'den item al.")
+                purchased, w = go_to_npc_from_top(w)
+                if purchased:
+                    NEXT_PLUS7_CHECK_AT = GLOBAL_CYCLE + PLUS7_START_FROM_TURN_AFTER_PURCHASE
+                    print(f"[PLAN] NPC alış yapıldı. +7 taraması {NEXT_PLUS7_CHECK_AT}. turdan itibaren.")
+                    attempts_done = npc_post_purchase_route_to_anvil_and_upgrade(w)
+                    if REQUEST_RELAUNCH:
+                        print("[RELAUNCH] Basarken relaunch tetiklendi.")
+                        REQUEST_RELAUNCH = False
+                        try:
+                            exit_game_fast(w)
+                        except Exception:
+                            pass
+                        w2 = relaunch_and_login_to_ingame()
+                        if not w2: return (False, False)
+                        w = w2
+                        continue
+                    if attempts_done >= BASMA_HAKKI:
+                        print("[TUR] 31 item basıldı → tur tamam.")
+                        return (True, False)
+                    else:
+                        print(f"[TUR] {attempts_done}/{BASMA_HAKKI} basıldı → devam.")
+                        continue
+                else:
+                    continue
+            else:
+                print("[Karar] Boş slot < eşik → Anvil'e git.")
+                go_to_anvil_from_top(start_x)
+                attempts_done = basma_dongusu(scroll_required="LOW", win=w)
                 if REQUEST_RELAUNCH:
-                    print("[RELAUNCH] Basarken relaunch tetiklendi.")
+                    print("[RELAUNCH] Basarken relaunch tetiklendi (LOW/+7-only).")
                     REQUEST_RELAUNCH = False
                     try:
                         exit_game_fast(w)
@@ -3929,30 +4037,9 @@ def run_stairs_and_workflow(w):
                     print("[TUR] 31 item basıldı → tur tamam.")
                     return (True, False)
                 else:
-                    print(f"[TUR] {attempts_done}/{BASMA_HAKKI} basıldı → devam.")
                     continue
-            else:
-                continue
-        else:
-            print("[Karar] Boş slot < eşik → Anvil'e git.")
-            go_to_anvil_from_top(start_x)
-            attempts_done = basma_dongusu(scroll_required="LOW", win=w)
-            if REQUEST_RELAUNCH:
-                print("[RELAUNCH] Basarken relaunch tetiklendi (LOW/+7-only).")
-                REQUEST_RELAUNCH = False
-                try:
-                    exit_game_fast(w)
-                except Exception:
-                    pass
-                w2 = relaunch_and_login_to_ingame()
-                if not w2: return (False, False)
-                w = w2
-                continue
-            if attempts_done >= BASMA_HAKKI:
-                print("[TUR] 31 item basıldı → tur tamam.")
-                return (True, False)
-            else:
-                continue
+    finally:
+        _stop_plus8_wait_notifier()
 
 
 # =============== Ana ===============
@@ -4598,6 +4685,12 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("PLUS8_TEMPLATE_PATHS", "+8 şablonları", "Şablon Listeleri", "list_str",
                 _cfg_default("PLUS8_TEMPLATE_PATHS", ["plus8.png"]),
                 "+8 algılama şablon dosyaları.", apply=_ensure_str_list, width=28),
+    ConfigField("PLUS8_WAIT_MESSAGE", "+8 item basma mesajı", "Satın Alma", "str",
+                _cfg_default("PLUS8_WAIT_MESSAGE", ""),
+                "+8 bekleme modundayken Telegram'a gönderilecek mesaj."),
+    ConfigField("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", "+8 item basma mesaj gönderme süresi (dk)", "Satın Alma", "float",
+                _cfg_default("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 10.0),
+                "+8 bekleme modundayken kaç dakikada bir mesaj atılacağı."),
     ConfigField("SCROLL_LOW_TEMPLATE_PATHS", "Low scroll şablonları", "Şablon Listeleri", "list_str",
                 _cfg_default("SCROLL_LOW_TEMPLATE_PATHS", ["scroll_low.png", "scroll_low2.png"]),
                 "Low scroll şablon dosyaları.", apply=_ensure_str_list, width=28),
@@ -5203,7 +5296,9 @@ _TR = {
     'HP_RED_MIN': 'HP kırmızı min',
     'HP_RED_DELTA': 'HP kırmızı delta',
     'PLUS7_TEMPLATE_TIMEOUT': '+7 şablon zaman aşımı',
-    'PLUS8_TEMPLATE_TIMEOUT': '+8 şablon zaman aşımı'
+    'PLUS8_TEMPLATE_TIMEOUT': '+8 şablon zaman aşımı',
+    'PLUS8_WAIT_MESSAGE': '+8 bekleme mesajı',
+    'PLUS8_WAIT_MESSAGE_INTERVAL_MIN': '+8 bekleme mesaj aralığı (dk)'
 }
 
 # === TR yardım sözlüğü ve Tooltip ===
@@ -5245,6 +5340,8 @@ _TR_HELP.update({
     'TOOLTIP_OFFSET_Y': 'Tooltip kırpma ofseti (Y).',
     'TOOLTIP_ROI_W': 'Tooltip ROI genişliği.',
     'TOOLTIP_ROI_H': 'Tooltip ROI yüksekliği.',
+    'PLUS8_WAIT_MESSAGE': '+8 bekleme modunda gönderilecek Telegram mesajı.',
+    'PLUS8_WAIT_MESSAGE_INTERVAL_MIN': '+8 bekleme modunda mesaj tekrar aralığı (dakika).',
     # … sende olan diğer anahtarlar aynı şekilde devam edecek …
 })
 
@@ -5623,6 +5720,8 @@ def _MERDIVEN_RUN_GUI():
                 "password": tk.StringVar(value=getattr(m, "LOGIN_PASSWORD", "")),
                 "operation_mode": tk.StringVar(value=str(getattr(m, "OPERATION_MODE", "ITEM_BASMA"))),
                 "item_basma_server": tk.StringVar(value=str(getattr(m, "ITEM_BASMA_SERVER", "Server1"))),
+                "plus8_wait_message": tk.StringVar(value=str(getattr(m, "PLUS8_WAIT_MESSAGE", ""))),
+                "plus8_wait_interval": tk.DoubleVar(value=float(getattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 10.0))),
                 "buy_mode": tk.StringVar(value=getattr(m, "BUY_MODE", "LINEN")),
                 "buy_turns": tk.IntVar(value=int(getattr(m, "BUY_TURNS", 2))),
                 "scroll_low": tk.IntVar(value=int(getattr(m, "SCROLL_ALIM_ADET", 0))),
@@ -5869,6 +5968,19 @@ def _MERDIVEN_RUN_GUI():
                 row=0, column=0, sticky="w", padx=4, pady=2)
             ttk.Radiobutton(lf_server, text="Server2", value="Server2", variable=self.v["item_basma_server"]).grid(
                 row=0, column=1, sticky="w", padx=4, pady=2)
+
+            lf_plus8_msg = ttk.LabelFrame(f2, text="+8 Bekleme Telegram")
+            lf_plus8_msg.grid(row=6, column=0, columnspan=3, sticky="we", pady=6)
+            ttk.Label(lf_plus8_msg, text="+8 item basma mesajı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_message"], width=42).grid(row=0, column=1,
+                                                                                                sticky="w", padx=4,
+                                                                                                pady=2)
+            ttk.Label(lf_plus8_msg, text="+8 item basma mesaj gönderme süresi (dk):").grid(row=1, column=0,
+                                                                                            sticky="e", padx=4,
+                                                                                            pady=2)
+            ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_interval"], width=10).grid(row=1, column=1,
+                                                                                                sticky="w", padx=4,
+                                                                                                pady=2)
 
             # ITEM SATIŞ
             f_sale = ttk.Frame(nb)
@@ -6351,6 +6463,11 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "KRALLIK_TIKLAMA_SURESI", float(self.v["krallik_click_hold"].get()))
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
             setattr(m, "TELEGRAM_CHAT_ID", self.v["telegram_chat_id"].get().strip())
+            setattr(m, "PLUS8_WAIT_MESSAGE", self.v["plus8_wait_message"].get())
+            try:
+                setattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", float(self.v["plus8_wait_interval"].get()))
+            except Exception:
+                setattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 0.0)
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
