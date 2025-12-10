@@ -6219,6 +6219,9 @@ def _MERDIVEN_RUN_GUI():
                                                                                   pady=2)
             ttk.Entry(lf_king, textvariable=self.v["king_click_y"], width=8).grid(row=1, column=2, sticky="w", padx=4,
                                                                                   pady=2)
+            ttk.Button(lf_king, text="İmleçten al", command=self.capture_king_click_pos).grid(row=1, column=3,
+                                                                                             sticky="w", padx=4,
+                                                                                             pady=2)
             ttk.Label(lf_king, text="Aralık (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_king, textvariable=self.v["king_click_interval"], width=8).grid(row=2, column=1, sticky="w",
                                                                                           padx=4, pady=2)
@@ -6542,6 +6545,19 @@ def _MERDIVEN_RUN_GUI():
             win.resizable(False, False)
             ttk.Label(win, textvariable=self.stage, foreground="blue", font=("Segoe UI", 12, "bold")).pack(padx=10,
                                                                                                            pady=10)
+
+        def capture_king_click_pos(self):
+            try:
+                x, y = _get_mouse_pos()
+            except Exception as e:
+                self._msg(f"[GUI] İmleç konumu alınamadı: {e}")
+                return
+            try:
+                self.v["king_click_x"].set(int(x))
+                self.v["king_click_y"].set(int(y))
+                self._msg(f"Krallık tıklama konumu güncellendi: ({x}, {y})")
+            except Exception as e:
+                self._msg(f"[GUI] Krallık konumu ayarlanamadı: {e}")
 
         # ---- Ayar yükle/kaydet/uygula ----
         def _cfg(self):
