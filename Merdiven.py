@@ -5890,6 +5890,10 @@ def _MERDIVEN_RUN_GUI():
                 "password": tk.StringVar(value=getattr(m, "LOGIN_PASSWORD", "")),
                 "operation_mode": tk.StringVar(value=str(getattr(m, "OPERATION_MODE", "ITEM_BASMA"))),
                 "item_basma_server": tk.StringVar(value=str(getattr(m, "ITEM_BASMA_SERVER", "Server1"))),
+                "force_plus7_once": tk.BooleanVar(value=bool(getattr(m, "FORCE_PLUS7_ONCE", False))),
+                "plus7_start_from_turn": tk.IntVar(
+                    value=int(getattr(m, "PLUS7_START_FROM_TURN_AFTER_PURCHASE", PLUS7_START_FROM_TURN_AFTER_PURCHASE))),
+                "next_plus7_check": tk.IntVar(value=int(getattr(m, "NEXT_PLUS7_CHECK_AT", NEXT_PLUS7_CHECK_AT))),
                 "plus8_wait_message": tk.StringVar(value=str(getattr(m, "PLUS8_WAIT_MESSAGE", ""))),
                 "plus8_wait_interval": tk.DoubleVar(value=float(getattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 10.0))),
                 "buy_mode": tk.StringVar(value=getattr(m, "BUY_MODE", "LINEN")),
@@ -6089,21 +6093,25 @@ def _MERDIVEN_RUN_GUI():
         def _build(self):
             # ttk görünümü uygula
             self._init_styles()
-
             nb = ttk.Notebook(self.root)
-            nb.pack(fill="both", expand=True, padx=6, pady=6)
+            nb.pack(fill="both", expand=True, padx=8, pady=8)
 
             # ---------------------- Genel sekmesi ----------------------
             f_genel = ttk.Frame(nb)
             nb.add(f_genel, text="Genel")
+            f_genel.columnconfigure(0, weight=1)
             f_genel.columnconfigure(1, weight=1)
-            ttk.Label(f_genel, text="Makro Aşaması:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
-            ttk.Label(f_genel, textvariable=self.stage, foreground="blue", style="Title.TLabel").grid(row=0, column=1, sticky="w")
-            ttk.Label(f_genel, text="Boş Slot (Satış):").grid(row=0, column=2, sticky="e", padx=4)
-            ttk.Label(f_genel, textvariable=self.sale_slot_var, foreground="blue").grid(row=0, column=3, sticky="w")
+
+            # Başlat / durdur / kaydet
+            header = ttk.Frame(f_genel)
+            header.grid(row=0, column=0, columnspan=2, sticky="we", pady=6)
+            ttk.Label(header, text="Makro Aşaması:").pack(side="left", padx=4)
+            ttk.Label(header, textvariable=self.stage, foreground="blue", style="Title.TLabel").pack(side="left")
+            ttk.Label(header, text="Boş Slot:").pack(side="left", padx=8)
+            ttk.Label(header, textvariable=self.sale_slot_var, foreground="blue").pack(side="left")
 
             btn_row = ttk.Frame(f_genel)
-            btn_row.grid(row=1, column=0, columnspan=4, sticky="we", pady=6)
+            btn_row.grid(row=1, column=0, columnspan=2, sticky="we", pady=4)
             for col, (text, cmd) in enumerate([
                 ("Başlat", self.start),
                 ("Durdur", self.stop),
@@ -6112,146 +6120,178 @@ def _MERDIVEN_RUN_GUI():
             ]):
                 ttk.Button(btn_row, text=text, command=cmd).grid(row=0, column=col, padx=4, sticky="we")
 
-            ttk.Label(f_genel, text="Kullanıcı Adı:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(f_genel, textvariable=self.v["username"], width=28).grid(row=2, column=1, sticky="w")
-            ttk.Label(f_genel, text="Şifre:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
-            pw = ttk.Entry(f_genel, textvariable=self.v["password"], show="*", width=28)
-            pw.grid(row=3, column=1, sticky="w")
-            ttk.Button(f_genel, text="Göster/Gizle", command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")), width=14).grid(row=3, column=2, sticky="w", padx=2)
-            ttk.Button(f_genel, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
+            # Login bilgileri
+            lf_login = ttk.LabelFrame(f_genel, text="Giriş Bilgileri")
+            lf_login.grid(row=2, column=0, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_login, text="Kullanıcı Adı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_login, textvariable=self.v["username"], width=28).grid(row=0, column=1, sticky="w")
+            ttk.Label(lf_login, text="Şifre:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            pw = ttk.Entry(lf_login, textvariable=self.v["password"], show="*", width=28)
+            pw.grid(row=1, column=1, sticky="w")
+            ttk.Button(lf_login, text="Göster/Gizle", command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")), width=14).grid(row=1, column=2, sticky="w", padx=4)
+            ttk.Label(lf_login, text="Bu bilgiler sadece oyuna otomatik giriş için kullanılıyor, dosyaya düz metin olarak kaydedilir.").grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=4)
 
-            lf_mode = ttk.LabelFrame(f_genel, text="Mod Seçimi", style="Group.TLabelframe")
-            lf_mode.grid(row=5, column=0, columnspan=4, sticky="we", pady=8)
-            for col, (text, val) in enumerate([
-                ("Item Basma", "ITEM_BASMA"),
-                ("Item Satış", "ITEM_SATIS"),
-                ("Artı 7’ye item basma", PLUS7_BANK_MODE),
-            ]):
-                ttk.Radiobutton(lf_mode, text=text, value=val, variable=self.v["operation_mode"]).grid(row=0, column=col, sticky="w", padx=6, pady=2)
-            ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, padx=6, pady=2)
+            # Çalışma modu ve sunucu
+            lf_mode = ttk.LabelFrame(f_genel, text="Çalışma Modu")
+            lf_mode.grid(row=2, column=1, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_mode, text="Mod:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Combobox(lf_mode, textvariable=self.v["operation_mode"], values=["NORMAL", "BANK_PLUS8", "BANK_PLUS7", "ITEM_BASMA", "ITEM_SATIS"], state="readonly").grid(row=0, column=1, sticky="w", padx=4)
+            ttk.Label(lf_mode, text="Sunucu / Kanal:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Combobox(lf_mode, textvariable=self.v["item_basma_server"], values=["Server1", "Server2"], state="readonly").grid(row=1, column=1, sticky="w", padx=4)
 
-            # -------------------- Item Basma sekmesi -------------------
-            f_item = ttk.Frame(nb)
-            nb.add(f_item, text="Item Basma")
-            f_item.columnconfigure(0, weight=1)
-            lf_buy = ttk.LabelFrame(f_item, text="Scroll / NPC Ayarları", style="Group.TLabelframe")
-            lf_buy.grid(row=0, column=0, sticky="we", padx=6, pady=6)
-            ttk.Radiobutton(lf_buy, text="LINEN", value="LINEN", variable=self.v["buy_mode"]).grid(row=0, column=0, sticky="w", padx=4, pady=2)
-            ttk.Radiobutton(lf_buy, text="FABRIC", value="FABRIC", variable=self.v["buy_mode"]).grid(row=0, column=1, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_buy, text=_tr_name("BUY_TURNS")).grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_buy, textvariable=self.v["buy_turns"], width=8).grid(row=1, column=1, sticky="w")
-            ttk.Label(lf_buy, text=_tr_name("SCROLL_ALIM_ADET")).grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_buy, textvariable=self.v["scroll_low"], width=8).grid(row=2, column=1, sticky="w")
-            ttk.Label(lf_buy, text=_tr_name("SCROLL_MID_ALIM_ADET")).grid(row=3, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_buy, textvariable=self.v["scroll_mid"], width=8).grid(row=3, column=1, sticky="w")
-            ttk.Label(lf_buy, text=_tr_name("BASMA_HAKKI")).grid(row=4, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_buy, textvariable=self.v["basma_hakki"], width=8).grid(row=4, column=1, sticky="w")
+            # Telegram / bildirim
+            lf_notify = ttk.LabelFrame(f_genel, text="Telegram / Bildirim")
+            lf_notify.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_notify, text="Token:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_notify, textvariable=self.v["telegram_token"], width=32).grid(row=0, column=1, sticky="w", padx=4)
+            ttk.Label(lf_notify, text="Chat ID:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_notify, textvariable=self.v["telegram_chat_id"], width=18).grid(row=0, column=3, sticky="w", padx=4)
+            ttk.Label(lf_notify, text="+8 bekleme mesajı:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_notify, textvariable=self.v["plus8_wait_message"], width=30).grid(row=1, column=1, sticky="w", padx=4)
+            ttk.Label(lf_notify, text="Mesaj aralığı (dk):").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_notify, textvariable=self.v["plus8_wait_interval"], width=10).grid(row=1, column=3, sticky="w", padx=4)
 
-            lf_server = ttk.LabelFrame(f_item, text="Item Basma / Server Seçimi", style="Group.TLabelframe")
-            lf_server.grid(row=1, column=0, sticky="we", padx=6, pady=6)
-            ttk.Radiobutton(lf_server, text="Server1", value="Server1", variable=self.v["item_basma_server"]).grid(row=0, column=0, sticky="w", padx=4, pady=2)
-            ttk.Radiobutton(lf_server, text="Server2", value="Server2", variable=self.v["item_basma_server"]).grid(row=0, column=1, sticky="w", padx=4, pady=2)
+            # -------------------- Satın Alma sekmesi -------------------
+            f_buy = ttk.Frame(nb)
+            nb.add(f_buy, text="Satın Alma")
+            f_buy.columnconfigure(0, weight=1)
+            f_buy.columnconfigure(1, weight=1)
 
-            lf_plus8_msg = ttk.LabelFrame(f_item, text="+8 Bekleme Telegram", style="Group.TLabelframe")
-            lf_plus8_msg.grid(row=2, column=0, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_plus8_msg, text="Bekleme mesajı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_message"], width=36).grid(row=0, column=1, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_plus8_msg, text="Mesaj aralığı (dk):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_interval"], width=10).grid(row=1, column=1, sticky="w", padx=4, pady=2)
+            lf_buy_mode = ttk.LabelFrame(f_buy, text="Satın Alma Modu")
+            lf_buy_mode.grid(row=0, column=0, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_buy_mode, text="Mod:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Combobox(lf_buy_mode, textvariable=self.v["buy_mode"], values=["LINEN", "FABRIC"], state="readonly").grid(row=0, column=1, sticky="w", padx=4)
 
-            # ----------------- Item Satış / Pazar sekmesi ---------------
+            lf_cycle = ttk.LabelFrame(f_buy, text="Alım Döngüsü")
+            lf_cycle.grid(row=0, column=1, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_cycle, text="NPC Alış Tur Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle, textvariable=self.v["buy_turns"], width=8).grid(row=0, column=1, sticky="w")
+            ttk.Label(lf_cycle, text="Scroll (Low) Adedi:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle, textvariable=self.v["scroll_low"], width=8).grid(row=1, column=1, sticky="w")
+            ttk.Label(lf_cycle, text="Scroll (Mid) Adedi:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle, textvariable=self.v["scroll_mid"], width=8).grid(row=2, column=1, sticky="w")
+            ttk.Label(lf_cycle, text="Basma Hakkı:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle, textvariable=self.v["basma_hakki"], width=8).grid(row=3, column=1, sticky="w")
+
+            lf_plus7 = ttk.LabelFrame(f_buy, text="+7 Basma / Tarama")
+            lf_plus7.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(
+                lf_plus7,
+                text="Bu tur +7 denemesini zorla",
+                variable=self.v["force_plus7_once"],
+                onvalue=True,
+                offvalue=False,
+            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_plus7, text="NPC alışından sonra kaçıncı turda +7 kontrolü başlasın:").grid(
+                row=1, column=0, sticky="w", padx=4, pady=2
+            )
+            ttk.Entry(lf_plus7, textvariable=self.v["plus7_start_from_turn"], width=6).grid(
+                row=1, column=1, sticky="w", padx=4
+            )
+            ttk.Label(lf_plus7, text="Sıradaki planlı +7 turu:").grid(row=2, column=0, sticky="w", padx=4, pady=2)
+            ttk.Entry(lf_plus7, textvariable=self.v["next_plus7_check"], width=6).grid(
+                row=2, column=1, sticky="w", padx=4
+            )
+
+            # ----------------- Item Satış sekmesi ----------------------
             f_sale = ttk.Frame(nb)
-            nb.add(f_sale, text="Item Satış / Pazar")
+            nb.add(f_sale, text="Item Satış")
             f_sale.columnconfigure(0, weight=1)
             f_sale.columnconfigure(1, weight=1)
 
-            # Item satış sekmesi – pazar ayarları
-            lf_sale_info = ttk.LabelFrame(f_sale, text="Pazar Ayarları", style="Group.TLabelframe")
-            lf_sale_info.grid(row=0, column=0, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_sale_info, text="Pazar Fiyat Metni:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_sale_info, textvariable=self.v["sale_price_text"], width=24).grid(row=0, column=1, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_sale_info, text="Eşik 1/2/3 (slot):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            lf_sale_info = ttk.LabelFrame(f_sale, text="Pazar Temel Ayarları")
+            lf_sale_info.grid(row=0, column=0, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_sale_info, text="Fiyat Metni:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_info, textvariable=self.v["sale_price_text"], width=24).grid(row=0, column=1, sticky="w")
+            ttk.Label(lf_sale_info, text="Eşik 1/2/3:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
             for idx, key in enumerate(["sale_threshold_1", "sale_threshold_2", "sale_threshold_3"]):
                 ttk.Entry(lf_sale_info, textvariable=self.v[key], width=6).grid(row=1, column=idx + 1, sticky="w", padx=2, pady=2)
-            ttk.Label(lf_sale_info, text="Park X:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_sale_info, textvariable=self.v["sale_park_x"], width=8).grid(row=2, column=1, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_sale_info, text="Slot tarama (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_sale_info, textvariable=self.v["sale_slot_interval"], width=8).grid(row=2, column=1, sticky="w")
 
-            # Item satış sekmesi – bekleme/tıklama
-            lf_timing = ttk.LabelFrame(f_sale, text="Bekleme / Tıklama", style="Group.TLabelframe")
-            lf_timing.grid(row=0, column=1, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_timing, text="Pazar Yenileme Bekleme Min/Maks (sn):").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_refresh_min"], width=8).grid(row=0, column=1, sticky="w", padx=2, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_refresh_max"], width=8).grid(row=0, column=2, sticky="w", padx=2, pady=2)
-            ttk.Label(lf_timing, text="İlk Bekleme (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_initial_wait"], width=8).grid(row=1, column=1, sticky="w", padx=2, pady=2)
-            ttk.Label(lf_timing, text="902,135 Tık Adet/Hız:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_click_902_count"], width=6).grid(row=2, column=1, sticky="w", padx=2, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_click_902_speed"], width=6).grid(row=2, column=2, sticky="w", padx=2, pady=2)
-            ttk.Label(lf_timing, text="899,399 Tık Adet/Hız:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_click_899_count"], width=6).grid(row=3, column=1, sticky="w", padx=2, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_click_899_speed"], width=6).grid(row=3, column=2, sticky="w", padx=2, pady=2)
-            ttk.Label(lf_timing, text="Envanter Tarama Süresi (sn):").grid(row=4, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_timing, textvariable=self.v["sale_slot_interval"], width=8).grid(row=4, column=1, sticky="w", padx=2, pady=2)
+            lf_cycle_sale = ttk.LabelFrame(f_sale, text="Pazar Yenileme / Beklemeler")
+            lf_cycle_sale.grid(row=0, column=1, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_cycle_sale, text="İlk Bekleme (sn):").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle_sale, textvariable=self.v["sale_initial_wait"], width=8).grid(row=0, column=1, sticky="w")
+            ttk.Label(lf_cycle_sale, text="Yenileme Min/Maks (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle_sale, textvariable=self.v["sale_refresh_min"], width=8).grid(row=1, column=1, sticky="w")
+            ttk.Entry(lf_cycle_sale, textvariable=self.v["sale_refresh_max"], width=8).grid(row=1, column=2, sticky="w")
+            ttk.Label(lf_cycle_sale, text="Çıkış gecikmesi min/maks:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_cycle_sale, textvariable=self.v["sale_exit_delay_min"], width=8).grid(row=2, column=1, sticky="w")
+            ttk.Entry(lf_cycle_sale, textvariable=self.v["sale_exit_delay_max"], width=8).grid(row=2, column=2, sticky="w")
 
-            # Item satış sekmesi – banka/telegram
-            lf_bank = ttk.LabelFrame(f_sale, text="Banka", style="Group.TLabelframe")
-            lf_bank.grid(row=1, column=0, sticky="we", padx=6, pady=6)
+            lf_clicks = ttk.LabelFrame(f_sale, text="Pazar Tıklama Ayarları")
+            lf_clicks.grid(row=1, column=0, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_clicks, text="902,135 Adet/Hız:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_clicks, textvariable=self.v["sale_click_902_count"], width=6).grid(row=0, column=1, sticky="w")
+            ttk.Entry(lf_clicks, textvariable=self.v["sale_click_902_speed"], width=6).grid(row=0, column=2, sticky="w")
+            ttk.Label(lf_clicks, text="899,399 Adet/Hız:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_clicks, textvariable=self.v["sale_click_899_count"], width=6).grid(row=1, column=1, sticky="w")
+            ttk.Entry(lf_clicks, textvariable=self.v["sale_click_899_speed"], width=6).grid(row=1, column=2, sticky="w")
+
+            lf_bank = ttk.LabelFrame(f_sale, text="Banka ile Entegrasyon")
+            lf_bank.grid(row=1, column=1, sticky="nwe", padx=6, pady=6)
             ttk.Label(lf_bank, text="Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w")
             ttk.Label(lf_bank, text="Bankadan Çekilecek Adet:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_withdraw"], width=8).grid(row=1, column=1, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="Çıkış Süresi Min/Maks (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_min"], width=8).grid(row=2, column=1, sticky="w", padx=2, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_exit_delay_max"], width=8).grid(row=2, column=2, sticky="w", padx=2, pady=2)
-            ttk.Checkbutton(lf_bank, text="Banka boşsa Telegram gönder", variable=self.v["sale_bank_notify"], onvalue=True, offvalue=False).grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="Telegram Mesajı:").grid(row=4, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_message"], width=32).grid(row=4, column=1, columnspan=2, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="Telegram Token:").grid(row=5, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["telegram_token"], width=32).grid(row=5, column=1, columnspan=2, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=6, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=6, column=1, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_withdraw"], width=8).grid(row=1, column=1, sticky="w")
+            ttk.Checkbutton(lf_bank, text="Boşsa haber ver", variable=self.v["sale_bank_notify"], onvalue=True, offvalue=False).grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_bank, text="Mesaj:").grid(row=3, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_bank, textvariable=self.v["sale_bank_message"], width=22).grid(row=3, column=1, sticky="w")
 
-            # Item satış sekmesi – envanter/otomatik pazar
-            lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi", style="Group.TLabelframe")
-            lf_monitor.grid(row=1, column=1, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_monitor, text="Boş Slot Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Label(lf_monitor, textvariable=self.sale_slot_var, width=6, foreground="blue").grid(row=0, column=1, sticky="w", padx=4, pady=2)
-            lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme", style="Group.TLabelframe")
-            lf_auto_refresh.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
-            ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif", variable=self.v["auto_market_refresh_enabled"], onvalue=True, offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
-            ttk.Label(lf_auto_refresh, text="Yenileme aralığı (saat):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(row=1, column=1, sticky="w", padx=4, pady=2)
+            lf_positions = ttk.LabelFrame(f_sale, text="Pazar Park / Krallık")
+            lf_positions.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_positions, text="Park X:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_positions, textvariable=self.v["sale_park_x"], width=8).grid(row=0, column=1, sticky="w")
+            ttk.Label(lf_positions, text="Krallık X/Y:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_positions, textvariable=self.v["krallik_click_x"], width=8).grid(row=0, column=3, sticky="w")
+            ttk.Entry(lf_positions, textvariable=self.v["krallik_click_y"], width=8).grid(row=0, column=4, sticky="w")
+            ttk.Label(lf_positions, text="Aralık / Süre (sn):").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_positions, textvariable=self.v["krallik_click_interval"], width=8).grid(row=1, column=3, sticky="w")
+            ttk.Entry(lf_positions, textvariable=self.v["krallik_click_hold"], width=8).grid(row=1, column=4, sticky="w")
 
-            lf_krallik = ttk.LabelFrame(f_sale, text="Krallık Yazısı Tıklama", style="Group.TLabelframe")
-            lf_krallik.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_krallik, text="X / Y Koordinatı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_x"], width=8).grid(row=0, column=1, sticky="w", padx=2, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_y"], width=8).grid(row=0, column=2, sticky="w", padx=2, pady=2)
-            ttk.Label(lf_krallik, text="Tıklama Aralığı / Süresi (sn):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_interval"], width=8).grid(row=1, column=1, sticky="w", padx=2, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_hold"], width=8).grid(row=1, column=2, sticky="w", padx=2, pady=2)
-
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_auto = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
+            lf_auto.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Checkbutton(lf_auto, text="Otomatik yenileme açık", variable=self.v["auto_market_refresh_enabled"], onvalue=True, offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+            ttk.Label(lf_auto, text="Aralık (saat):").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_auto, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(row=1, column=1, sticky="w")
 
             # ---------------- Hız / Gelişmiş sekmesi ------------------
             f_speed = ttk.Frame(nb)
             nb.add(f_speed, text="Hız / Gelişmiş")
             f_speed.columnconfigure(0, weight=1)
+            f_speed.columnconfigure(1, weight=1)
 
-            lf_speed = ttk.LabelFrame(f_speed, text="Hız Profili", style="Group.TLabelframe")
-            lf_speed.grid(row=0, column=0, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_speed, text=_tr_name("SPEED_PROFILE")).grid(row=0, column=0, sticky="e")
+            lf_speed = ttk.LabelFrame(f_speed, text="Hız Profili")
+            lf_speed.grid(row=0, column=0, sticky="nwe", padx=6, pady=6)
+            ttk.Label(lf_speed, text="Profil:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Combobox(lf_speed, textvariable=self.v["speed_profile"], values=["FAST", "BALANCED", "SAFE"], state="readonly", width=12).grid(row=0, column=1, sticky="w")
-            ttk.Label(lf_speed, text="Mikro Adım (min/max):").grid(row=1, column=0, sticky="e")
+            ttk.Label(lf_speed, text="Mikro Adım min/maks:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_speed, textvariable=self.v["press_min"], width=8).grid(row=1, column=1, sticky="w")
             ttk.Entry(lf_speed, textvariable=self.v["press_max"], width=8).grid(row=1, column=2, sticky="w")
-            ttk.Label(lf_speed, text="Fren Δ (FAST/BAL/SAFE):").grid(row=2, column=0, sticky="e")
+            ttk.Label(lf_speed, text="Fren Δ FAST/BAL/SAFE:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_speed, textvariable=self.v["brake_fast"], width=6).grid(row=2, column=1, sticky="w")
             ttk.Entry(lf_speed, textvariable=self.v["brake_bal"], width=6).grid(row=2, column=2, sticky="w")
             ttk.Entry(lf_speed, textvariable=self.v["brake_safe"], width=6).grid(row=2, column=3, sticky="w")
 
-            # Gelişmiş ayarlar listesi
-            lf_adv = ttk.LabelFrame(f_speed, text="Gelişmiş Ayarlar", style="Group.TLabelframe")
+            adv_container = ttk.LabelFrame(f_speed, text="Gelişmiş Parametreler (YAMA GUI)")
+            adv_container.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=6, pady=6)
+            adv_container.columnconfigure(0, weight=1)
+            adv_container.rowconfigure(0, weight=1)
+            c6 = tk.Canvas(adv_container, highlightthickness=0)
+            vs6 = ttk.Scrollbar(adv_container, orient="vertical", command=c6.yview)
+            c6.configure(yscrollcommand=vs6.set)
+            adv_frame = ttk.Frame(c6)
+            _adv_id = c6.create_window((0, 0), window=adv_frame, anchor="nw")
+            c6.bind("<Configure>", lambda e: c6.itemconfigure(_adv_id, width=e.width))
+            c6.grid(row=0, column=0, sticky="nsew")
+            vs6.grid(row=0, column=1, sticky="ns")
+            try:
+                _build_speed_prec598_tab(adv_frame, tk, ttk)
+            except Exception as _e:
+                print("[GUI] PREC 598 sekme hata:", _e)
+
+            lf_adv = ttk.LabelFrame(f_speed, text="Gelişmiş Ayarlar (Metin)")
             lf_adv.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
             lf_adv.columnconfigure(0, weight=1)
             top = ttk.Frame(lf_adv)
@@ -6272,30 +6312,14 @@ def _MERDIVEN_RUN_GUI():
             self.adv_container = frm
             lf_adv.rowconfigure(1, weight=1)
 
-            # -------------------- Durum / Sistem sekmesi --------------
-            f_status = ttk.Frame(nb)
-            nb.add(f_status, text="Durum / Sistem")
-            ttk.Label(f_status, text="Anlık Aşama:").pack(anchor="w", padx=6, pady=4)
-            ttk.Label(f_status, textvariable=self.stage, foreground="blue", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10)
-            ttk.Label(f_status, text="Son 30 Aşama:").pack(anchor="w", padx=6, pady=6)
-            self.lb = tk.Listbox(f_status, height=14)
+            # -------------------- Log / İzleme sekmesi -----------------
+            f_log = ttk.Frame(nb)
+            nb.add(f_log, text="Log / İzleme")
+            ttk.Label(f_log, text="Anlık Aşama:").pack(anchor="w", padx=6, pady=4)
+            ttk.Label(f_log, textvariable=self.stage, foreground="blue", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10)
+            ttk.Label(f_log, text="Son 30 Aşama:").pack(anchor="w", padx=6, pady=6)
+            self.lb = tk.Listbox(f_log, height=18)
             self.lb.pack(fill="both", expand=True, padx=8, pady=4)
-
-            # --- Hız/Anvil/PREC 598 (sekme) ---
-            try:
-                f6 = ttk.Frame(nb)
-                nb.add(f6, text="Hız/Anvil/PREC 598")
-                c6 = tk.Canvas(f6, highlightthickness=0)
-                vs6 = ttk.Scrollbar(f6, orient="vertical", command=c6.yview)
-                c6.configure(yscrollcommand=vs6.set)
-                frm6 = ttk.Frame(c6)
-                _frm6_id = c6.create_window((0, 0), window=frm6, anchor="nw")
-                c6.bind("<Configure>", lambda e: c6.itemconfigure(_frm6_id, width=e.width))
-                c6.pack(side="left", fill="both", expand=True)
-                vs6.pack(side="right", fill="y")
-                _build_speed_prec598_tab(frm6, tk, ttk)
-            except Exception as _e:
-                print("[GUI] PREC 598 sekme hata:", _e)
         # ---- LOG kutusu ----
         def _refresh_log(self):
             if hasattr(self, "lb"):
@@ -6430,10 +6454,32 @@ def _MERDIVEN_RUN_GUI():
                 self._msg(f'[GUI] Kaydetme hatası: {path}')
             # Uygula
             try:
-                self.apply_core()
+                self.apply_core(persist=False)
                 self._msg('Tüm gelişmiş ayarlar uygulandı.')
             except Exception as e:
                 self._msg(f'[GUI] apply_core hatası: {e}')
+
+        def _collect_data(self):
+            data = {"gui": {}, "advanced": {}}
+            for k, var in self.v.items():
+                try:
+                    data["gui"][k] = var.get()
+                except Exception:
+                    pass
+            for name, var in getattr(self, 'adv_rows', []):
+                try:
+                    data["advanced"][name] = var.get()
+                except Exception:
+                    pass
+            return data
+
+        def _persist_data(self, data):
+            try:
+                update_config_from_ui(data)
+                ok = save_config_to_disk()
+            except Exception:
+                ok = False
+            return ok
 
         def start(self):
             if getattr(self, "thr", None) and self.thr.is_alive(): self._msg("Zaten çalışıyor."); return
@@ -6548,12 +6594,19 @@ def _MERDIVEN_RUN_GUI():
         def save_mode_selection(self):
             self.save()
 
-        def apply_core(self):
+        def apply_core(self, persist=True):
             # login
             if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
             if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
             setattr(m, "OPERATION_MODE", self.v["operation_mode"].get().upper())
             setattr(m, "ITEM_BASMA_SERVER", self.v["item_basma_server"].get())
+            setattr(m, "FORCE_PLUS7_ONCE", bool(self.v["force_plus7_once"].get()))
+            setattr(
+                m,
+                "PLUS7_START_FROM_TURN_AFTER_PURCHASE",
+                int(self.v["plus7_start_from_turn"].get()),
+            )
+            setattr(m, "NEXT_PLUS7_CHECK_AT", int(self.v["next_plus7_check"].get()))
             setattr(m, "ITEM_SALE_PRICE_TEXT", self.v["sale_price_text"].get())
             setattr(m, "PAZAR_ESIK_1", int(self.v["sale_threshold_1"].get()))
             setattr(m, "PAZAR_ESIK_2", int(self.v["sale_threshold_2"].get()))
@@ -6626,42 +6679,21 @@ def _MERDIVEN_RUN_GUI():
                 setattr(m, "_SPEED_PRE_BRAKE", d)
             except Exception:
                 pass
+            if persist:
+                try:
+                    self._persist_data(self._collect_data())
+                except Exception:
+                    pass
 
         def save(self):
-            import json, os
             path = self._cfg()
-            data = {"gui": {}, "advanced": {}}
-            try:
-                state = globals().get('_APP_CONFIG') or load_config_from_disk()
-                globals()['_APP_CONFIG'] = state
-                data = state.data
-            except Exception:
-                data = {"gui": {}, "advanced": {}}
-            if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
-            if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
-            for k, var in self.v.items():
-                try:
-                    data["gui"][k] = var.get()
-                except Exception:
-                    pass
-            adv = data.get("advanced")
-            if not isinstance(adv, dict): adv = {}
-            data["advanced"] = adv
-            for name, var in self.adv_rows:
-                try:
-                    adv[name] = var.get()
-                except Exception:
-                    pass
-            try:
-                update_config_from_ui(data)
-                ok = save_config_to_disk()
-            except Exception:
-                ok = False
+            data = self._collect_data()
+            ok = self._persist_data(data)
             if ok:
                 self._msg(f"Ayarlar kaydedildi: {path}")
             else:
                 self._msg(f"[GUI] Kaydetme hatası: {path}")
-            self.apply_core()
+            self.apply_core(persist=False)
 
         def _tick(self):
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
