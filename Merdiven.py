@@ -68,7 +68,7 @@ def _read_y_now():
 
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
     random, \
-    sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser
+    sys, atexit, traceback, logging, functools, copy, math, threading
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -395,7 +395,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
-KRALLIK_URL = os.getenv("KRALLIK_URL", "https://krallik.app")
 
 _GUI_UPDATE_SALE_SLOT = None
 
@@ -5606,16 +5605,6 @@ def _MERDIVEN_RUN_GUI():
         def _msg(self, s):
             print("[GUI]", s)
 
-        def _open_krallik(self, *_):
-            url = str(getattr(m, "KRALLIK_URL", KRALLIK_URL) or "")
-            if not url:
-                return
-            try:
-                webbrowser.open_new_tab(url)
-                self._msg(f"[GUI] Krallık bağlantısı açıldı: {url}")
-            except Exception as exc:
-                self._msg(f"[GUI] Krallık bağlantısı açılamadı: {exc}")
-
         def _update_sale_slot(self, value):
             try:
                 val = int(value)
@@ -5786,12 +5775,8 @@ def _MERDIVEN_RUN_GUI():
             f_sale = ttk.Frame(nb)
             nb.add(f_sale, text="Item Satış")
             f_sale.columnconfigure(1, weight=1)
-            krallik_lbl = ttk.Label(f_sale, text="Krallık", foreground="blue", cursor="hand2")
-            krallik_lbl.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 0))
-            krallik_lbl.bind("<Button-1>", self._open_krallik)
-
             lf_sale = ttk.LabelFrame(f_sale, text="Pazar Ayarları")
-            lf_sale.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_sale.grid(row=0, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_sale, text="Pazar Fiyat Metni:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_sale, textvariable=self.v["sale_price_text"], width=32).grid(row=0, column=1, sticky="w",
                                                                                       padx=4,
@@ -5813,7 +5798,7 @@ def _MERDIVEN_RUN_GUI():
                                                                                  pady=2)
 
             lf_timing = ttk.LabelFrame(f_sale, text="Bekleme / Tıklama")
-            lf_timing.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_timing.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_timing, text="Yenileme Bekleme Min (sn):").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_timing, textvariable=self.v["sale_refresh_min"], width=8).grid(row=0, column=1, sticky="w",
                                                                                         padx=4,
@@ -5840,7 +5825,7 @@ def _MERDIVEN_RUN_GUI():
                                                                                             padx=4, pady=2)
 
             lf_bank = ttk.LabelFrame(f_sale, text="Banka")
-            lf_bank.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_bank.grid(row=2, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_bank, text="Bankaya Git Boş Slot Eşiği:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["sale_bank_threshold"], width=8).grid(row=0, column=1, sticky="w",
                                                                                          padx=4,
@@ -5871,7 +5856,7 @@ def _MERDIVEN_RUN_GUI():
                                                                                        sticky="w", padx=4, pady=2)
 
             lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
-            lf_monitor.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_monitor.grid(row=3, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_monitor, text="Boş Slot Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Label(lf_monitor, textvariable=self.sale_slot_var, width=6, foreground="blue").grid(row=0, column=1,
                                                                                                     sticky="w",
@@ -5881,7 +5866,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
                                                                                            padx=4, pady=2)
             lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
-            lf_auto_refresh.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_auto_refresh.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
                             variable=self.v["auto_market_refresh_enabled"], onvalue=True,
                             offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
@@ -5890,7 +5875,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_auto_refresh, textvariable=self.v["auto_market_refresh_interval_hours"], width=8).grid(
                 row=1, column=1, sticky="w", padx=4, pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=6, column=0, columnspan=2,
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=5, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
