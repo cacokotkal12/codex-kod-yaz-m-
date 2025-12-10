@@ -757,6 +757,30 @@ def _stop_plus8_wait_notifier():
         thr.join(timeout=0.2)
     _PLUS8_WAIT_THREAD = None
 
+
+def _wait_for_f_with_countdown(deadline_ts: float, *, label: str = "+8 F bekleme") -> str:
+    """F tuşu bekleme döngüsü; watchdog'u devre dışı bırakır ve geri sayım loglar."""
+    countdown_step = 60  # sn
+    last_log = None
+    watchdog_suspend(label)
+    try:
+        while time.time() < deadline_ts:
+            wait_if_paused()
+            remaining = max(0.0, float(deadline_ts - time.time()))
+            rounded = int(math.ceil(remaining / countdown_step) * countdown_step) if countdown_step > 0 else int(
+                math.ceil(remaining))
+            if rounded != last_log:
+                stage_detail(f"[PLUS8_WAIT] F için bekleme: {rounded} sn kaldı")
+                last_log = rounded
+            if _kb_pressed('f'):
+                return "F"
+            if _kb_pressed('f12'):
+                return "ABORT"
+            time.sleep(0.1)
+        return "TIMEOUT"
+    finally:
+        watchdog_resume()
+
 # ---- LOW scroll genel reopen limiti (anvil) ----
 SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 5
 _scroll_reopen_low_remaining = None
@@ -790,6 +814,8 @@ class WatchdogTimeout(Exception): pass
 _current_stage = "INIT";
 _stage_enter_ts = time.time()
 _GUI_STAGE_DETAIL = None
+_WATCHDOG_SUSPENDED = False
+_WATCHDOG_SUSPEND_REASON = None
 
 
 def set_stage(name: str):
@@ -813,6 +839,27 @@ def stage_detail(info: str):
             cb(text)
         except Exception:
             pass
+
+
+def watchdog_suspend(reason: str = None):
+    """Watchdog'u geçici olarak devre dışı bırak."""
+    global _WATCHDOG_SUSPENDED, _WATCHDOG_SUSPEND_REASON
+    _WATCHDOG_SUSPENDED = True
+    _WATCHDOG_SUSPEND_REASON = reason
+    if reason:
+        print(f"[WATCHDOG] Devre dışı (neden: {reason})")
+    else:
+        print("[WATCHDOG] Devre dışı")
+
+
+def watchdog_resume():
+    """Watchdog'u yeniden devreye al."""
+    global _WATCHDOG_SUSPENDED, _WATCHDOG_SUSPEND_REASON, _stage_enter_ts
+    if _WATCHDOG_SUSPENDED:
+        _WATCHDOG_SUSPENDED = False
+        _WATCHDOG_SUSPEND_REASON = None
+        _stage_enter_ts = time.time()
+        print("[WATCHDOG] Tekrar aktif")
 
 
 def _resolve_range_values(min_val, max_val):
@@ -870,6 +917,8 @@ def _wait_with_stage_detail(total_seconds: float, detail_builder: Optional[Calla
 
 def watchdog_enforce():
     global _stage_enter_ts
+    if globals().get("_WATCHDOG_SUSPENDED", False):
+        return
     if _abort_requested():
         raise GUIAbort("GUI durdurma isteği")
     if bool(ctypes.windll.user32.GetKeyState(0x14) & 1): _stage_enter_ts = time.time(); return
@@ -2783,17 +2832,14 @@ def after_deposit_check_and_decide_mode(w):
             print(f"[BANK] {int(AUTO_BANK_PLUS8_DELAY)} sn içinde +8 döngüsü otomatik başlayacak "
                   f"(erken başlatmak için 'F', iptal için F12).")
             deadline = time.time() + float(AUTO_BANK_PLUS8_DELAY)
-            while time.time() < deadline:
-                wait_if_paused();
-                watchdog_enforce()
-                if _kb_pressed('f'):
-                    _set_mode_bank_plus8("F alındı")
-                    print("[BANK] 'F' alındı → BANK_PLUS8.")
-                    return "BANK_PLUS8"
-                if _kb_pressed('f12'):
-                    print("[BANK] F12 alındı → ABORT.")
-                    return "ABORT"
-                time.sleep(0.1)
+            res = _wait_for_f_with_countdown(deadline, label="BANK_PLUS8 F beklemesi (auto)")
+            if res == "F":
+                _set_mode_bank_plus8("F alındı")
+                print("[BANK] 'F' alındı → BANK_PLUS8.")
+                return "BANK_PLUS8"
+            if res == "ABORT":
+                print("[BANK] F12 alındı → ABORT.")
+                return "ABORT"
             _set_mode_bank_plus8("Süre doldu")
             print("[BANK] Süre doldu → otomatik BANK_PLUS8.")
             return "BANK_PLUS8"
@@ -2801,17 +2847,14 @@ def after_deposit_check_and_decide_mode(w):
             # Eski davranış: 'F' bekle, süre dolarsa NORMAL
             print(f"[BANK] 'F' bekleniyor ({int(F_WAIT_TIMEOUT_SECONDS)} sn).")
             deadline = time.time() + float(F_WAIT_TIMEOUT_SECONDS)
-            while time.time() < deadline:
-                wait_if_paused();
-                watchdog_enforce()
-                if _kb_pressed('f'):
-                    _set_mode_bank_plus8("F alındı")
-                    print("[BANK] 'F' alındı → BANK_PLUS8.")
-                    return "BANK_PLUS8"
-                if _kb_pressed('f12'):
-                    print("[BANK] F12 alındı → ABORT.")
-                    return "ABORT"
-                time.sleep(0.1)
+            res = _wait_for_f_with_countdown(deadline, label="BANK_PLUS8 F beklemesi (manual)")
+            if res == "F":
+                _set_mode_bank_plus8("F alındı")
+                print("[BANK] 'F' alındı → BANK_PLUS8.")
+                return "BANK_PLUS8"
+            if res == "ABORT":
+                print("[BANK] F12 alındı → ABORT.")
+                return "ABORT"
             print("[BANK] Süre doldu → NORMAL.")
             _set_mode_normal("F süresi doldu")
             return "NORMAL"
