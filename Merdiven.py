@@ -66,9 +66,20 @@ def _read_y_now():
 
 # [PATCH_Y_LOCK_END]
 
-import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
-    random, \
-    sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser
+try:
+    import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
+        random, \
+        sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser
+except ModuleNotFoundError as _e:
+    # GUI açılmadığında sebebi görebilmek için eksik modülü bildir
+    _msg = f"[IMPORT] Eksik Python modülü: {_e.name}. 'pip install {_e.name}' ile yükleyin."
+    try:
+        import tkinter.messagebox as _mb
+        _mb.showerror("Eksik modül", _msg)
+    except Exception:
+        pass
+    print(_msg)
+    raise
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
