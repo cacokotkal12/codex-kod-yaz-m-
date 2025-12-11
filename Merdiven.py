@@ -6832,13 +6832,15 @@ def _MERDIVEN_GUI_ENTRY(auto_open=True):
     try:
         ok = _MERDIVEN_RUN_GUI()
         if not ok:
-            main()
+            print("[GUI] Tk arayüzü başlatılamadı. Tkinter veya ekran desteğini kontrol edip tekrar deneyin.")
+            return
     except Exception as e:
-        print("[GUI] açılmadı, terminal moduna düşülüyor:", e)
+        print("[GUI] açılmadı, terminal moduna düşülmüyor; hatayı düzeltip tekrar deneyin:", e)
         try:
-            main()
-        except Exception as e2:
-            print("[MAIN] hata:", e2)
+            import traceback
+            traceback.print_exc()
+        except Exception:
+            pass
 
 
 # Eğer mevcut dosyanın sonunda standart __main__ bloğu varsa üzerine yazmak zahmetli olabilir.
