@@ -192,7 +192,10 @@ def _load_statistics() -> Dict[str, Any]:
         with open(_STATS_FILE, "r", encoding="utf-8") as f:
             loaded = json.load(f)
             if isinstance(loaded, dict):
-                data.update({k: loaded.get(k, v) for k, v in _STATS_DEFAULT.items()})
+                data.update(loaded)
+                for k, v in _STATS_DEFAULT.items():
+                    if k not in data:
+                        data[k] = v
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -201,11 +204,28 @@ def _load_statistics() -> Dict[str, Any]:
 
 
 def _save_statistics(data: Dict[str, Any]):
+    merged = {}
+    try:
+        with open(_STATS_FILE, "r", encoding="utf-8") as f:
+            old = json.load(f)
+            if isinstance(old, dict):
+                merged.update(old)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"[ISTATISTIK] Mevcut dosya okunamadı: {exc}")
+
+    for k, v in _STATS_DEFAULT.items():
+        try:
+            merged[k] = int(data.get(k, v) if data is not None else v)
+        except Exception:
+            merged[k] = v
+
     try:
         tmp = _STATS_FILE + ".tmp"
         os.makedirs(os.path.dirname(_STATS_FILE), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(merged, f, ensure_ascii=False, indent=2)
         os.replace(tmp, _STATS_FILE)
     except Exception as exc:
         print(f"[ISTATISTIK] Kaydedilemedi: {exc}")
