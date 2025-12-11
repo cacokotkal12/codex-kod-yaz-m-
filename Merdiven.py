@@ -5897,7 +5897,6 @@ def _MERDIVEN_RUN_GUI():
                 "scroll_low": tk.IntVar(value=int(getattr(m, "SCROLL_ALIM_ADET", 0))),
                 "scroll_mid": tk.IntVar(value=int(getattr(m, "SCROLL_MID_ALIM_ADET", 0))),
                 "basma_hakki": tk.IntVar(value=int(getattr(m, "BASMA_HAKKI", 31))),
-                "speed_profile": tk.StringVar(value=str(getattr(m, "SPEED_PROFILE", "BALANCED"))),
                 "press_min": tk.DoubleVar(value=float(getattr(m, "PRESS_MIN", 0.02))),
                 "press_max": tk.DoubleVar(value=float(getattr(m, "PRESS_MAX", 0.06))),
                 "sale_price_text": tk.StringVar(value=str(getattr(m, "ITEM_SALE_PRICE_TEXT", ITEM_SALE_PRICE_TEXT))),
@@ -5943,12 +5942,19 @@ def _MERDIVEN_RUN_GUI():
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
             }
+            self.v.setdefault("speed_profile", tk.StringVar(value=str(getattr(m, "SPEED_PROFILE", "BALANCED"))))
+            self.v["active_mode_label"] = tk.StringVar(value="Yok")
+            self.v["active_mode_status"] = tk.StringVar(value="Beklemede")
+            self.v["last_log_line"] = tk.StringVar(value="Henüz log yok")
+            self.v["stairs_submode"] = tk.StringVar(value="full_cycle")
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
             self.v["brake_bal"] = tk.IntVar(value=int(dm.get("BALANCED", 2)))
             self.v["brake_safe"] = tk.IntVar(value=int(dm.get("SAFE", 1)))
             self.sale_slot_var = tk.StringVar(value=str(getattr(m, "ITEM_SALE_LAST_SLOT_COUNT", "-")))
             self.adv_rows = []
+            self._mode_cards = {}
+            self.current_mode_id = None
             self._build();
             self._load_json();
             self._hook_stage();
@@ -6031,6 +6037,10 @@ def _MERDIVEN_RUN_GUI():
                         self.stage_log.append(st);
                         self.stage_log = self.stage_log[-200:]
                         self._refresh_log()
+                        try:
+                            self.v["last_log_line"].set(str(st))
+                        except Exception:
+                            pass
                 finally:
                     self.root.after(150, _drain)
 
@@ -6075,6 +6085,44 @@ def _MERDIVEN_RUN_GUI():
                 m._GUI_ORIG_IS_PRESSED = orig
                 keyboard.is_pressed = _gui_is_pressed
 
+        # ---- Yardımcı / görünüm ----
+        def _select_tab(self, key):
+            try:
+                tab = getattr(self, "_tab_refs", {}).get(key)
+                if tab is not None:
+                    self.nb.select(tab)
+            except Exception:
+                pass
+
+        def _status_color(self, status):
+            return {"Beklemede": "#9e9e9e", "Çalışıyor": "#4caf50", "Hata": "#f44336"}.get(status, "#9e9e9e")
+
+        def _set_mode_status(self, mode_id, status):
+            card = self._mode_cards.get(mode_id)
+            if not card:
+                return
+            try:
+                card_status = card.get("status_var")
+                if card_status:
+                    card_status.set(status)
+                lbl = card.get("status_label")
+                if lbl:
+                    lbl.configure(bg=self._status_color(status))
+                btn = card.get("action_btn")
+                if btn:
+                    btn.configure(text="DURDUR" if status == "Çalışıyor" else "BAŞLAT")
+            except Exception:
+                pass
+
+        def _set_active_mode(self, mode_id, name, status="Çalışıyor"):
+            try:
+                self.v["active_mode_label"].set(name)
+                self.v["active_mode_status"].set(status)
+                self.current_mode_id = mode_id
+                self._set_mode_status(mode_id, status)
+            except Exception:
+                pass
+
         # ---- Stil ve UI kur ----
         def _init_styles(self):
             try:
@@ -6086,6 +6134,161 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
 
+        def _toggle_mode(self, mode_id):
+            running = getattr(self, "thr", None)
+            is_running = bool(running and running.is_alive())
+            if is_running and self.current_mode_id == mode_id:
+                self.stop()
+                return
+            actions = {
+                "stairs": self._start_mode_stairs,
+                "market": self._start_mode_market,
+                "npc_buy": self._start_mode_npc_buy,
+                "pc_tune": self._start_mode_pc_tune,
+            }
+            fn = actions.get(mode_id)
+            if fn:
+                fn()
+
+        def _build_mod_vitrini(self, parent):
+            parent.columnconfigure(0, weight=3)
+            parent.columnconfigure(1, weight=1)
+            parent.rowconfigure(0, weight=1)
+
+            cards_container = ttk.Frame(parent)
+            cards_container.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+            cards_container.columnconfigure((0, 1), weight=1, uniform="cards")
+            cards_container.rowconfigure((0, 1), weight=1, uniform="cards")
+
+            right_panel = ttk.Frame(parent)
+            right_panel.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+
+            bottom = ttk.LabelFrame(parent, text="Son Kullanılan Profiller")
+            bottom.grid(row=1, column=0, columnspan=2, sticky="we", padx=8, pady=(0, 8))
+
+            def _make_card(parent, row, col, title, desc, mode_id, tab_key=None):
+                frame = ttk.Frame(parent, padding=10, relief="groove", borderwidth=2)
+                frame.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+                frame.columnconfigure(0, weight=1)
+                ttk.Label(frame, text=title, font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
+                ttk.Label(frame, text=desc, wraplength=360, justify="left").grid(row=1, column=0, sticky="w", pady=(4, 6))
+
+                status_row = ttk.Frame(frame)
+                status_row.grid(row=2, column=0, sticky="w", pady=(0, 6))
+                ttk.Label(status_row, text="Durum:").pack(side="left")
+                status_var = tk.StringVar(value="Beklemede")
+                status_lbl = tk.Label(status_row, textvariable=status_var, width=12, relief="groove",
+                                      bg=self._status_color("Beklemede"), fg="white")
+                status_lbl.pack(side="left", padx=(6, 0))
+
+                submode_frame = None
+                if mode_id == "stairs":
+                    submode_frame = ttk.LabelFrame(frame, text="Alt Mod", padding=8)
+                    submode_frame.grid(row=3, column=0, sticky="ew", pady=(0, 6))
+                    ttk.Radiobutton(submode_frame, text="Tam Tur: +7 → +8 basma", value="full_cycle",
+                                    variable=self.v["stairs_submode"]).grid(row=0, column=0, sticky="w", pady=2)
+                    ttk.Radiobutton(submode_frame, text="Sadece bankadaki itemleri +7'ye kadar bas", value="plus7_only",
+                                    variable=self.v["stairs_submode"]).grid(row=1, column=0, sticky="w", pady=2)
+
+                action_btn = ttk.Button(frame, text="BAŞLAT", command=lambda mid=mode_id: self._toggle_mode(mid))
+                action_btn.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+
+                if tab_key:
+                    ttk.Button(frame, text="Ayrıntılı Ayarlar...", command=lambda k=tab_key: self._select_tab(k)).grid(
+                        row=5, column=0, sticky="e", pady=(6, 0))
+
+                self._mode_cards[mode_id] = {"status_var": status_var, "status_label": status_lbl,
+                                            "action_btn": action_btn}
+
+            _make_card(cards_container, 0, 0, "Merdiven +7/+8 Basma",
+                       "Bankadan +1–+6 al, +7'ye kadar bas, +7'leri bankaya at, +8 denemelerini yap",
+                       "stairs", "genel")
+            _make_card(cards_container, 0, 1, "Pazar Kurma – Item Satış",
+                       "Pazar kur, slotları takip et, süre dolunca pazarı yenile ve item satışını yönet",
+                       "market", "item_satis")
+            _make_card(cards_container, 1, 0, "NPC’den Satın Alma",
+                       "NPC'den itemleri topla, envanteri doldur ve basma döngüsünü hazırla",
+                       "npc_buy", "satin_alma")
+            _make_card(cards_container, 1, 1, "PC Hızlandırma / Sistem Ayarları",
+                       "MiniPC/sanal makine için hızlandırma ve sistem optimizasyonu",
+                       "pc_tune", "hiz")
+
+            # Sağ panel
+            right_panel.columnconfigure(0, weight=1)
+            lf_active = ttk.LabelFrame(right_panel, text="Aktif Mod", padding=8)
+            lf_active.grid(row=0, column=0, sticky="we", pady=(0, 8))
+            ttk.Label(lf_active, textvariable=self.v["active_mode_label"], font=("Segoe UI", 12, "bold")).pack(
+                anchor="w", pady=(0, 4))
+            row_status = ttk.Frame(lf_active)
+            row_status.pack(anchor="w")
+            ttk.Label(row_status, text="Durum: ").pack(side="left")
+            ttk.Label(row_status, textvariable=self.v["active_mode_status"]).pack(side="left")
+
+            lf_log = ttk.LabelFrame(right_panel, text="Son Log Satırı", padding=8)
+            lf_log.grid(row=1, column=0, sticky="we", pady=(0, 8))
+            ttk.Label(lf_log, textvariable=self.v["last_log_line"], wraplength=240, justify="left").pack(anchor="w")
+
+            lf_speed = ttk.LabelFrame(right_panel, text="Hız Profili", padding=8)
+            lf_speed.grid(row=2, column=0, sticky="we")
+            speed_cb = ttk.Combobox(lf_speed, textvariable=self.v["speed_profile"],
+                                    values=["FAST", "BALANCED", "SAFE"], state="readonly")
+            speed_cb.pack(fill="x")
+            speed_cb.bind("<<ComboboxSelected>>", lambda _e=None: self._on_speed_profile_change())
+
+            ttk.Label(bottom, text="Son Kullanılan Profiller").pack(side="left", padx=6, pady=4)
+            for profile, value in [("V1_VMWARE_SAFE", "SAFE"), ("MiniPC_Hızlı", "FAST")]:
+                ttk.Button(bottom, text=profile,
+                           command=lambda v=value: self._apply_profile_shortcut(v)).pack(side="left", padx=4, pady=4)
+
+        def _on_speed_profile_change(self):
+            try:
+                self.save()
+            except Exception:
+                pass
+
+        def _apply_profile_shortcut(self, value):
+            try:
+                self.v["speed_profile"].set(value)
+                self.save()
+            except Exception:
+                pass
+
+        def _start_mode_stairs(self):
+            submode = self.v["stairs_submode"].get()
+            self.v["operation_mode"].set("ITEM_BASMA")
+            try:
+                setattr(m, "PLUS7_BANK_MODE", submode)
+            except Exception:
+                pass
+            self._set_active_mode("stairs", "Merdiven +7/+8 Basma")
+            self.save()
+            self.start()
+
+        def _start_mode_market(self):
+            self.v["operation_mode"].set("ITEM_SATIS")
+            self._set_active_mode("market", "Pazar Kurma – Item Satış")
+            self.save()
+            self.start()
+
+        def _start_mode_npc_buy(self):
+            self.v["operation_mode"].set("ITEM_BASMA")
+            self._set_active_mode("npc_buy", "NPC’den Satın Alma")
+            self.save()
+            self.start()
+
+        def _start_mode_pc_tune(self):
+            self._set_active_mode("pc_tune", "PC Hızlandırma / Sistem Ayarları")
+            try:
+                self.run_pc_tune()
+            except Exception:
+                pass
+
+        def run_pc_tune(self):
+            try:
+                self._msg("[GUI] PC hızlandırma / sistem ayarları moduna geçildi.")
+            except Exception:
+                pass
+
         def _build(self):
             self._init_styles()
 
@@ -6093,11 +6296,20 @@ def _MERDIVEN_RUN_GUI():
                 return ttk.Spinbox(parent, from_=frm, to=to, increment=inc, textvariable=var, width=width)
 
             nb = ttk.Notebook(self.root)
+            self.nb = nb
+            self._tab_refs = {}
             nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+            # -------------------- Mod Vitrini sekmesi ------------------
+            f_mod = ttk.Frame(nb)
+            nb.add(f_mod, text="Mod Vitrini")
+            self._tab_refs["mod_vitrini"] = f_mod
+            self._build_mod_vitrini(f_mod)
 
             # ---------------------- Genel sekmesi ----------------------
             f_genel = ttk.Frame(nb)
             nb.add(f_genel, text="Genel")
+            self._tab_refs["genel"] = f_genel
             for c in range(2):
                 f_genel.columnconfigure(c, weight=1)
 
@@ -6156,6 +6368,7 @@ def _MERDIVEN_RUN_GUI():
             # -------------------- Satın Alma sekmesi -------------------
             f_buy = ttk.Frame(nb)
             nb.add(f_buy, text="Satın Alma")
+            self._tab_refs["satin_alma"] = f_buy
             f_buy.columnconfigure(0, weight=1)
             f_buy.columnconfigure(1, weight=1)
 
@@ -6187,6 +6400,7 @@ def _MERDIVEN_RUN_GUI():
             # ------------------- Item Satış sekmesi --------------------
             f_sale = ttk.Frame(nb)
             nb.add(f_sale, text="Item Satış")
+            self._tab_refs["item_satis"] = f_sale
             for c in range(2):
                 f_sale.columnconfigure(c, weight=1)
 
@@ -6266,6 +6480,7 @@ def _MERDIVEN_RUN_GUI():
             # ----------------- Hız / Gelişmiş sekmesi ------------------
             f_speed = ttk.Frame(nb)
             nb.add(f_speed, text="Hız / Gelişmiş")
+            self._tab_refs["hiz"] = f_speed
             f_speed.columnconfigure(0, weight=1)
             f_speed.columnconfigure(1, weight=1)
 
@@ -6531,6 +6746,12 @@ def _MERDIVEN_RUN_GUI():
             self._msg("Durdur (F12 sanalı)...");
             m.GUI_ABORT = True;
             self.stage.set("Durduruluyor (F12)...")
+            try:
+                self.v["active_mode_status"].set("Beklemede")
+                if self.current_mode_id:
+                    self._set_mode_status(self.current_mode_id, "Beklemede")
+            except Exception:
+                pass
 
         def _sync_thread_state(self):
             thr = getattr(self, "thr", None)
@@ -6538,6 +6759,13 @@ def _MERDIVEN_RUN_GUI():
                 self.root.after(200, self._sync_thread_state)
             else:
                 self.thr = None
+                try:
+                    if self.current_mode_id:
+                        self._set_mode_status(self.current_mode_id, "Beklemede")
+                    self.current_mode_id = None
+                    self.v["active_mode_status"].set("Beklemede")
+                except Exception:
+                    pass
 
         def kill_all(self):
             self.stop()
@@ -6680,6 +6908,10 @@ def _MERDIVEN_RUN_GUI():
                     setattr(m, name, type(cur)(val) if not isinstance(cur, bool) else bool(val))
                 except Exception:
                     setattr(m, name, self.v[key].get())
+            try:
+                setattr(m, "PLUS7_BANK_MODE", self.v["stairs_submode"].get())
+            except Exception:
+                pass
             # hız + fren
             if hasattr(m, "SPEED_PROFILE"): m.SPEED_PROFILE = self.v["speed_profile"].get().upper()
             if hasattr(m, "PRESS_MIN"): m.PRESS_MIN = float(self.v["press_min"].get())
