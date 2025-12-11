@@ -982,20 +982,6 @@ def _kb_pressed(key_name: str) -> bool:
 
 def is_capslock_on(): return bool(ctypes.windll.user32.GetKeyState(VK_CAPITAL) & 1)
 
-
-def wait_if_paused():
-    told = False
-    while is_capslock_on():
-        if _abort_requested():
-            _raise_gui_abort()
-        if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
-        _ORIG_SLEEP(0.1);
-        watchdog_enforce()
-    if _abort_requested():
-        _raise_gui_abort()
-    return True
-
-
 def pause_point():
     wait_if_paused()
     if _abort_requested():
@@ -1810,12 +1796,6 @@ def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos
 def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
     return _run_scroll_purchase_flow(w, adet, (737, 183), prefix="[SCROLL] LOW")
 
-
-def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
-    # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
-    return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
-
-
 # ================== Görüntü/Template Yardımcıları ==================
 def grab_window_gray(win):
     x1, y1, x2, y2 = win.left, win.top, win.right, win.bottom
@@ -2537,20 +2517,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     ok = matched or ((fc == target) if force_exact else abs((fc or target) - target) <= 1)
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
     return ok
-
-
-def go_w_to_x(w, target_x: int, timeout: float = NPC_SEEK_TIMEOUT) -> bool: return precise_move_w_to_axis(w, 'x',
-                                                                                                          target_x,
-                                                                                                          timeout=timeout,
-                                                                                                          force_exact=True)
-
-
-def go_w_to_y(w, target_y: int, timeout: float = Y_SEEK_TIMEOUT) -> bool:  return precise_move_w_to_axis(w, 'y',
-                                                                                                         target_y,
-                                                                                                         timeout=timeout,
-                                                                                                         force_exact=True)
-
-
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
@@ -2650,63 +2616,6 @@ def ascend_stairs_to_top(w):
         return
 
     _finalize_top(_read_y_now())
-
-
-def go_to_npc_from_top(w):
-    set_stage("GO_TO_NPC");
-    ensure_ui_closed()
-    press_key(SC_A);
-    time.sleep(TURN_LEFT_SEC);
-    release_key(SC_A)
-    press_key(SC_W);
-    time.sleep(NPC_GIDIS_SURESI);
-    release_key(SC_W)
-    _ = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)  # başarısız olsa da akış devam etsin
-    time.sleep(0.1)
-
-    press_key(SC_B);
-    release_key(SC_B);
-    time.sleep(0.15)
-    mouse_move(*NPC_CONTEXT_RIGHTCLICK_POS);
-    mouse_click("right");
-    time.sleep(0.2)
-
-    # npc_acma.png tıklaması (ZAMAN AŞIMINDA RELAUNCH)
-    ok = wait_and_click_template(
-        w,
-        NPC_OPEN_TEXT_TEMPLATE_PATH,
-        threshold=NPC_OPEN_MATCH_THRESHOLD,
-        timeout=NPC_OPEN_FIND_TIMEOUT,
-        scales=NPC_OPEN_SCALES
-    )
-    if not ok:
-        print("[TIMEOUT] npc_acma.png bulunamadı / zaman aşımı.")
-        if globals().get("ON_TEMPLATE_TIMEOUT_RESTART", True):
-            print("[TIMEOUT] ON_TEMPLATE_TIMEOUT_RESTART=True → oyunu kapatıp yeniden başlatıyorum.")
-            try:
-                exit_game_fast(w)
-            except Exception as e:
-                print(f"[TIMEOUT] exit_game_fast hata: {e}")
-            w2 = relaunch_and_login_to_ingame()
-            # Relaunch sonrası akış çağırana dönsün; üst akış yeni w ile devam eder
-            return (False, w2 if w2 else w)
-        else:
-            print("[TIMEOUT] Bayrak False → relaunch yapmadan dönüyorum.")
-            return (False, w)
-
-    print("[Bilgi] NPC açma yazısı tıklandı.")
-    mouse_move(*NPC_MENU_PAGE2_POS);
-    mouse_click("left");
-    time.sleep(0.15)
-
-    onay_ok, w_after = confirm_npc_shop_or_relogin(w)
-    if not onay_ok:
-        return (False, w_after if w_after is not None else w)
-
-    purchased = buy_items_from_npc()
-    return (purchased, w)
-
-
 def go_to_anvil_from_top(start_x):
     set_stage("GO_TO_ANVIL");
     ensure_ui_closed()
@@ -2771,21 +2680,6 @@ def send_town_command(*a, **kw):
     mouse_click('left');
     time.sleep(TOWN_WAIT)
     BANK_OPEN = False
-
-
-def buy_items_from_npc():
-    set_stage("NPC_BUY_28")
-    for _ in range(NPC_BUY_TURN_COUNT):
-        for (x, y), clicks, btn in NPC_BUY_STEPS:
-            for __ in range(clicks):
-                wait_if_paused();
-                watchdog_enforce()
-                if _kb_pressed('f12'): return False
-                mouse_move(x, y);
-                mouse_click(btn);
-                time.sleep(0.08)
-    print("[NPC] 28 item alındı.");
-    return True
 
 
 # ================== Storage / Banka Sayfa ==================
@@ -4505,26 +4399,6 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     if not onay_ok: return (False, w_after if w_after is not None else w)
     purchased = buy_items_from_npc();
     return (purchased, w)
-
-
-def buy_items_from_npc():  # 2 tur * (2,2,3,3,4) = 28 item
-    set_stage("NPC_BUY_28")
-    steps = FABRIC_STEPS if BUY_MODE == "FABRIC" else LINEN_STEPS
-    for _ in range(BUY_TURNS):
-        for (x, y), clicks, btn in steps:
-            for __ in range(clicks):
-                wait_if_paused();
-                watchdog_enforce()
-                try:
-                    if _kb_pressed("f12"): return False
-                except Exception:
-                    pass
-                mouse_move(x, y);
-                mouse_click(btn);
-                time.sleep(0.08)
-    print(f"[NPC] Moda göre alım tamamlandı (mode={BUY_MODE}) → 28 item.")
-    return True
-
 
 def buy_items_from_npc():
     set_stage("NPC_BUY_28")
