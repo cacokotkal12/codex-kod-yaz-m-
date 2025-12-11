@@ -160,88 +160,6 @@ _logger.addHandler(_handler)
 def log(msg, lvl="info"): getattr(_logger, lvl, _logger.info)(msg)
 
 
-# ---- Kalıcı istatistik yardımcıları ----
-_STATS_FILE = PERSIST_PATH('istatistik.json')
-_STATS_DEFAULT = {
-    "PLUS7_BANK_COUNT": 0,
-    "PLUS8_BANK_COUNT": 0,
-    "MARKET_SOLD_COUNT": 0,
-}
-_STATS_LOCK = threading.Lock()
-_STATISTICS = None
-
-
-def _sync_statistics_globals(data: Dict[str, Any]):
-    globals()["PLUS7_BANK_COUNT"] = int(data.get("PLUS7_BANK_COUNT", 0) or 0)
-    globals()["PLUS8_BANK_COUNT"] = int(data.get("PLUS8_BANK_COUNT", 0) or 0)
-    globals()["MARKET_SOLD_COUNT"] = int(data.get("MARKET_SOLD_COUNT", 0) or 0)
-
-
-def _notify_stats_gui():
-    try:
-        cb = globals().get("_GUI_UPDATE_STATS")
-        if callable(cb):
-            cb()
-    except Exception:
-        pass
-
-
-def _load_statistics() -> Dict[str, Any]:
-    data = dict(_STATS_DEFAULT)
-    try:
-        with open(_STATS_FILE, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data.update({k: loaded.get(k, v) for k, v in _STATS_DEFAULT.items()})
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        print(f"[ISTATISTIK] Dosya okunamadı: {exc}")
-    return data
-
-
-def _save_statistics(data: Dict[str, Any]):
-    try:
-        tmp = _STATS_FILE + ".tmp"
-        os.makedirs(os.path.dirname(_STATS_FILE), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _STATS_FILE)
-    except Exception as exc:
-        print(f"[ISTATISTIK] Kaydedilemedi: {exc}")
-
-
-def _init_statistics():
-    global _STATISTICS
-    _STATISTICS = _load_statistics()
-    _sync_statistics_globals(_STATISTICS)
-    _save_statistics(_STATISTICS)
-
-
-def reset_statistics():
-    global _STATISTICS, LAST_TUR_SOLD
-    with _STATS_LOCK:
-        _STATISTICS = dict(_STATS_DEFAULT)
-        _save_statistics(_STATISTICS)
-    LAST_TUR_SOLD = 0
-    _sync_statistics_globals(_STATISTICS)
-    _notify_stats_gui()
-
-
-def _increment_stat(key: str, delta: int):
-    global _STATISTICS
-    if delta <= 0 or key not in _STATS_DEFAULT:
-        return
-    with _STATS_LOCK:
-        if _STATISTICS is None:
-            _STATISTICS = _load_statistics()
-        cur = int(_STATISTICS.get(key, 0) or 0)
-        _STATISTICS[key] = cur + int(delta)
-        _save_statistics(_STATISTICS)
-    _sync_statistics_globals(_STATISTICS)
-    _notify_stats_gui()
-
-
 _ORIG_SLEEP = time.sleep
 _KEYBOARD_IS_PRESSED_ORIG = getattr(keyboard, "is_pressed", None)
 
@@ -272,8 +190,6 @@ def _sleep_abortable(seconds: float):
 
 
 time.sleep = _sleep_abortable
-
-_init_statistics()
 
 
 def _grab_full_bgr():
@@ -486,22 +402,8 @@ KRALLIK_CLICK_X = 0
 KRALLIK_CLICK_Y = 0
 KRALLIK_TIKLAMA_ARALIGI = 0.0
 KRALLIK_TIKLAMA_SURESI = 0.05
-KRALLIK_CLICK_POS_1 = (0, 0)
-KRALLIK_CLICK_POS_2 = (0, 0)
-
-# ---- İstatistik / Sayaç ----
-PLUS7_BANK_COUNT = 0
-PLUS8_BANK_COUNT = 0
-MARKET_SOLD_COUNT = 0
-LAST_TUR_SOLD = 0
-TUR_BASLANGIC_ITEM_SAYISI = 0
-
-# ---- Telegram boş banka uyarı ayarları ----
-TELEGRAM_EMPTY_BANK_BURST_COUNT = 1
-TELEGRAM_EMPTY_BANK_INTERVAL_MIN = 10.0
 
 _GUI_UPDATE_SALE_SLOT = None
-_GUI_UPDATE_STATS = None
 
 
 def _choose_server_xy():
@@ -1080,6 +982,20 @@ def _kb_pressed(key_name: str) -> bool:
 
 def is_capslock_on(): return bool(ctypes.windll.user32.GetKeyState(VK_CAPITAL) & 1)
 
+
+def wait_if_paused():
+    told = False
+    while is_capslock_on():
+        if _abort_requested():
+            _raise_gui_abort()
+        if not told: print("[PAUSE] CapsLock AÇIK. Devam için kapat."); told = True
+        _ORIG_SLEEP(0.1);
+        watchdog_enforce()
+    if _abort_requested():
+        _raise_gui_abort()
+    return True
+
+
 def pause_point():
     wait_if_paused()
     if _abort_requested():
@@ -1236,51 +1152,6 @@ def send_telegram_message(text: str) -> bool:
     except Exception as exc:
         print(f"[TELEGRAM] Hata: {exc}")
     return False
-
-
-_EMPTY_BANK_NOTIFY_ACTIVE = False
-_EMPTY_BANK_LAST_SEND_TS = 0.0
-_EMPTY_BANK_THREAD = None
-
-
-def _empty_bank_notifier_loop():
-    global _EMPTY_BANK_THREAD, _EMPTY_BANK_LAST_SEND_TS
-    while _EMPTY_BANK_NOTIFY_ACTIVE:
-        try:
-            interval_min = float(globals().get("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", TELEGRAM_EMPTY_BANK_INTERVAL_MIN))
-        except Exception:
-            interval_min = TELEGRAM_EMPTY_BANK_INTERVAL_MIN
-        interval_sec = max(1.0, interval_min * 60.0)
-        remaining = interval_sec - (time.time() - float(_EMPTY_BANK_LAST_SEND_TS or 0.0))
-        if remaining > 0:
-            time.sleep(min(remaining, 30.0))
-            continue
-        msg = str(globals().get("ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))
-        send_telegram_message(msg)
-        _EMPTY_BANK_LAST_SEND_TS = time.time()
-    _EMPTY_BANK_THREAD = None
-
-
-def _stop_empty_bank_notifier():
-    global _EMPTY_BANK_NOTIFY_ACTIVE
-    _EMPTY_BANK_NOTIFY_ACTIVE = False
-
-
-def _trigger_empty_bank_notifications(message: str):
-    global _EMPTY_BANK_NOTIFY_ACTIVE, _EMPTY_BANK_LAST_SEND_TS, _EMPTY_BANK_THREAD
-    burst = 1
-    try:
-        burst = max(1, int(globals().get("TELEGRAM_EMPTY_BANK_BURST_COUNT", TELEGRAM_EMPTY_BANK_BURST_COUNT)))
-    except Exception:
-        burst = 1
-    for _ in range(burst):
-        send_telegram_message(message)
-        time.sleep(0.05)
-    _EMPTY_BANK_LAST_SEND_TS = time.time()
-    _EMPTY_BANK_NOTIFY_ACTIVE = True
-    if _EMPTY_BANK_THREAD is None or not getattr(_EMPTY_BANK_THREAD, "is_alive", lambda: False)():
-        _EMPTY_BANK_THREAD = threading.Thread(target=_empty_bank_notifier_loop, daemon=True)
-        _EMPTY_BANK_THREAD.start()
 
 
 # ---- Merdiven tepe geri adım ayarı ----
@@ -1939,6 +1810,12 @@ def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos
 def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
     return _run_scroll_purchase_flow(w, adet, (737, 183), prefix="[SCROLL] LOW")
 
+
+def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
+    # YAMA: tek akış — önce exit, sonra relaunch, town ve NPC alış
+    return _run_scroll_purchase_flow(w, adet, SCROLL_VENDOR_MID_POS, prefix="[SCROLL][MID]")
+
+
 # ================== Görüntü/Template Yardımcıları ==================
 def grab_window_gray(win):
     x1, y1, x2, y2 = win.left, win.top, win.right, win.bottom
@@ -2293,11 +2170,6 @@ def deposit_inventory_plusN_to_bank(win, N: int):
             except Exception as e:
                 print(f"[STORAGE] Slot ({c},{r}) hata: {e}")
     print(f"[STORAGE] Bankaya atılan +{N}: {deposited}");
-    if deposited > 0:
-        if N == 7:
-            _increment_stat("PLUS7_BANK_COUNT", deposited)
-        elif N == 8:
-            _increment_stat("PLUS8_BANK_COUNT", deposited)
     return deposited
 
 
@@ -2665,6 +2537,20 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     ok = matched or ((fc == target) if force_exact else abs((fc or target) - target) <= 1)
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
     return ok
+
+
+def go_w_to_x(w, target_x: int, timeout: float = NPC_SEEK_TIMEOUT) -> bool: return precise_move_w_to_axis(w, 'x',
+                                                                                                          target_x,
+                                                                                                          timeout=timeout,
+                                                                                                          force_exact=True)
+
+
+def go_w_to_y(w, target_y: int, timeout: float = Y_SEEK_TIMEOUT) -> bool:  return precise_move_w_to_axis(w, 'y',
+                                                                                                         target_y,
+                                                                                                         timeout=timeout,
+                                                                                                         force_exact=True)
+
+
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
@@ -2764,6 +2650,63 @@ def ascend_stairs_to_top(w):
         return
 
     _finalize_top(_read_y_now())
+
+
+def go_to_npc_from_top(w):
+    set_stage("GO_TO_NPC");
+    ensure_ui_closed()
+    press_key(SC_A);
+    time.sleep(TURN_LEFT_SEC);
+    release_key(SC_A)
+    press_key(SC_W);
+    time.sleep(NPC_GIDIS_SURESI);
+    release_key(SC_W)
+    _ = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)  # başarısız olsa da akış devam etsin
+    time.sleep(0.1)
+
+    press_key(SC_B);
+    release_key(SC_B);
+    time.sleep(0.15)
+    mouse_move(*NPC_CONTEXT_RIGHTCLICK_POS);
+    mouse_click("right");
+    time.sleep(0.2)
+
+    # npc_acma.png tıklaması (ZAMAN AŞIMINDA RELAUNCH)
+    ok = wait_and_click_template(
+        w,
+        NPC_OPEN_TEXT_TEMPLATE_PATH,
+        threshold=NPC_OPEN_MATCH_THRESHOLD,
+        timeout=NPC_OPEN_FIND_TIMEOUT,
+        scales=NPC_OPEN_SCALES
+    )
+    if not ok:
+        print("[TIMEOUT] npc_acma.png bulunamadı / zaman aşımı.")
+        if globals().get("ON_TEMPLATE_TIMEOUT_RESTART", True):
+            print("[TIMEOUT] ON_TEMPLATE_TIMEOUT_RESTART=True → oyunu kapatıp yeniden başlatıyorum.")
+            try:
+                exit_game_fast(w)
+            except Exception as e:
+                print(f"[TIMEOUT] exit_game_fast hata: {e}")
+            w2 = relaunch_and_login_to_ingame()
+            # Relaunch sonrası akış çağırana dönsün; üst akış yeni w ile devam eder
+            return (False, w2 if w2 else w)
+        else:
+            print("[TIMEOUT] Bayrak False → relaunch yapmadan dönüyorum.")
+            return (False, w)
+
+    print("[Bilgi] NPC açma yazısı tıklandı.")
+    mouse_move(*NPC_MENU_PAGE2_POS);
+    mouse_click("left");
+    time.sleep(0.15)
+
+    onay_ok, w_after = confirm_npc_shop_or_relogin(w)
+    if not onay_ok:
+        return (False, w_after if w_after is not None else w)
+
+    purchased = buy_items_from_npc()
+    return (purchased, w)
+
+
 def go_to_anvil_from_top(start_x):
     set_stage("GO_TO_ANVIL");
     ensure_ui_closed()
@@ -2828,6 +2771,21 @@ def send_town_command(*a, **kw):
     mouse_click('left');
     time.sleep(TOWN_WAIT)
     BANK_OPEN = False
+
+
+def buy_items_from_npc():
+    set_stage("NPC_BUY_28")
+    for _ in range(NPC_BUY_TURN_COUNT):
+        for (x, y), clicks, btn in NPC_BUY_STEPS:
+            for __ in range(clicks):
+                wait_if_paused();
+                watchdog_enforce()
+                if _kb_pressed('f12'): return False
+                mouse_move(x, y);
+                mouse_click(btn);
+                time.sleep(0.08)
+    print("[NPC] 28 item alındı.");
+    return True
 
 
 # ================== Storage / Banka Sayfa ==================
@@ -3093,51 +3051,6 @@ def _item_sale_fill_market(price_text: str) -> int:
     return filled
 
 
-def _read_inventory_item_count() -> int:
-    """Envanterdeki toplam item sayısını güvenli biçimde döndür."""
-    total_slots = SLOT_COLS * SLOT_ROWS
-    try:
-        press_key(SC_I); release_key(SC_I); time.sleep(0.5)
-        empty_slots = count_empty_slots("INV")
-    except Exception:
-        empty_slots = total_slots
-    finally:
-        try:
-            press_key(SC_I); release_key(SC_I)
-        except Exception:
-            pass
-        time.sleep(0.2)
-    filled = max(0, min(total_slots, total_slots - int(empty_slots)))
-    return filled
-
-
-def _set_market_round_start_from_inventory() -> int:
-    """Pazar turu başlangıcında envanterdeki item sayısını kaydet."""
-    global TUR_BASLANGIC_ITEM_SAYISI, LAST_TUR_SOLD
-    count = _read_inventory_item_count()
-    TUR_BASLANGIC_ITEM_SAYISI = count
-    LAST_TUR_SOLD = 0
-    _notify_stats_gui()
-    return count
-
-
-def _update_market_sold_stats(empty_slots: int) -> int:
-    """Tur sonu satılan item sayısını hesapla ve sayaçlara işle."""
-    global LAST_TUR_SOLD
-    start_count = int(TUR_BASLANGIC_ITEM_SAYISI or 0)
-    if start_count <= 0:
-        LAST_TUR_SOLD = 0
-        _notify_stats_gui()
-        return 0
-    total_slots = SLOT_COLS * SLOT_ROWS
-    current_items = max(0, min(total_slots, total_slots - max(0, int(empty_slots))))
-    sold = max(0, min(start_count, start_count - current_items))
-    LAST_TUR_SOLD = sold
-    _increment_stat("MARKET_SOLD_COUNT", sold)
-    _notify_stats_gui()
-    return sold
-
-
 def _item_sale_report_slot_count(empty_slots: int):
     print(f"[ITEM_SATIS] Boş slot sayısı: {empty_slots}")
     globals()["ITEM_SALE_LAST_SLOT_COUNT"] = int(empty_slots)
@@ -3232,9 +3145,10 @@ def _item_sale_handle_bank(w):
         notify_enabled = bool(globals().get("ITEM_SALE_BANK_NOTIFY", ITEM_SALE_BANK_NOTIFY))
         if notify_enabled:
             message = str(globals().get("ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))
-            _trigger_empty_bank_notifications(message)
-            print(f"[ITEM_SATIS][BANK] Telegram bildirimi tetiklendi: {message}")
-            stage_detail(f"Banka boş bildirimi tetiklendi: {message}")
+            ok = send_telegram_message(message)
+            status = "gönderildi" if ok else "gönderilemedi"
+            print(f"[ITEM_SATIS][BANK] Telegram bildirimi {status}: {message}")
+            stage_detail(f"Banka boş bildirimi {status}: {message}")
         set_stage("ITEM_SATIS_BANK_BOS")
         with key_tempo(0.0):
             press_key(SC_C)
@@ -3245,52 +3159,40 @@ def _item_sale_handle_bank(w):
         return False
 
     exit_game_fast(new_w)
-    _stop_empty_bank_notifier()
     print(f"[ITEM_SATIS] Bankadan alınan: {taken}")
     stage_detail(f"Bankadan alınan: {taken}")
     return True
 
 
-def _item_sale_krallik_click(pos1, pos2, hold):
-    positions = []
-    for pos in (pos1, pos2):
-        try:
-            x, y = _ensure_int_pair(pos)
-        except Exception:
-            continue
-        if x == 0 and y == 0:
-            continue
-        positions.append((int(x), int(y)))
-    if not positions:
+def _item_sale_krallik_click(pos, hold):
+    if not pos:
         return
-
+    try:
+        x, y = int(pos[0]), int(pos[1])
+    except Exception:
+        return
+    if x == 0 and y == 0:
+        return
     try:
         hold_s = max(0.0, float(hold))
     except Exception:
         hold_s = 0.0
-    try:
-        mouse_hizi = float(globals().get("mouse_hizi", 0.05))
-    except Exception:
-        mouse_hizi = 0.05
 
-    for idx, (x, y) in enumerate(positions):
-        if not pause_point():
-            return
-        mouse_move(x, y)
-        extra = ctypes.c_ulong(0)
-        ii_ = Input_I()
-        ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, ctypes.pointer(extra))
-        SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
-        time.sleep(hold_s)
-        if _abort_requested():
-            return
-        ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
-        SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
-        time.sleep(mouse_hizi / 2)
-        if idx < len(positions) - 1:
-            time.sleep(0.07)
+    if not pause_point():
+        return
+    mouse_move(x, y)
+    extra = ctypes.c_ulong(0)
+    ii_ = Input_I()
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, ctypes.pointer(extra))
+    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+    time.sleep(hold_s)
+    if _abort_requested():
+        return
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, ctypes.pointer(extra))
+    SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(0), ii_)), ctypes.sizeof(Input))
+    time.sleep(mouse_hizi / 2)
     try:
-        stage_detail("Krallık yazısı tıklandı (çift nokta)")
+        stage_detail("Krallık yazısı tıklandı")
     except Exception:
         pass
 
@@ -3317,21 +3219,19 @@ def _item_sale_run_cycle(w):
     except Exception:
         krallik_interval = max(0.0, float(KRALLIK_TIKLAMA_ARALIGI))
     try:
-        krallik_pos1 = _ensure_int_pair(globals().get("KRALLIK_CLICK_POS_1", KRALLIK_CLICK_POS_1))
+        krallik_pos = (
+            int(globals().get("KRALLIK_CLICK_X", KRALLIK_CLICK_X)),
+            int(globals().get("KRALLIK_CLICK_Y", KRALLIK_CLICK_Y)),
+        )
     except Exception:
-        krallik_pos1 = (0, 0)
-    try:
-        krallik_pos2 = _ensure_int_pair(globals().get("KRALLIK_CLICK_POS_2", KRALLIK_CLICK_POS_2))
-    except Exception:
-        krallik_pos2 = (0, 0)
+        krallik_pos = None
     try:
         krallik_hold = float(globals().get("KRALLIK_TIKLAMA_SURESI", KRALLIK_TIKLAMA_SURESI))
     except Exception:
         krallik_hold = KRALLIK_TIKLAMA_SURESI
 
     next_krallik_click = None
-    valid_krallik = lambda p: isinstance(p, (tuple, list)) and not (int(p[0]) == 0 and int(p[1]) == 0)
-    if krallik_interval > 0 and (valid_krallik(krallik_pos1) or valid_krallik(krallik_pos2)):
+    if krallik_interval > 0 and krallik_pos is not None and not (krallik_pos[0] == 0 and krallik_pos[1] == 0):
         next_krallik_click = time.time() + krallik_interval
 
     set_stage("ITEM_SATIS_SLOT_TAKIP")
@@ -3360,9 +3260,7 @@ def _item_sale_run_cycle(w):
         if now_ts < next_krallik_click:
             return
         try:
-            _item_sale_krallik_click(krallik_pos1 if valid_krallik(krallik_pos1) else None,
-                                      krallik_pos2 if valid_krallik(krallik_pos2) else None,
-                                      krallik_hold)
+            _item_sale_krallik_click(krallik_pos, krallik_hold)
         except Exception as exc:
             print(f"[ITEM_SATIS] Krallık tıklama hata: {exc}")
         next_krallik_click = time.time() + krallik_interval
@@ -3440,10 +3338,6 @@ def _item_sale_run_cycle(w):
         if empty_slots >= bank_threshold:
             print(f"[ITEM_SATIS] Banka eşiği ({bank_threshold}) yakalandı.")
             stage_detail(f"Banka eşiği ({bank_threshold}) yakalandı")
-            sold = _update_market_sold_stats(empty_slots)
-            if sold > 0:
-                print(f"[ITEM_SATIS] Son tur satılan: {sold}")
-                stage_detail(f"Son tur satılan: {sold}")
             close_inventory()
             exit_min = globals().get("ITEM_SALE_EXIT_DELAY_MIN", ITEM_SALE_EXIT_DELAY_MIN)
             exit_max = globals().get("ITEM_SALE_EXIT_DELAY_MAX", ITEM_SALE_EXIT_DELAY_MAX)
@@ -3492,7 +3386,6 @@ def run_item_sale_mode():
             post_598_to_597()
         except Exception as e:
             print("[ITEM_SATIS] 598→597 hata:", e)
-        _set_market_round_start_from_inventory()
         _item_sale_move_to_market(w)
         _item_sale_refresh_market(initial=True)
         set_stage("ITEM_SATIS_SLOT_TAKIP")
@@ -4613,6 +4506,26 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     purchased = buy_items_from_npc();
     return (purchased, w)
 
+
+def buy_items_from_npc():  # 2 tur * (2,2,3,3,4) = 28 item
+    set_stage("NPC_BUY_28")
+    steps = FABRIC_STEPS if BUY_MODE == "FABRIC" else LINEN_STEPS
+    for _ in range(BUY_TURNS):
+        for (x, y), clicks, btn in steps:
+            for __ in range(clicks):
+                wait_if_paused();
+                watchdog_enforce()
+                try:
+                    if _kb_pressed("f12"): return False
+                except Exception:
+                    pass
+                mouse_move(x, y);
+                mouse_click(btn);
+                time.sleep(0.08)
+    print(f"[NPC] Moda göre alım tamamlandı (mode={BUY_MODE}) → 28 item.")
+    return True
+
+
 def buy_items_from_npc():
     set_stage("NPC_BUY_28")
     steps = FABRIC_STEPS if BUY_MODE == "FABRIC" else LINEN_STEPS
@@ -4867,24 +4780,18 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("ITEM_SALE_BANK_EMPTY_MESSAGE", "Banka boş mesajı", "Item Satış", "str",
                 _cfg_default("ITEM_SALE_BANK_EMPTY_MESSAGE", "Bankada item kalmadı"),
                 "Banka boş kalınca gönderilecek Telegram metni."),
-    ConfigField("TELEGRAM_EMPTY_BANK_BURST_COUNT", "Boş banka burst sayısı", "Item Satış", "int",
-                _cfg_default("TELEGRAM_EMPTY_BANK_BURST_COUNT", 1),
-                "Banka boşaldığında ardışık gönderilecek mesaj sayısı."),
-    ConfigField("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", "Boş banka tekrar süresi (dk)", "Item Satış", "float",
-                _cfg_default("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", 10.0),
-                "Banka boş kalmaya devam ederse yeniden uyarı aralığı."),
     ConfigField("TELEGRAM_TOKEN", "Telegram Token", "Item Satış", "str",
                 _cfg_default("TELEGRAM_TOKEN", ""),
                 "Telegram bot token değeri."),
     ConfigField("TELEGRAM_CHAT_ID", "Telegram Chat ID", "Item Satış", "str",
                 _cfg_default("TELEGRAM_CHAT_ID", ""),
                 "Telegram sohbet ID'si."),
-    ConfigField("KRALLIK_CLICK_POS_1", "Krallık tıklama 1 (x,y)", "Item Satış", "int_pair",
-                _cfg_default("KRALLIK_CLICK_POS_1", (0, 0)),
-                "İlk krallık yazısı tıklama koordinatı.", apply=_ensure_int_pair),
-    ConfigField("KRALLIK_CLICK_POS_2", "Krallık tıklama 2 (x,y)", "Item Satış", "int_pair",
-                _cfg_default("KRALLIK_CLICK_POS_2", (0, 0)),
-                "İkinci krallık yazısı tıklama koordinatı.", apply=_ensure_int_pair),
+    ConfigField("KRALLIK_CLICK_X", "Krallık tıklama X", "Item Satış", "int",
+                _cfg_default("KRALLIK_CLICK_X", 0),
+                "Krallık yazısı için tıklanacak X koordinatı."),
+    ConfigField("KRALLIK_CLICK_Y", "Krallık tıklama Y", "Item Satış", "int",
+                _cfg_default("KRALLIK_CLICK_Y", 0),
+                "Krallık yazısı için tıklanacak Y koordinatı."),
     ConfigField("KRALLIK_TIKLAMA_ARALIGI", "Krallık tıklama aralığı", "Item Satış", "float",
                 _cfg_default("KRALLIK_TIKLAMA_ARALIGI", 0.0),
                 "Krallık yazısı tıklama periyodu (sn)."),
@@ -5906,30 +5813,15 @@ def _MERDIVEN_RUN_GUI():
                     value=bool(getattr(m, "ITEM_SALE_BANK_NOTIFY", ITEM_SALE_BANK_NOTIFY))),
                 "sale_bank_message": tk.StringVar(
                     value=str(getattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))),
-                "telegram_empty_bank_burst": tk.IntVar(
-                    value=int(getattr(m, "TELEGRAM_EMPTY_BANK_BURST_COUNT", TELEGRAM_EMPTY_BANK_BURST_COUNT))),
-                "telegram_empty_bank_interval": tk.DoubleVar(
-                    value=float(getattr(m, "TELEGRAM_EMPTY_BANK_INTERVAL_MIN", TELEGRAM_EMPTY_BANK_INTERVAL_MIN))),
-                "krallik_click1_x": tk.IntVar(
-                    value=int(_ensure_int_pair(getattr(m, "KRALLIK_CLICK_POS_1", KRALLIK_CLICK_POS_1))[0])),
-                "krallik_click1_y": tk.IntVar(
-                    value=int(_ensure_int_pair(getattr(m, "KRALLIK_CLICK_POS_1", KRALLIK_CLICK_POS_1))[1])),
-                "krallik_click2_x": tk.IntVar(
-                    value=int(_ensure_int_pair(getattr(m, "KRALLIK_CLICK_POS_2", KRALLIK_CLICK_POS_2))[0])),
-                "krallik_click2_y": tk.IntVar(
-                    value=int(_ensure_int_pair(getattr(m, "KRALLIK_CLICK_POS_2", KRALLIK_CLICK_POS_2))[1])),
+                "krallik_click_x": tk.IntVar(value=int(getattr(m, "KRALLIK_CLICK_X", KRALLIK_CLICK_X))),
+                "krallik_click_y": tk.IntVar(value=int(getattr(m, "KRALLIK_CLICK_Y", KRALLIK_CLICK_Y))),
                 "krallik_click_interval": tk.DoubleVar(
                     value=float(getattr(m, "KRALLIK_TIKLAMA_ARALIGI", KRALLIK_TIKLAMA_ARALIGI))),
                 "krallik_click_hold": tk.DoubleVar(
                     value=float(getattr(m, "KRALLIK_TIKLAMA_SURESI", KRALLIK_TIKLAMA_SURESI))),
                 "telegram_token": tk.StringVar(value=str(getattr(m, "TELEGRAM_TOKEN", ""))),
                 "telegram_chat_id": tk.StringVar(value=str(getattr(m, "TELEGRAM_CHAT_ID", ""))),
-                "plus7_bank_count": tk.StringVar(value=str(getattr(m, "PLUS7_BANK_COUNT", 0))),
-                "plus8_bank_count": tk.StringVar(value=str(getattr(m, "PLUS8_BANK_COUNT", 0))),
-                "market_sold_total": tk.StringVar(value=str(getattr(m, "MARKET_SOLD_COUNT", 0))),
-                "last_tur_sold": tk.StringVar(value=str(getattr(m, "LAST_TUR_SOLD", 0))),
             }
-            self._stats_keys = ["plus7_bank_count", "plus8_bank_count", "market_sold_total", "last_tur_sold"]
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
             self.v["brake_bal"] = tk.IntVar(value=int(dm.get("BALANCED", 2)))
@@ -5943,11 +5835,6 @@ def _MERDIVEN_RUN_GUI():
                 m._GUI_UPDATE_SALE_SLOT = self._update_sale_slot
             except Exception:
                 pass
-            try:
-                m._GUI_UPDATE_STATS = self._refresh_stats_vars
-            except Exception:
-                pass
-            self._refresh_stats_vars()
             self._tick()
             self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -5979,32 +5866,10 @@ def _MERDIVEN_RUN_GUI():
 
             self.root.after(0, _apply)
 
-        def _refresh_stats_vars(self):
-            try:
-                self.v["plus7_bank_count"].set(str(getattr(m, "PLUS7_BANK_COUNT", 0)))
-                self.v["plus8_bank_count"].set(str(getattr(m, "PLUS8_BANK_COUNT", 0)))
-                self.v["market_sold_total"].set(str(getattr(m, "MARKET_SOLD_COUNT", 0)))
-                self.v["last_tur_sold"].set(str(getattr(m, "LAST_TUR_SOLD", 0)))
-            except Exception:
-                pass
-
-        def _reset_stats(self):
-            try:
-                reset_statistics()
-                self._refresh_stats_vars()
-                self._msg("İstatistikler sıfırlandı.")
-            except Exception as exc:
-                self._msg(f"İstatistikler sıfırlanamadı: {exc}")
-
         def _on_close(self):
             try:
                 if getattr(m, "_GUI_UPDATE_SALE_SLOT", None) is self._update_sale_slot:
                     m._GUI_UPDATE_SALE_SLOT = None
-            except Exception:
-                pass
-            try:
-                if getattr(m, "_GUI_UPDATE_STATS", None) is self._refresh_stats_vars:
-                    m._GUI_UPDATE_STATS = None
             except Exception:
                 pass
             try:
@@ -6129,30 +5994,6 @@ def _MERDIVEN_RUN_GUI():
             ttk.Radiobutton(lf_mode, text="Artı 7’ye item basma", value=PLUS7_BANK_MODE,
                             variable=self.v["operation_mode"]).grid(row=0, column=2, sticky="w", padx=4, pady=2)
             ttk.Button(lf_mode, text="Kaydet", command=self.save_mode_selection).grid(row=0, column=3, padx=6, pady=2)
-            r += 1
-
-            lf_stats = ttk.LabelFrame(f1, text="İstatistikler")
-            lf_stats.grid(row=r, column=0, columnspan=4, sticky="we", pady=6)
-            ttk.Label(lf_stats, text="Bankaya bırakılan +7:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Label(lf_stats, textvariable=self.v["plus7_bank_count"], foreground="blue").grid(row=0, column=1,
-                                                                                                    sticky="w", padx=4,
-                                                                                                    pady=2)
-            ttk.Label(lf_stats, text="Bankaya bırakılan +8:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Label(lf_stats, textvariable=self.v["plus8_bank_count"], foreground="blue").grid(row=1, column=1,
-                                                                                                    sticky="w", padx=4,
-                                                                                                    pady=2)
-            ttk.Label(lf_stats, text="Toplam satılan item:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
-            ttk.Label(lf_stats, textvariable=self.v["market_sold_total"], foreground="blue").grid(row=0, column=3,
-                                                                                                     sticky="w",
-                                                                                                     padx=4, pady=2)
-            ttk.Label(lf_stats, text="Son tur satılan:").grid(row=1, column=2, sticky="e", padx=4, pady=2)
-            ttk.Label(lf_stats, textvariable=self.v["last_tur_sold"], foreground="blue").grid(row=1, column=3,
-                                                                                                sticky="w", padx=4,
-                                                                                                pady=2)
-            ttk.Button(lf_stats, text="İstatistikleri Sıfırla", command=self._reset_stats).grid(row=2, column=0,
-                                                                                                columnspan=4,
-                                                                                                sticky="we", padx=4,
-                                                                                                pady=4)
 
             # SATIN ALMA
             f2 = ttk.Frame(nb);
@@ -6276,24 +6117,10 @@ def _MERDIVEN_RUN_GUI():
                                                                                      sticky="w", padx=4, pady=2)
             ttk.Label(lf_bank, text="Telegram Chat ID:").grid(row=6, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_bank, textvariable=self.v["telegram_chat_id"], width=32).grid(row=6, column=1, columnspan=3,
-                                                                                        sticky="w", padx=4, pady=2)
-
-            lf_telegram = ttk.LabelFrame(f_sale, text="Telegram Uyarı Ayarları")
-            lf_telegram.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_telegram, text="Boş banka uyarısı – burst sayısı:").grid(row=0, column=0, sticky="e",
-                                                                                  padx=4, pady=2)
-            ttk.Entry(lf_telegram, textvariable=self.v["telegram_empty_bank_burst"], width=8).grid(row=0, column=1,
-                                                                                                    sticky="w",
-                                                                                                    padx=4, pady=2)
-            ttk.Label(lf_telegram, text="Boş banka uyarısı – dakika aralığı:").grid(row=1, column=0, sticky="e",
-                                                                                     padx=4, pady=2)
-            ttk.Entry(lf_telegram, textvariable=self.v["telegram_empty_bank_interval"], width=8).grid(row=1, column=1,
-                                                                                                      sticky="w",
-                                                                                                      padx=4,
-                                                                                                      pady=2)
+                                                                                       sticky="w", padx=4, pady=2)
 
             lf_monitor = ttk.LabelFrame(f_sale, text="Envanter Takibi")
-            lf_monitor.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_monitor.grid(row=4, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Label(lf_monitor, text="Boş Slot Sayısı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Label(lf_monitor, textvariable=self.sale_slot_var, width=6, foreground="blue").grid(row=0, column=1,
                                                                                                     sticky="w",
@@ -6303,7 +6130,7 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(lf_monitor, textvariable=self.v["sale_slot_interval"], width=8).grid(row=1, column=1, sticky="w",
                                                                                            padx=4, pady=2)
             lf_auto_refresh = ttk.LabelFrame(f_sale, text="Otomatik Pazar Yenileme")
-            lf_auto_refresh.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            lf_auto_refresh.grid(row=5, column=0, columnspan=2, sticky="we", padx=6, pady=6)
             ttk.Checkbutton(lf_auto_refresh, text="Pazar yenileme aktif",
                             variable=self.v["auto_market_refresh_enabled"], onvalue=True,
                             offvalue=False).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=2)
@@ -6313,33 +6140,25 @@ def _MERDIVEN_RUN_GUI():
                 row=1, column=1, sticky="w", padx=4, pady=2)
 
             lf_krallik = ttk.LabelFrame(f_sale, text="Krallık Yazısı Tıklama")
-            lf_krallik.grid(row=7, column=0, columnspan=2, sticky="we", padx=6, pady=6)
-            ttk.Label(lf_krallik, text="Tıklama 1 X:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click1_x"], width=8).grid(row=0, column=1,
-                                                                                         sticky="w", padx=4,
-                                                                                         pady=2)
-            ttk.Label(lf_krallik, text="Tıklama 1 Y:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click1_y"], width=8).grid(row=1, column=1,
-                                                                                         sticky="w", padx=4,
-                                                                                         pady=2)
-            ttk.Label(lf_krallik, text="Tıklama 2 X:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click2_x"], width=8).grid(row=0, column=3,
-                                                                                         sticky="w", padx=4,
-                                                                                         pady=2)
-            ttk.Label(lf_krallik, text="Tıklama 2 Y:").grid(row=1, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click2_y"], width=8).grid(row=1, column=3,
-                                                                                         sticky="w", padx=4,
-                                                                                         pady=2)
-            ttk.Label(lf_krallik, text="Tıklama Aralığı (sn):").grid(row=2, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_interval"], width=8).grid(row=2, column=1,
+            lf_krallik.grid(row=6, column=0, columnspan=2, sticky="we", padx=6, pady=6)
+            ttk.Label(lf_krallik, text="X Koordinatı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_x"], width=8).grid(row=0, column=1,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_krallik, text="Y Koordinatı:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_y"], width=8).grid(row=1, column=1,
+                                                                                        sticky="w", padx=4,
+                                                                                        pady=2)
+            ttk.Label(lf_krallik, text="Tıklama Aralığı (sn):").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_interval"], width=8).grid(row=0, column=3,
                                                                                                sticky="w", padx=4,
                                                                                                pady=2)
-            ttk.Label(lf_krallik, text="Tıklama Süresi (sn):").grid(row=2, column=2, sticky="e", padx=4, pady=2)
-            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_hold"], width=8).grid(row=2, column=3,
+            ttk.Label(lf_krallik, text="Tıklama Süresi (sn):").grid(row=1, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_krallik, textvariable=self.v["krallik_click_hold"], width=8).grid(row=1, column=3,
                                                                                            sticky="w", padx=4,
                                                                                            pady=2)
 
-            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=8, column=0, columnspan=2,
+            ttk.Button(f_sale, text="Tüm Ayarları Kaydet", command=self.save).grid(row=7, column=0, columnspan=2,
                                                                                    sticky="we", padx=6, pady=6)
 
             # HIZ
@@ -6611,8 +6430,6 @@ def _MERDIVEN_RUN_GUI():
                 j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
-                if hasattr(self, "_stats_keys") and k in self._stats_keys:
-                    continue
                 if k in self.v:
                     try:
                         import tkinter as tk
@@ -6638,13 +6455,6 @@ def _MERDIVEN_RUN_GUI():
                         self.v["sale_refresh_max"].set(legacy)
                 except Exception:
                     pass
-            # Krallık tıklama eski alanlarından geri uyumluluk
-            try:
-                if "krallik_click_x" in gui_data and "krallik_click_y" in gui_data:
-                    self.v["krallik_click1_x"].set(int(gui_data.get("krallik_click_x", 0)))
-                    self.v["krallik_click1_y"].set(int(gui_data.get("krallik_click_y", 0)))
-            except Exception:
-                pass
             # advanced → modüle uygula
             for name, raw in (j.get("advanced", {}) or {}).items():
                 try:
@@ -6696,14 +6506,8 @@ def _MERDIVEN_RUN_GUI():
             setattr(m, "ITEM_SALE_EXIT_DELAY_MAX", float(self.v["sale_exit_delay_max"].get()))
             setattr(m, "ITEM_SALE_BANK_NOTIFY", bool(self.v["sale_bank_notify"].get()))
             setattr(m, "ITEM_SALE_BANK_EMPTY_MESSAGE", self.v["sale_bank_message"].get())
-            setattr(m, "TELEGRAM_EMPTY_BANK_BURST_COUNT", int(self.v["telegram_empty_bank_burst"].get()))
-            setattr(m, "TELEGRAM_EMPTY_BANK_INTERVAL_MIN", float(self.v["telegram_empty_bank_interval"].get()))
-            pos1 = (int(self.v["krallik_click1_x"].get()), int(self.v["krallik_click1_y"].get()))
-            pos2 = (int(self.v["krallik_click2_x"].get()), int(self.v["krallik_click2_y"].get()))
-            setattr(m, "KRALLIK_CLICK_POS_1", pos1)
-            setattr(m, "KRALLIK_CLICK_POS_2", pos2)
-            setattr(m, "KRALLIK_CLICK_X", pos1[0])
-            setattr(m, "KRALLIK_CLICK_Y", pos1[1])
+            setattr(m, "KRALLIK_CLICK_X", int(self.v["krallik_click_x"].get()))
+            setattr(m, "KRALLIK_CLICK_Y", int(self.v["krallik_click_y"].get()))
             setattr(m, "KRALLIK_TIKLAMA_ARALIGI", float(self.v["krallik_click_interval"].get()))
             setattr(m, "KRALLIK_TIKLAMA_SURESI", float(self.v["krallik_click_hold"].get()))
             setattr(m, "TELEGRAM_TOKEN", self.v["telegram_token"].get().strip())
@@ -6759,8 +6563,6 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 data = {"gui": {}, "advanced": {}}
             for k, var in self.v.items():
-                if k in getattr(self, "_stats_keys", ()):  # anlık sayaçları config'e yazma
-                    continue
                 try:
                     data["gui"][k] = var.get()
                 except Exception:
