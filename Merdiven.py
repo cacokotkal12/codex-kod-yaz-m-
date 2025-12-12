@@ -74,7 +74,7 @@ from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 
 # [PATCH_TOWN_LOCK_BEGIN]
@@ -377,6 +377,7 @@ def _bye(): log("[EXIT] program sonlandı")
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
 tus_hizi = 0.050;
+LOGIN_CHAR_DELAY = 0.05  # Login harf yazma hızı (sn)
 mouse_hizi = 0.1;
 jitter_px = 0
 # ---- OCR / Tesseract ----
@@ -1221,15 +1222,16 @@ def release_vk(vk):
 
 
 def paste_text_from_clipboard(text: str) -> bool:
+    """Login için clipboard yerine harf harf yazma (mini PC/EXE uyumlu)."""
     if not pause_point(): return False
-    if set_clipboard_text(text):
-        press_vk(VK_CONTROL);
-        press_vk(VK_V);
-        release_vk(VK_V);
-        release_vk(VK_CONTROL);
-        time.sleep(0.05);
+    text = str(text or "")
+    if not text:
         return True
-    return False
+    for ch in text:
+        if not pause_point(): return False
+        keyboard.write(ch)
+        time.sleep(LOGIN_CHAR_DELAY)
+    return True
 
 
 def send_telegram_message(text: str) -> bool:
@@ -1373,7 +1375,7 @@ def _iter_processes():
         ctypes.windll.kernel32.CloseHandle(snapshot)
 
 
-def _pids_by_image(names: set[str]) -> set[int]:
+def _pids_by_image(names: Set[str]) -> Set[int]:
     want = {n.lower() for n in names}
     pids = set()
     try:
@@ -1384,8 +1386,7 @@ def _pids_by_image(names: set[str]) -> set[int]:
         pass
     return pids
 
-
-def _pids_from_hwnds(hwnds: list[int]) -> set[int]:
+def _pids_from_hwnds(hwnds: List[int]) -> Set[int]:
     pids = set()
     for h in hwnds:
         try:
@@ -1397,8 +1398,7 @@ def _pids_from_hwnds(hwnds: list[int]) -> set[int]:
             pass
     return pids
 
-
-def _enum_launcher_hwnds() -> list[int]:
+def _enum_launcher_hwnds() -> List[int]:
     hwnds = []
     try:
         titles = []
@@ -1414,8 +1414,7 @@ def _enum_launcher_hwnds() -> list[int]:
         pass
     return hwnds
 
-
-def _wm_close_hwnds(hwnds: list[int]):
+def _wm_close_hwnds(hwnds: List[int]):
     WM_CLOSE = 0x0010
     user32 = ctypes.windll.user32
     for h in hwnds:
@@ -1424,8 +1423,7 @@ def _wm_close_hwnds(hwnds: list[int]):
         except Exception:
             pass
 
-
-def _kill_pids(pids: set[int]):
+def _kill_pids(pids: Set[int]):
     k32 = ctypes.windll.kernel32
     PROCESS_TERMINATE = 0x0001
     for pid in list(pids):
