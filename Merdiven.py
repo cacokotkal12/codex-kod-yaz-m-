@@ -459,9 +459,9 @@ GAME_START_MATCH_THRESHOLD = 0.70;
 GAME_START_FIND_TIMEOUT = 8.0;
 GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
 GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
-GAME_START_FALLBACK_RELATIVE_POS = (640, 710)
+GAME_START_FALLBACK_RELATIVE_POS = (906, 600)
 GAME_START_VERIFY_TIMEOUT = 8.0
-TEMPLATE_EXTRA_CLICK_POS = (931, 602)
+TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
 LAUNCHER_START_CLICK_POS = (974, 726)
@@ -4962,7 +4962,7 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("GAME_START_EXTRA_SCALES", (0.78, 1.22, 1.35)),
                 "Eşleşme kaçtığında denenecek ek ölçekler.", apply=lambda v: list(_ensure_float_list(v))),
     ConfigField("GAME_START_FALLBACK_RELATIVE_POS", "Launcher Start göreli tık (x,y)", "Koordinat Grupları", "int_pair",
-                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (640, 710)),
+                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (906, 600)),
                 "Launcher penceresine göre Start fallback tıklaması.", apply=_ensure_int_pair),
     ConfigField("TEMPLATE_EXTRA_CLICK_POS", "Ek tık (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (931, 602)),
