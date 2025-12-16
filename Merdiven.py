@@ -268,10 +268,21 @@ _KEYBOARD_IS_PRESSED_ORIG = getattr(keyboard, "is_pressed", None)
 
 def _abort_requested() -> bool:
     if globals().get("GUI_ABORT", False):
+        try:
+            if "_stop_empty_bank_notifier" in globals():
+                if not globals().get("_EMPTY_BANK_STOP_EVENT", threading.Event()).is_set():
+                    globals().get("_stop_empty_bank_notifier")()
+        except Exception:
+            pass
         return True
     if _KEYBOARD_IS_PRESSED_ORIG is not None:
         try:
             if _KEYBOARD_IS_PRESSED_ORIG("f12"):
+                try:
+                    if "_stop_empty_bank_notifier" in globals():
+                        globals().get("_stop_empty_bank_notifier")()
+                except Exception:
+                    pass
                 return True
         except Exception:
             pass
@@ -443,9 +454,13 @@ BANK_PREV_PAGE_POS = (668, 389);
 BANK_PAGE_CLICK_DELAY = 0.12
 # ---- Game Start (Launcher sonrası) ----
 GAME_START_TEMPLATE_PATH = "oyun_start.png";
+GAME_START_TEMPLATE_PATHS = ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png");
 GAME_START_MATCH_THRESHOLD = 0.70;
 GAME_START_FIND_TIMEOUT = 8.0;
 GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
+GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
+GAME_START_FALLBACK_RELATIVE_POS = (640, 710)
+GAME_START_VERIFY_TIMEOUT = 8.0
 TEMPLATE_EXTRA_CLICK_POS = (931, 602)
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
@@ -1261,11 +1276,24 @@ def send_telegram_message(text: str) -> bool:
 _EMPTY_BANK_NOTIFY_ACTIVE = False
 _EMPTY_BANK_LAST_SEND_TS = 0.0
 _EMPTY_BANK_THREAD = None
+_EMPTY_BANK_STOP_EVENT = threading.Event()
+
+
+def _reset_empty_bank_state():
+    global _EMPTY_BANK_NOTIFY_ACTIVE, _EMPTY_BANK_LAST_SEND_TS, _EMPTY_BANK_THREAD
+    try:
+        _stop_empty_bank_notifier()
+    except Exception:
+        pass
+    _EMPTY_BANK_NOTIFY_ACTIVE = False
+    _EMPTY_BANK_LAST_SEND_TS = 0.0
+    _EMPTY_BANK_THREAD = None
+    _EMPTY_BANK_STOP_EVENT.clear()
 
 
 def _empty_bank_notifier_loop():
     global _EMPTY_BANK_THREAD, _EMPTY_BANK_LAST_SEND_TS
-    while _EMPTY_BANK_NOTIFY_ACTIVE:
+    while _EMPTY_BANK_NOTIFY_ACTIVE and not _EMPTY_BANK_STOP_EVENT.is_set():
         try:
             interval_min = float(globals().get("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", TELEGRAM_EMPTY_BANK_INTERVAL_MIN))
         except Exception:
@@ -1273,8 +1301,10 @@ def _empty_bank_notifier_loop():
         interval_sec = max(1.0, interval_min * 60.0)
         remaining = interval_sec - (time.time() - float(_EMPTY_BANK_LAST_SEND_TS or 0.0))
         if remaining > 0:
-            time.sleep(min(remaining, 30.0))
-            continue
+            if _EMPTY_BANK_STOP_EVENT.wait(min(remaining, 30.0)):
+                break
+            else:
+                continue
         msg = str(globals().get("ITEM_SALE_BANK_EMPTY_MESSAGE", ITEM_SALE_BANK_EMPTY_MESSAGE))
         send_telegram_message(msg)
         _EMPTY_BANK_LAST_SEND_TS = time.time()
@@ -1282,12 +1312,24 @@ def _empty_bank_notifier_loop():
 
 
 def _stop_empty_bank_notifier():
-    global _EMPTY_BANK_NOTIFY_ACTIVE
+    global _EMPTY_BANK_NOTIFY_ACTIVE, _EMPTY_BANK_THREAD, _EMPTY_BANK_LAST_SEND_TS
     _EMPTY_BANK_NOTIFY_ACTIVE = False
+    _EMPTY_BANK_STOP_EVENT.set()
+    thr = _EMPTY_BANK_THREAD
+    if thr and getattr(thr, "is_alive", lambda: False)():
+        try:
+            thr.join(timeout=1.5)
+        except Exception:
+            pass
+    _EMPTY_BANK_THREAD = None
+    _EMPTY_BANK_LAST_SEND_TS = 0.0
 
 
 def _trigger_empty_bank_notifications(message: str):
     global _EMPTY_BANK_NOTIFY_ACTIVE, _EMPTY_BANK_LAST_SEND_TS, _EMPTY_BANK_THREAD
+    if _EMPTY_BANK_STOP_EVENT.is_set():
+        print("[BANK_NOTIFY] Stop durumunda tetikleme yoksayıldı.")
+        return False
     burst = 1
     try:
         burst = max(1, int(globals().get("TELEGRAM_EMPTY_BANK_BURST_COUNT", TELEGRAM_EMPTY_BANK_BURST_COUNT)))
@@ -1301,6 +1343,7 @@ def _trigger_empty_bank_notifications(message: str):
     if _EMPTY_BANK_THREAD is None or not getattr(_EMPTY_BANK_THREAD, "is_alive", lambda: False)():
         _EMPTY_BANK_THREAD = threading.Thread(target=_empty_bank_notifier_loop, daemon=True)
         _EMPTY_BANK_THREAD.start()
+    return True
 
 
 # ---- Merdiven tepe geri adım ayarı ----
@@ -2075,12 +2118,124 @@ def pick_existing_template(paths):
     return None
 
 
+def _capture_debug_screenshot(prefix: str = "start_fail"):
+    try:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(CRASH_DIR, f"{prefix}_{ts}.png")
+        img = ImageGrab.grab();
+        img.save(path)
+        print(f"[DEBUG] Ekran görüntüsü kaydedildi: {path}")
+        return path
+    except Exception as e:
+        print(f"[DEBUG] Screenshot alınamadı: {e}")
+        return None
+
+
+def _game_start_scale_list():
+    scales = list(globals().get("GAME_START_SCALES", GAME_START_SCALES))
+    try:
+        extras = list(globals().get("GAME_START_EXTRA_SCALES", GAME_START_EXTRA_SCALES))
+        for s in extras:
+            if s not in scales:
+                scales.append(s)
+    except Exception:
+        pass
+    return tuple(scales)
+
+
+def _game_start_template_paths():
+    raw_list = []
+    try:
+        extra = globals().get("GAME_START_TEMPLATE_PATHS", GAME_START_TEMPLATE_PATHS)
+        if isinstance(extra, (list, tuple, set)):
+            raw_list.extend(list(extra))
+    except Exception:
+        pass
+    raw_list.append(globals().get("GAME_START_TEMPLATE_PATH", GAME_START_TEMPLATE_PATH))
+    seen = set()
+    paths = []
+    for p in raw_list:
+        if p in seen:
+            continue
+        seen.add(p)
+        pp = resource_path(p) if os.path.exists(resource_path(p)) else p
+        if os.path.exists(pp):
+            paths.append(pp)
+    return paths
+
+
+def _is_template_visible(win, templates, scales, threshold):
+    try:
+        gray = grab_window_gray(win)
+    except Exception:
+        return False
+    for path in templates:
+        tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if tmpl is None:
+            continue
+        score, _, _ = match_template_multiscale(gray, tmpl, scales)
+        if score >= threshold:
+            return True
+    return False
+
+
+def _click_game_start_fallback(win):
+    try:
+        rx, ry = globals().get("GAME_START_FALLBACK_RELATIVE_POS", GAME_START_FALLBACK_RELATIVE_POS)
+    except Exception:
+        rx, ry = GAME_START_FALLBACK_RELATIVE_POS
+    ax = int(win.left + rx)
+    ay = int(win.top + ry)
+    mouse_move(ax, ay);
+    mouse_click("left");
+    mouse_move(*TEMPLATE_EXTRA_CLICK_POS);
+    mouse_click("left");
+    print(f"[START] Fallback koordinat tıklandı @ ({ax},{ay})")
+
+
+def _wait_start_transition(win, templates, scales, timeout):
+    deadline = time.time() + timeout
+    has_templates = bool(templates)
+    while time.time() < deadline:
+        if _EMPTY_BANK_STOP_EVENT.is_set():
+            break
+        try:
+            if _ingame_by_hpbar_once(win):
+                return True
+        except Exception:
+            pass
+        if has_templates and not _is_template_visible(win, templates, scales, globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD)):
+            return True
+        time.sleep(0.4)
+    return False
+
+
 @with_retry("CLICK_START", attempts=5, delay=6)
 def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
     set_stage("START_RETRY")
-    ok = wait_and_click_template(w, GAME_START_TEMPLATE_PATH, threshold=GAME_START_MATCH_THRESHOLD,
-                                 timeout=GAME_START_FIND_TIMEOUT, scales=GAME_START_SCALES)
-    return True if ok else None
+    templates = _game_start_template_paths()
+    scales = _game_start_scale_list()
+    for attempt in range(1, int(attempts) + 1):
+        wait_if_paused();
+        watchdog_enforce()
+        if not templates:
+            print("[START] Şablon listesi boş, fallback koordinat denenecek.")
+        else:
+            for path in templates:
+                ok = wait_and_click_template(w, path, threshold=GAME_START_MATCH_THRESHOLD,
+                                             timeout=GAME_START_FIND_TIMEOUT, scales=scales)
+                if ok:
+                    if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+                        return True
+                    print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
+                    break
+        _click_game_start_fallback(w)
+        if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+            return True
+        if attempt < attempts:
+            time.sleep(max(0.5, float(wait_between)))
+    _capture_debug_screenshot("start_fail")
+    return None
 
 
 # ================== +N (7/8) OCR/Şablon ==================
@@ -4222,6 +4377,10 @@ def run_stairs_and_workflow(w):
 @crashguard("MAIN")
 def main():
     global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, BANK_FULL_FLAG  # <- GLOBAL EN BAŞTA!
+    try:
+        _reset_empty_bank_state()
+    except Exception:
+        pass
     mode = str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper()
     if mode == "ITEM_SATIS":
         run_item_sale_mode()
@@ -4793,9 +4952,18 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("BANK_PREV_PAGE_POS", "Banka geri (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("BANK_PREV_PAGE_POS", (668, 389)),
                 "Banka geri sayfa butonu.", apply=_ensure_int_pair),
+    ConfigField("GAME_START_TEMPLATE_PATHS", "Launcher Start şablonları", "Ölçek Listeleri", "list_str",
+                _cfg_default("GAME_START_TEMPLATE_PATHS", ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png")),
+                "Launcher Start butonu için alternatif şablonlar."),
     ConfigField("GAME_START_SCALES", "Launcher Start ölçekleri", "Ölçek Listeleri", "list_float",
                 _cfg_default("GAME_START_SCALES", (0.85, 0.9, 1.0, 1.1, 1.2)),
                 "Launcher Start butonu arama ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("GAME_START_EXTRA_SCALES", "Launcher Start ekstra ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("GAME_START_EXTRA_SCALES", (0.78, 1.22, 1.35)),
+                "Eşleşme kaçtığında denenecek ek ölçekler.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("GAME_START_FALLBACK_RELATIVE_POS", "Launcher Start göreli tık (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (640, 710)),
+                "Launcher penceresine göre Start fallback tıklaması.", apply=_ensure_int_pair),
     ConfigField("TEMPLATE_EXTRA_CLICK_POS", "Ek tık (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (931, 602)),
                 "Template sonrası ekstra tıklama noktası.", apply=_ensure_int_pair),
@@ -5426,9 +5594,12 @@ _TR = {
     'TOWN_WAIT': 'town bekleme (sn)',
     'WINDOW_TITLE_KEYWORD': 'pencere başlık anahtar',
     'WINDOW_APPEAR_TIMEOUT': 'pencere görünme zaman aşımı (sn)',
-    'GAME_START_TEMPLATE_PATH': "launch 'Start' şablonu", 'GAME_START_MATCH_THRESHOLD': 'Start şablon eşiği',
+    'GAME_START_TEMPLATE_PATH': "launch 'Start' şablonu", 'GAME_START_TEMPLATE_PATHS': "launch 'Start' şablonları",
+    'GAME_START_MATCH_THRESHOLD': 'Start şablon eşiği',
     'GAME_START_FIND_TIMEOUT': 'Start arama zaman aşımı (sn)',
+    'GAME_START_EXTRA_SCALES': 'Start ekstra ölçekleri',
     'LAUNCHER_EXE': 'Launcher yolu',
+    'GAME_START_FALLBACK_RELATIVE_POS': 'Start fallback tık (göreli)',
     'SC_A': 'scan A',
     'SC_D': 'scan D',
     'SC_W': 'scan W',
@@ -5526,9 +5697,12 @@ _ADV_CATEGORY_RULES = (
             'WINDOW_TITLE_KEYWORD',
             'WINDOW_APPEAR_TIMEOUT',
             'GAME_START_TEMPLATE_PATH',
+            'GAME_START_TEMPLATE_PATHS',
             'GAME_START_MATCH_THRESHOLD',
             'GAME_START_FIND_TIMEOUT',
             'GAME_START_SCALES',
+            'GAME_START_EXTRA_SCALES',
+            'GAME_START_FALLBACK_RELATIVE_POS',
             'TEMPLATE_EXTRA_CLICK_POS',
             'REQUEST_RELAUNCH',
         ),
@@ -5872,8 +6046,10 @@ def _MERDIVEN_RUN_GUI():
     class _GUI:
         def __init__(self, root):
             self.root = root;
+            self._cached_config = self._safe_load_cfg()
+            self._cached_gui_cfg = (self._cached_config.get("gui", {}) if isinstance(self._cached_config, dict) else {}) or {}
             root.title("Merdiven GUI");
-            root.geometry("1020x680")
+            self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
@@ -5948,6 +6124,10 @@ def _MERDIVEN_RUN_GUI():
                 "plus8_bank_count": tk.StringVar(value=str(getattr(m, "PLUS8_BANK_COUNT", 0))),
                 "market_sold_total": tk.StringVar(value=str(getattr(m, "MARKET_SOLD_COUNT", 0))),
                 "last_tur_sold": tk.StringVar(value=str(getattr(m, "LAST_TUR_SOLD", 0))),
+                "ui_remember_geometry": tk.BooleanVar(value=bool(self._cached_gui_cfg.get(
+                    "ui_remember_geometry", getattr(m, "UI_REMEMBER_GEOMETRY", False)))),
+                "ui_last_geometry": tk.StringVar(value=str(self._cached_gui_cfg.get(
+                    "ui_last_geometry", getattr(m, "UI_LAST_GEOMETRY", "")) or "")),
             }
             self._stats_keys = ["plus7_bank_count", "plus8_bank_count", "market_sold_total", "last_tur_sold"]
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
@@ -5974,6 +6154,73 @@ def _MERDIVEN_RUN_GUI():
         # ---- basit olay/bildirim ----
         def _msg(self, s):
             print("[GUI]", s)
+
+        def _safe_load_cfg(self):
+            import json
+            try:
+                with open(self._cfg(), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+            return {}
+
+        def _apply_initial_geometry(self):
+            gui_cfg = self._cached_gui_cfg if isinstance(self._cached_gui_cfg, dict) else {}
+            remember = bool(gui_cfg.get("ui_remember_geometry"))
+            geo = str(gui_cfg.get("ui_last_geometry") or "")
+            if remember and geo:
+                try:
+                    self.root.geometry(geo)
+                    return
+                except Exception:
+                    pass
+            try:
+                self.root.geometry("1020x680")
+            except Exception:
+                pass
+
+        def _persist_geometry_on_close(self):
+            import json, os
+            try:
+                geo = str(self.root.geometry())
+            except Exception:
+                geo = ""
+            remember = False
+            try:
+                remember = bool(self.v["ui_remember_geometry"].get())
+            except Exception:
+                pass
+            try:
+                if remember and geo:
+                    self.v["ui_last_geometry"].set(geo)
+                elif not remember:
+                    self.v["ui_last_geometry"].set("")
+            except Exception:
+                pass
+            path = self._cfg()
+            data = {}
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            gui_data = data.get("gui")
+            if not isinstance(gui_data, dict):
+                gui_data = {}
+            gui_data["ui_remember_geometry"] = bool(remember)
+            gui_data["ui_last_geometry"] = geo if remember else ""
+            data["gui"] = gui_data
+            try:
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            except Exception:
+                pass
 
         def _open_krallik(self, *_):
             url = str(getattr(m, "KRALLIK_URL", KRALLIK_URL) or "")
@@ -6017,6 +6264,10 @@ def _MERDIVEN_RUN_GUI():
                 self._msg(f"İstatistikler sıfırlanamadı: {exc}")
 
         def _on_close(self):
+            try:
+                self._persist_geometry_on_close()
+            except Exception:
+                pass
             try:
                 if getattr(m, "_GUI_UPDATE_SALE_SLOT", None) is self._update_sale_slot:
                     m._GUI_UPDATE_SALE_SLOT = None
@@ -6139,6 +6390,10 @@ def _MERDIVEN_RUN_GUI():
             r += 1
             ttk.Button(f1, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=r, column=0, columnspan=2,
                                                                                        sticky="w", pady=4)
+            r += 1
+            ttk.Checkbutton(f1, text="Son boyut ve konumu hatırla",
+                            variable=self.v["ui_remember_geometry"], onvalue=True,
+                            offvalue=False).grid(row=r, column=0, columnspan=2, sticky="w", padx=2, pady=2)
             r += 1
             lf_mode = ttk.LabelFrame(f1, text="Mod Seçimi")
             lf_mode.grid(row=r, column=0, columnspan=4, sticky="we", pady=6)
@@ -6567,6 +6822,11 @@ def _MERDIVEN_RUN_GUI():
         def start(self):
             if getattr(self, "thr", None) and self.thr.is_alive(): self._msg("Zaten çalışıyor."); return
             self.apply_core()
+            try:
+                if hasattr(m, "_reset_empty_bank_state"):
+                    m._reset_empty_bank_state()
+            except Exception:
+                pass
             m.GUI_ABORT = False
             self.thr = threading.Thread(target=self._run, daemon=True);
             self.thr.start()
@@ -6594,6 +6854,11 @@ def _MERDIVEN_RUN_GUI():
         def stop(self):
             self._msg("Durdur (F12 sanalı)...");
             m.GUI_ABORT = True;
+            try:
+                if hasattr(m, "_stop_empty_bank_notifier"):
+                    m._stop_empty_bank_notifier()
+            except Exception:
+                pass
             self.stage.set("Durduruluyor (F12)...")
 
         def _sync_thread_state(self):
@@ -6625,10 +6890,15 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                with open(self._cfg(), "r", encoding="utf-8") as f:
-                    j = json.load(f)
-            except:
-                j = {}
+                j = copy.deepcopy(self._cached_config)
+            except Exception:
+                j = None
+            if not isinstance(j, dict) or not j:
+                try:
+                    with open(self._cfg(), "r", encoding="utf-8") as f:
+                        j = json.load(f)
+                except:
+                    j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if hasattr(self, "_stats_keys") and k in self._stats_keys:
