@@ -1,3 +1,4 @@
+from __future__ import annotations
 # DENEME: 11.11.2025 – küçük test
 TOWN_HARD_LOCK = False
 
@@ -75,7 +76,7 @@ from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
-
+from typing import List, Set, Dict, Tuple, Optional
 
 # [PATCH_TOWN_LOCK_BEGIN]
 def _town_lock(v: bool, reason: str = ""):
