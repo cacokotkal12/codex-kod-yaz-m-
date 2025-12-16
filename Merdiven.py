@@ -1676,13 +1676,26 @@ def launch_via_launcher_and_wait():
 
 
 # ================== LOGIN: SAĞLAM GİRİŞ ==================
+def _login_input_text(text: str, label: str = "") -> str:
+    """Login alanına metni yapıştır ya da yapıştıramazsa harf harf yaz."""
+    text = str(text or "")
+    if paste_text_from_clipboard(text):
+        return "paste"
+    for ch in text:
+        wait_if_paused();
+        watchdog_enforce();
+        keyboard.write(ch)
+        time.sleep(0.02)
+    return "typed"
+
+
 def perform_login_inputs(w):
     """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
     time.sleep(0.1)
-    paste_text_from_clipboard(LOGIN_USERNAME);
+    username_method = _login_input_text(LOGIN_USERNAME, "username");
     time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
@@ -1691,7 +1704,7 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    paste_text_from_clipboard(LOGIN_PASSWORD);
+    password_method = _login_input_text(LOGIN_PASSWORD, "password");
     time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
@@ -1700,7 +1713,7 @@ def perform_login_inputs(w):
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     time.sleep(0.4)
-    print("[LOGIN] Username/Password yazıldı ve Enter basıldı.")
+    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
 
 
 # ================== OCR / INV / UPG Yardımcıları (devam Parça 2'de) ==================
