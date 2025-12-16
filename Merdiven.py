@@ -99,6 +99,14 @@ def PERSIST_PATH(name):
     return os.path.join(base, name)
 
 
+def PERSIST_DIR(name):
+    import os
+    base = os.path.join(os.getenv('APPDATA') or os.path.expanduser('~'), 'Merdiven')
+    path = os.path.join(base, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def _MERDIVEN_CFG_PATH():
     """Ayar dosyası için tekil ve yazılabilir yol döndür."""
     import os
@@ -124,8 +132,8 @@ except Exception:
     requests = None
 
 # ====================== BOOST: GENEL AYARLAR ======================
-LOG_DIR = "logs";
-CRASH_DIR = "crash_dumps"
+LOG_DIR = PERSIST_DIR("logs");
+CRASH_DIR = PERSIST_DIR("crash_dumps")
 
 
 def _set_dpi_aware():
