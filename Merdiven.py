@@ -6046,8 +6046,10 @@ def _MERDIVEN_RUN_GUI():
     class _GUI:
         def __init__(self, root):
             self.root = root;
+            self._cached_config = self._safe_load_cfg()
+            self._cached_gui_cfg = (self._cached_config.get("gui", {}) if isinstance(self._cached_config, dict) else {}) or {}
             root.title("Merdiven GUI");
-            root.geometry("1020x680")
+            self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
@@ -6122,6 +6124,10 @@ def _MERDIVEN_RUN_GUI():
                 "plus8_bank_count": tk.StringVar(value=str(getattr(m, "PLUS8_BANK_COUNT", 0))),
                 "market_sold_total": tk.StringVar(value=str(getattr(m, "MARKET_SOLD_COUNT", 0))),
                 "last_tur_sold": tk.StringVar(value=str(getattr(m, "LAST_TUR_SOLD", 0))),
+                "ui_remember_geometry": tk.BooleanVar(value=bool(self._cached_gui_cfg.get(
+                    "ui_remember_geometry", getattr(m, "UI_REMEMBER_GEOMETRY", False)))),
+                "ui_last_geometry": tk.StringVar(value=str(self._cached_gui_cfg.get(
+                    "ui_last_geometry", getattr(m, "UI_LAST_GEOMETRY", "")) or "")),
             }
             self._stats_keys = ["plus7_bank_count", "plus8_bank_count", "market_sold_total", "last_tur_sold"]
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
@@ -6148,6 +6154,73 @@ def _MERDIVEN_RUN_GUI():
         # ---- basit olay/bildirim ----
         def _msg(self, s):
             print("[GUI]", s)
+
+        def _safe_load_cfg(self):
+            import json
+            try:
+                with open(self._cfg(), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+            return {}
+
+        def _apply_initial_geometry(self):
+            gui_cfg = self._cached_gui_cfg if isinstance(self._cached_gui_cfg, dict) else {}
+            remember = bool(gui_cfg.get("ui_remember_geometry"))
+            geo = str(gui_cfg.get("ui_last_geometry") or "")
+            if remember and geo:
+                try:
+                    self.root.geometry(geo)
+                    return
+                except Exception:
+                    pass
+            try:
+                self.root.geometry("1020x680")
+            except Exception:
+                pass
+
+        def _persist_geometry_on_close(self):
+            import json, os
+            try:
+                geo = str(self.root.geometry())
+            except Exception:
+                geo = ""
+            remember = False
+            try:
+                remember = bool(self.v["ui_remember_geometry"].get())
+            except Exception:
+                pass
+            try:
+                if remember and geo:
+                    self.v["ui_last_geometry"].set(geo)
+                elif not remember:
+                    self.v["ui_last_geometry"].set("")
+            except Exception:
+                pass
+            path = self._cfg()
+            data = {}
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            gui_data = data.get("gui")
+            if not isinstance(gui_data, dict):
+                gui_data = {}
+            gui_data["ui_remember_geometry"] = bool(remember)
+            gui_data["ui_last_geometry"] = geo if remember else ""
+            data["gui"] = gui_data
+            try:
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            except Exception:
+                pass
 
         def _open_krallik(self, *_):
             url = str(getattr(m, "KRALLIK_URL", KRALLIK_URL) or "")
@@ -6191,6 +6264,10 @@ def _MERDIVEN_RUN_GUI():
                 self._msg(f"İstatistikler sıfırlanamadı: {exc}")
 
         def _on_close(self):
+            try:
+                self._persist_geometry_on_close()
+            except Exception:
+                pass
             try:
                 if getattr(m, "_GUI_UPDATE_SALE_SLOT", None) is self._update_sale_slot:
                     m._GUI_UPDATE_SALE_SLOT = None
@@ -6313,6 +6390,10 @@ def _MERDIVEN_RUN_GUI():
             r += 1
             ttk.Button(f1, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=r, column=0, columnspan=2,
                                                                                        sticky="w", pady=4)
+            r += 1
+            ttk.Checkbutton(f1, text="Son boyut ve konumu hatırla",
+                            variable=self.v["ui_remember_geometry"], onvalue=True,
+                            offvalue=False).grid(row=r, column=0, columnspan=2, sticky="w", padx=2, pady=2)
             r += 1
             lf_mode = ttk.LabelFrame(f1, text="Mod Seçimi")
             lf_mode.grid(row=r, column=0, columnspan=4, sticky="we", pady=6)
@@ -6809,10 +6890,15 @@ def _MERDIVEN_RUN_GUI():
             import json, os
             # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                with open(self._cfg(), "r", encoding="utf-8") as f:
-                    j = json.load(f)
-            except:
-                j = {}
+                j = copy.deepcopy(self._cached_config)
+            except Exception:
+                j = None
+            if not isinstance(j, dict) or not j:
+                try:
+                    with open(self._cfg(), "r", encoding="utf-8") as f:
+                        j = json.load(f)
+                except:
+                    j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
                 if hasattr(self, "_stats_keys") and k in self._stats_keys:
