@@ -463,14 +463,6 @@ BANK_NEXT_PAGE_POS = (731, 389);
 BANK_PREV_PAGE_POS = (668, 389);
 BANK_PAGE_CLICK_DELAY = 0.12
 # ---- Game Start (Launcher sonrası) ----
-GAME_START_TEMPLATE_PATH = "oyun_start.png";
-GAME_START_TEMPLATE_PATHS = ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png");
-GAME_START_MATCH_THRESHOLD = 0.70;
-GAME_START_FIND_TIMEOUT = 8.0;
-GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
-GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
-GAME_START_FALLBACK_RELATIVE_POS = (640, 710)
-GAME_START_VERIFY_TIMEOUT = 8.0
 TEMPLATE_EXTRA_CLICK_POS = (931, 602)
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
@@ -2111,153 +2103,12 @@ def wait_and_click_template(win, template_path, threshold=0.8, timeout=5.0, scal
         if (time.time() - t0) > timeout: print(f"[FIND] Zaman aşımı: {os.path.basename(template_path)}"); return False
         time.sleep(0.1)
 
-        def _click_template_or_restart(w, template_path, *, threshold=0.8, timeout=5.0, scales=(1.0,)):
-            """
-            NE İŞE YARAR: wait_and_click_template() çağırır.
-            - Başarılıysa (True, w) döner.
-            - Zaman aşımıysa ve ON_TEMPLATE_TIMEOUT_RESTART True ise oyunu kapatır, relaunch edip (False, w2) döner.
-            """
-            ok = wait_and_click_template(w, template_path, threshold=threshold, timeout=timeout, scales=scales)
-            if ok or not ON_TEMPLATE_TIMEOUT_RESTART:
-                return ok, w
-
-            print(f"[TIMEOUT] {template_path} bulunamadı → OYUN KAPAT/RELAUNCH tetiklendi.")
-            try:
-                exit_game_fast(w)
-            except Exception as e:
-                print(f"[TIMEOUT] exit_game_fast hata: {e}")
-            w2 = relaunch_and_login_to_ingame()
-            if not w2:
-                print("[TIMEOUT] Relaunch başarısız.")
-            return False, (w2 if w2 else w)
-
-
 def pick_existing_template(paths):
     for p in paths:
         pp = resource_path(p) if os.path.exists(resource_path(p)) else p
         if os.path.exists(pp):
             img = cv2.imread(pp, cv2.IMREAD_GRAYSCALE)
             if img is not None: return pp
-    return None
-
-
-def _capture_debug_screenshot(prefix: str = "start_fail"):
-    try:
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        path = os.path.join(CRASH_DIR, f"{prefix}_{ts}.png")
-        img = ImageGrab.grab();
-        img.save(path)
-        print(f"[DEBUG] Ekran görüntüsü kaydedildi: {path}")
-        return path
-    except Exception as e:
-        print(f"[DEBUG] Screenshot alınamadı: {e}")
-        return None
-
-
-def _game_start_scale_list():
-    scales = list(globals().get("GAME_START_SCALES", GAME_START_SCALES))
-    try:
-        extras = list(globals().get("GAME_START_EXTRA_SCALES", GAME_START_EXTRA_SCALES))
-        for s in extras:
-            if s not in scales:
-                scales.append(s)
-    except Exception:
-        pass
-    return tuple(scales)
-
-
-def _game_start_template_paths():
-    raw_list = []
-    try:
-        extra = globals().get("GAME_START_TEMPLATE_PATHS", GAME_START_TEMPLATE_PATHS)
-        if isinstance(extra, (list, tuple, set)):
-            raw_list.extend(list(extra))
-    except Exception:
-        pass
-    raw_list.append(globals().get("GAME_START_TEMPLATE_PATH", GAME_START_TEMPLATE_PATH))
-    seen = set()
-    paths = []
-    for p in raw_list:
-        if p in seen:
-            continue
-        seen.add(p)
-        pp = resource_path(p) if os.path.exists(resource_path(p)) else p
-        if os.path.exists(pp):
-            paths.append(pp)
-    return paths
-
-
-def _is_template_visible(win, templates, scales, threshold):
-    try:
-        gray = grab_window_gray(win)
-    except Exception:
-        return False
-    for path in templates:
-        tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if tmpl is None:
-            continue
-        score, _, _ = match_template_multiscale(gray, tmpl, scales)
-        if score >= threshold:
-            return True
-    return False
-
-
-def _click_game_start_fallback(win):
-    try:
-        rx, ry = globals().get("GAME_START_FALLBACK_RELATIVE_POS", GAME_START_FALLBACK_RELATIVE_POS)
-    except Exception:
-        rx, ry = GAME_START_FALLBACK_RELATIVE_POS
-    ax = int(win.left + rx)
-    ay = int(win.top + ry)
-    mouse_move(ax, ay);
-    mouse_click("left");
-    mouse_move(*TEMPLATE_EXTRA_CLICK_POS);
-    mouse_click("left");
-    print(f"[START] Fallback koordinat tıklandı @ ({ax},{ay})")
-
-
-def _wait_start_transition(win, templates, scales, timeout):
-    deadline = time.time() + timeout
-    has_templates = bool(templates)
-    while time.time() < deadline:
-        if _EMPTY_BANK_STOP_EVENT.is_set():
-            break
-        try:
-            if _ingame_by_hpbar_once(win):
-                return True
-        except Exception:
-            pass
-        if has_templates and not _is_template_visible(win, templates, scales, globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD)):
-            return True
-        time.sleep(0.4)
-    return False
-
-
-@with_retry("CLICK_START", attempts=5, delay=6)
-def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
-    set_stage("START_RETRY")
-    templates = _game_start_template_paths()
-    scales = _game_start_scale_list()
-    for attempt in range(1, int(attempts) + 1):
-        wait_if_paused();
-        watchdog_enforce()
-        if not templates:
-            print("[START] Şablon listesi boş, fallback koordinat denenecek.")
-        else:
-            for path in templates:
-                ok = wait_and_click_template(w, path, threshold=GAME_START_MATCH_THRESHOLD,
-                                             timeout=GAME_START_FIND_TIMEOUT, scales=scales)
-                if ok:
-                    if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
-                        return True
-                    print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
-                    break
-        _click_game_start_fallback(w)
-        if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
-            return True
-        if attempt < attempts:
-            time.sleep(max(0.5, float(wait_between)))
-    _capture_debug_screenshot("start_fail")
     return None
 
 
@@ -4080,8 +3931,6 @@ def relaunch_and_login_to_ingame():
             for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
             print(f"[RELAUNCH] Server seçildi: {server_xy}")
             set_stage("RELAUNCH_POST_SELECT");
-            press_key(SC_ENTER);
-            release_key(SC_ENTER);
             time.sleep(1.5)
             for i in range(4):
                 press_key(SC_ENTER);
@@ -4965,18 +4814,6 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("BANK_PREV_PAGE_POS", "Banka geri (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("BANK_PREV_PAGE_POS", (668, 389)),
                 "Banka geri sayfa butonu.", apply=_ensure_int_pair),
-    ConfigField("GAME_START_TEMPLATE_PATHS", "Launcher Start şablonları", "Ölçek Listeleri", "list_str",
-                _cfg_default("GAME_START_TEMPLATE_PATHS", ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png")),
-                "Launcher Start butonu için alternatif şablonlar."),
-    ConfigField("GAME_START_SCALES", "Launcher Start ölçekleri", "Ölçek Listeleri", "list_float",
-                _cfg_default("GAME_START_SCALES", (0.85, 0.9, 1.0, 1.1, 1.2)),
-                "Launcher Start butonu arama ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
-    ConfigField("GAME_START_EXTRA_SCALES", "Launcher Start ekstra ölçekleri", "Ölçek Listeleri", "list_float",
-                _cfg_default("GAME_START_EXTRA_SCALES", (0.78, 1.22, 1.35)),
-                "Eşleşme kaçtığında denenecek ek ölçekler.", apply=lambda v: list(_ensure_float_list(v))),
-    ConfigField("GAME_START_FALLBACK_RELATIVE_POS", "Launcher Start göreli tık (x,y)", "Koordinat Grupları", "int_pair",
-                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (640, 710)),
-                "Launcher penceresine göre Start fallback tıklaması.", apply=_ensure_int_pair),
     ConfigField("TEMPLATE_EXTRA_CLICK_POS", "Ek tık (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (931, 602)),
                 "Template sonrası ekstra tıklama noktası.", apply=_ensure_int_pair),
@@ -5607,12 +5444,7 @@ _TR = {
     'TOWN_WAIT': 'town bekleme (sn)',
     'WINDOW_TITLE_KEYWORD': 'pencere başlık anahtar',
     'WINDOW_APPEAR_TIMEOUT': 'pencere görünme zaman aşımı (sn)',
-    'GAME_START_TEMPLATE_PATH': "launch 'Start' şablonu", 'GAME_START_TEMPLATE_PATHS': "launch 'Start' şablonları",
-    'GAME_START_MATCH_THRESHOLD': 'Start şablon eşiği',
-    'GAME_START_FIND_TIMEOUT': 'Start arama zaman aşımı (sn)',
-    'GAME_START_EXTRA_SCALES': 'Start ekstra ölçekleri',
     'LAUNCHER_EXE': 'Launcher yolu',
-    'GAME_START_FALLBACK_RELATIVE_POS': 'Start fallback tık (göreli)',
     'SC_A': 'scan A',
     'SC_D': 'scan D',
     'SC_W': 'scan W',
@@ -5709,19 +5541,11 @@ _ADV_CATEGORY_RULES = (
         names=(
             'WINDOW_TITLE_KEYWORD',
             'WINDOW_APPEAR_TIMEOUT',
-            'GAME_START_TEMPLATE_PATH',
-            'GAME_START_TEMPLATE_PATHS',
-            'GAME_START_MATCH_THRESHOLD',
-            'GAME_START_FIND_TIMEOUT',
-            'GAME_START_SCALES',
-            'GAME_START_EXTRA_SCALES',
-            'GAME_START_FALLBACK_RELATIVE_POS',
             'TEMPLATE_EXTRA_CLICK_POS',
             'REQUEST_RELAUNCH',
         ),
         prefixes=(
             'WINDOW_',
-            'GAME_START_',
             'LAUNCHER_',
             'TEMPLATE_',
         ),
