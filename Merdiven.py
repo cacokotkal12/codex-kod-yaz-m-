@@ -402,6 +402,8 @@ jitter_px = 0
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
+# ---- Oyuna giriş Enter aralığı ----
+oyuna_giris_enter_suresi = 0.5
 # ---- Watchdog ----
 WATCHDOG_TIMEOUT = 120;
 F_WAIT_TIMEOUT_SECONDS = 30.0
@@ -4081,19 +4083,11 @@ def relaunch_and_login_to_ingame():
             press_key(SC_ENTER);
             release_key(SC_ENTER);
             time.sleep(1.5)
-            ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
-            if not ok:
-                print("[RELAUNCH] oyun_start.png yok. Kapat→yeniden.")
-                try:
-                    exit_game_fast(w)
-                except Exception:
-                    close_all_game_instances()
-                time.sleep(2.0);
-                continue
-            time.sleep(1);
-            press_key(SC_ENTER);
-            release_key(SC_ENTER);
-            time.sleep(1)
+            for i in range(4):
+                press_key(SC_ENTER);
+                release_key(SC_ENTER);
+                if i < 3:
+                    time.sleep(oyuna_giris_enter_suresi)
             ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False)
             if not ok:
                 print("[RELAUNCH] HP bar teyidi yok. Kapat→yeniden.")
@@ -4450,13 +4444,11 @@ def main():
                     press_key(SC_ENTER);
                     release_key(SC_ENTER);
                     time.sleep(1.5)
-                    ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
-                    if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
-                        "oyun_start.png tıklanamadı.")
-                    time.sleep(1);
-                    press_key(SC_ENTER);
-                    release_key(SC_ENTER);
-                    time.sleep(1)
+                    for i in range(4):
+                        press_key(SC_ENTER);
+                        release_key(SC_ENTER);
+                        if i < 3:
+                            time.sleep(oyuna_giris_enter_suresi)
                     ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
                                                       allow_periodic_enter=False)
                     if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
