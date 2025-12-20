@@ -403,7 +403,7 @@ pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program 
 pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
 # ---- Oyuna giriş Enter aralığı ----
-oyuna_giris_enter_suresi = 0.5
+oyuna_giris_enter_suresi = 0.8
 # ---- Watchdog ----
 WATCHDOG_TIMEOUT = 120;
 F_WAIT_TIMEOUT_SECONDS = 30.0
