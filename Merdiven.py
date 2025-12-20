@@ -67,7 +67,7 @@ def _read_y_now():
 # [PATCH_Y_LOCK_END]
 
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
-    random, \
+    random, base64, \
     sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
@@ -119,6 +119,153 @@ def _MERDIVEN_CFG_PATH():
     except Exception:
         pass
     return path
+
+
+_CREDENTIALS_FILE = PERSIST_PATH('credentials.json')
+_CREDENTIALS_LOCK = threading.Lock()
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _dpapi_protect(text: str) -> Tuple[str, bool]:
+    try:
+        CryptProtectData = ctypes.windll.crypt32.CryptProtectData
+        CryptProtectData.argtypes = [ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
+                                     ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB)]
+        CryptProtectData.restype = wintypes.BOOL
+        raw = text.encode("utf-8")
+        in_blob = _DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
+        out_blob = _DATA_BLOB()
+        if CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+            try:
+                buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+                return base64.b64encode(buf).decode("ascii"), True
+            finally:
+                try:
+                    ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return text, False
+
+
+def _dpapi_unprotect(b64_text: str, enc: bool = True) -> str:
+    if not enc:
+        return str(b64_text or "")
+    try:
+        CryptUnprotectData = ctypes.windll.crypt32.CryptUnprotectData
+        CryptUnprotectData.argtypes = [ctypes.POINTER(_DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR),
+                                       ctypes.POINTER(_DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                                       ctypes.POINTER(_DATA_BLOB)]
+        CryptUnprotectData.restype = wintypes.BOOL
+        raw = base64.b64decode(b64_text)
+        in_blob = _DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
+        out_blob = _DATA_BLOB()
+        if CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+            try:
+                buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+                return buf.decode("utf-8", errors="ignore")
+            finally:
+                try:
+                    ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return ""
+
+
+def _credential_default():
+    return {"active": "", "profiles": {}}
+
+
+def _load_credentials_data():
+    data = _credential_default()
+    try:
+        with open(_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data.update({k: v for k, v in loaded.items() if k in ("active", "profiles")})
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    if not isinstance(data.get("profiles"), dict):
+        data["profiles"] = {}
+    if not isinstance(data.get("active"), str):
+        data["active"] = ""
+    return data
+
+
+def _save_credentials_data(data: Dict[str, Any]):
+    try:
+        os.makedirs(os.path.dirname(_CREDENTIALS_FILE), exist_ok=True)
+        tmp = _CREDENTIALS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _CREDENTIALS_FILE)
+    except Exception:
+        pass
+
+
+def _decrypt_profile(profile: Dict[str, Any]) -> Tuple[str, str]:
+    user = str(profile.get("user", "") or "")
+    pw_raw = profile.get("pass", "")
+    enc = bool(profile.get("enc", True))
+    return user, _dpapi_unprotect(str(pw_raw or ""), enc=enc)
+
+
+def _set_active_profile_name(name: str) -> Dict[str, Any]:
+    with _CREDENTIALS_LOCK:
+        data = _load_credentials_data()
+        profiles = data.get("profiles") or {}
+        data["active"] = name if name and name in profiles else ""
+        _save_credentials_data(data)
+        return data
+
+
+def _update_profile_entry(name: str, username: str, password: str) -> Dict[str, Any]:
+    sanitized = name.strip()
+    with _CREDENTIALS_LOCK:
+        data = _load_credentials_data()
+        profiles = data.get("profiles")
+        if not isinstance(profiles, dict):
+            profiles = {}
+        stored_pass, enc = _dpapi_protect(password or "")
+        profiles[sanitized] = {"user": username or "", "pass": stored_pass, "enc": enc}
+        data["profiles"] = profiles
+        data["active"] = sanitized
+        _save_credentials_data(data)
+        return data
+
+
+def _delete_profile_entry(name: str) -> Dict[str, Any]:
+    with _CREDENTIALS_LOCK:
+        data = _load_credentials_data()
+        profiles = data.get("profiles")
+        if isinstance(profiles, dict) and name in profiles:
+            try:
+                profiles.pop(name, None)
+            except Exception:
+                pass
+        data["profiles"] = profiles if isinstance(profiles, dict) else {}
+        if data.get("active") == name:
+            data["active"] = ""
+        _save_credentials_data(data)
+        return data
+
+
+def _get_active_profile_credentials() -> Tuple[str, str, str]:
+    data = _load_credentials_data()
+    profiles = data.get("profiles") or {}
+    active = str(data.get("active") or "")
+    if active and active in profiles:
+        user, pwd = _decrypt_profile(profiles.get(active) or {})
+        return active, user, pwd
+    return "", "", ""
 
 
 try:
@@ -1691,13 +1838,26 @@ def _login_input_text(text: str, label: str = "") -> str:
     return "typed"
 
 
+def _login_credentials_for_stage() -> Tuple[str, str, str, bool]:
+    active, user, pwd = _get_active_profile_credentials()
+    if active and (user or pwd):
+        return user, pwd, active, True
+    return LOGIN_USERNAME, LOGIN_PASSWORD, "", False
+
+
 def perform_login_inputs(w):
     """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
+    username, password, active_name, from_profile = _login_credentials_for_stage()
+    if from_profile:
+        try:
+            print(f"[LOGIN] Aktif profil kullanılıyor: {active_name}")
+        except Exception:
+            pass
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
     time.sleep(0.1)
-    username_method = _login_input_text(LOGIN_USERNAME, "username");
+    username_method = _login_input_text(username, "username");
     time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
@@ -1706,7 +1866,7 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    password_method = _login_input_text(LOGIN_PASSWORD, "password");
+    password_method = _login_input_text(password, "password");
     time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
@@ -1715,7 +1875,8 @@ def perform_login_inputs(w):
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     time.sleep(0.4)
-    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
+    src = f"profil={active_name}" if from_profile else "GUI alanı"
+    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) kaynağı={src} ve Enter basıldı.")
 
 
 # ================== OCR / INV / UPG Yardımcıları (devam Parça 2'de) ==================
@@ -5874,7 +6035,7 @@ def _MERDIVEN_RUN_GUI():
     import sys, json, threading
     try:
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import ttk, messagebox
     except Exception as e:
         print("[GUI] Tkinter yok/başlatılamadı:", e)
         return False
@@ -5888,6 +6049,13 @@ def _MERDIVEN_RUN_GUI():
             root.title("Merdiven GUI");
             self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
+            self.caps_text = tk.StringVar(value="CAPSLOCK KAPALI")
+            self.active_profile = tk.StringVar(value="Aktif Profil: Yok")
+            self.profile_name_var = tk.StringVar()
+            self.profile_user_var = tk.StringVar()
+            self.profile_pass_var = tk.StringVar()
+            self.profile_choice = tk.StringVar()
+            self._caps_last_state = None
             self.stage_log = []
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
@@ -5975,6 +6143,7 @@ def _MERDIVEN_RUN_GUI():
             self.adv_rows = []
             self._build();
             self._load_json();
+            self._load_profiles_into_ui()
             self._hook_stage();
             try:
                 m._GUI_UPDATE_SALE_SLOT = self._update_sale_slot
@@ -6197,6 +6366,134 @@ def _MERDIVEN_RUN_GUI():
                 m._GUI_ORIG_IS_PRESSED = orig
                 keyboard.is_pressed = _gui_is_pressed
 
+        def _update_caps_lock_indicator(self):
+            try:
+                state = ctypes.windll.user32.GetKeyState(0x14)
+                is_on = bool(state & 1)
+            except Exception:
+                return
+            if is_on == self._caps_last_state:
+                return
+            self._caps_last_state = is_on
+            try:
+                if is_on:
+                    self.caps_text.set("CAPSLOCK AÇIK (Kapat)")
+                    self.caps_label.configure(foreground="red")
+                else:
+                    self.caps_text.set("CAPSLOCK KAPALI")
+                    self.caps_label.configure(foreground="green")
+            except Exception:
+                pass
+
+        def _load_profiles_into_ui(self):
+            data = _load_credentials_data()
+            profiles = data.get("profiles") or {}
+            names = sorted(profiles.keys())
+            try:
+                self.profile_combo["values"] = names
+            except Exception:
+                pass
+            active = data.get("active") or ""
+            if active and active in names:
+                self.profile_choice.set(active)
+            self._apply_active_profile_fields(data)
+
+        def _apply_active_profile_fields(self, data=None):
+            try:
+                if data is None:
+                    data = _load_credentials_data()
+                profiles = data.get("profiles") or {}
+                active = str(data.get("active") or "")
+                if active and active in profiles:
+                    user, pwd = _decrypt_profile(profiles.get(active) or {})
+                    self.active_profile.set(f"Aktif Profil: {active}")
+                    self.profile_name_var.set(active)
+                    self.profile_user_var.set(user)
+                    self.profile_pass_var.set(pwd)
+                    try:
+                        self.v["username"].set(user)
+                        self.v["password"].set(pwd)
+                    except Exception:
+                        pass
+                else:
+                    self.active_profile.set("Aktif Profil: Yok")
+            except Exception:
+                self.active_profile.set("Aktif Profil: Yok")
+
+        def _on_profile_select(self, *_):
+            name = self.profile_choice.get().strip()
+            data = _set_active_profile_name(name) if name else _set_active_profile_name("")
+            profiles = data.get("profiles") or {}
+            if name and name in profiles:
+                user, pwd = _decrypt_profile(profiles.get(name) or {})
+                self.profile_name_var.set(name)
+                self.profile_user_var.set(user)
+                self.profile_pass_var.set(pwd)
+                self.active_profile.set(f"Aktif Profil: {name}")
+                try:
+                    self.v["username"].set(user)
+                    self.v["password"].set(pwd)
+                except Exception:
+                    pass
+            else:
+                self.active_profile.set("Aktif Profil: Yok")
+
+        def _save_profile(self):
+            name = self.profile_name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Profil", "Profil adı boş olamaz.")
+                return
+            data_existing = _load_credentials_data()
+            exists = name in (data_existing.get("profiles") or {})
+            if exists:
+                try:
+                    if not messagebox.askyesno("Güncelle", f"{name} profili güncellensin mi?"):
+                        return
+                except Exception:
+                    pass
+            _update_profile_entry(name, self.profile_user_var.get(), self.profile_pass_var.get())
+            self.profile_choice.set(name)
+            self._load_profiles_into_ui()
+            self._msg(f"Profil kaydedildi: {name}")
+
+        def _delete_profile(self):
+            name = self.profile_choice.get().strip() or self.profile_name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Profil", "Silmek için bir profil seç.")
+                return
+            try:
+                if not messagebox.askyesno("Sil", f"{name} profilini silmek istiyor musun?"):
+                    return
+            except Exception:
+                pass
+            _delete_profile_entry(name)
+            self.profile_choice.set("")
+            self._clear_profile_form()
+            self._load_profiles_into_ui()
+            try:
+                self.v["username"].set("")
+                self.v["password"].set("")
+            except Exception:
+                pass
+            self._msg(f"Profil silindi: {name}")
+
+        def _clear_profile_form(self):
+            try:
+                self.profile_name_var.set("")
+                self.profile_user_var.set("")
+                self.profile_pass_var.set("")
+                self.profile_choice.set("")
+            except Exception:
+                pass
+
+        def _set_active_profile_from_choice(self):
+            name = self.profile_choice.get().strip() or self.profile_name_var.get().strip()
+            if not name:
+                messagebox.showinfo("Profil", "Kullanılacak bir profil seç.")
+                return
+            data = _set_active_profile_name(name)
+            self._apply_active_profile_fields(data)
+
         # ---- UI kur ----
         def _build(self):
             nb = ttk.Notebook(self.root);
@@ -6205,6 +6502,10 @@ def _MERDIVEN_RUN_GUI():
             f1 = ttk.Frame(nb);
             nb.add(f1, text="Genel");
             r = 0
+            self.caps_label = tk.Label(f1, textvariable=self.caps_text, font=("Segoe UI", 12, "bold"),
+                                       foreground="green")
+            self.caps_label.grid(row=r, column=0, columnspan=4, sticky="we", padx=2, pady=(2, 4))
+            r += 1
             ttk.Label(f1, text="Durum / Makro Aşaması:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
             ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=2, sticky="e", padx=4);
@@ -6224,6 +6525,36 @@ def _MERDIVEN_RUN_GUI():
             pw.grid(row=r, column=1, sticky="w")
             ttk.Button(f1, text="Göster/Gizle", command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")),
                        width=14).grid(row=r, column=2, sticky="w");
+            r += 1
+            lf_profiles = ttk.LabelFrame(f1, text="Hesap Profilleri")
+            lf_profiles.grid(row=r, column=0, columnspan=4, sticky="we", pady=6, padx=2)
+            lf_profiles.columnconfigure(1, weight=1)
+            ttk.Label(lf_profiles, text="Profil Adı:").grid(row=0, column=0, sticky="e", padx=2, pady=2)
+            ttk.Entry(lf_profiles, textvariable=self.profile_name_var, width=22).grid(row=0, column=1, sticky="we",
+                                                                                       padx=2, pady=2)
+            ttk.Label(lf_profiles, text="ID:").grid(row=1, column=0, sticky="e", padx=2, pady=2)
+            ttk.Entry(lf_profiles, textvariable=self.profile_user_var, width=22).grid(row=1, column=1, sticky="we",
+                                                                                       padx=2, pady=2)
+            ttk.Label(lf_profiles, text="Şifre:").grid(row=2, column=0, sticky="e", padx=2, pady=2)
+            pw_prof = ttk.Entry(lf_profiles, textvariable=self.profile_pass_var, width=22, show="*")
+            pw_prof.grid(row=2, column=1, sticky="we", padx=2, pady=2)
+            ttk.Button(lf_profiles, text="Kaydet/Güncelle", command=self._save_profile).grid(row=0, column=2,
+                                                                                              sticky="we", padx=4,
+                                                                                              pady=2)
+            ttk.Button(lf_profiles, text="Sil", command=self._delete_profile).grid(row=1, column=2, sticky="we",
+                                                                                   padx=4, pady=2)
+            ttk.Button(lf_profiles, text="Temizle", command=self._clear_profile_form).grid(row=2, column=2,
+                                                                                           sticky="we", padx=4,
+                                                                                           pady=2)
+            ttk.Label(lf_profiles, text="Kayıtlı Profiller:").grid(row=3, column=0, sticky="e", padx=2, pady=4)
+            self.profile_combo = ttk.Combobox(lf_profiles, textvariable=self.profile_choice, state="readonly", width=20)
+            self.profile_combo.grid(row=3, column=1, sticky="we", padx=2, pady=4)
+            self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_select)
+            ttk.Button(lf_profiles, text="Kullan", command=self._set_active_profile_from_choice).grid(row=3, column=2,
+                                                                                                      sticky="we",
+                                                                                                      padx=4, pady=4)
+            ttk.Label(lf_profiles, textvariable=self.active_profile, foreground="blue",
+                      font=("Segoe UI", 10, "bold")).grid(row=4, column=0, columnspan=3, sticky="w", padx=2, pady=2)
             r += 1
             ttk.Button(f1, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=r, column=0, columnspan=2,
                                                                                        sticky="w", pady=4)
@@ -6908,6 +7239,10 @@ def _MERDIVEN_RUN_GUI():
             self.apply_core()
 
         def _tick(self):
+            try:
+                self._update_caps_lock_indicator()
+            except Exception:
+                pass
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
 
     # Pencereyi başlat
