@@ -3327,25 +3327,14 @@ def eksen_hedefine_git_town_yok(w, axis: str, target: int, total_timeout: float)
     assert axis in ('x', 'y')
     tgt = int(target)
     set_stage(f"HEDEFLE_{axis.upper()}_{tgt}")
-    overall_limit = float(globals().get("NAVIGATION_OVERALL_TIMEOUT_SEC", NAVIGATION_OVERALL_TIMEOUT_SEC))
-    tol = int(globals().get("OVERSHOOT_TOLERANCE", OVERSHOOT_TOLERANCE))
-    micro = float(globals().get("OVERSHOOT_MICRO_STEP_SEC", OVERSHOOT_MICRO_STEP_SEC))
-    if bool(globals().get("OVERSHOOT_FIX_ENABLED", True)):
-        ok_new = approach_coord_with_overshoot_fix(w, axis, tgt, tolerance=tol, micro_step=micro,
-                                                   max_fix_seconds=total_timeout, overall_timeout=overall_limit)
-        if ok_new or globals().get("REQUEST_RELAUNCH", False):
-            return ok_new
-    start = time.time()
-    time_budget = min(float(total_timeout), overall_limit)
-    while (time.time() - start) < time_budget:
+    deadline = time.time() + float(total_timeout)
+    while time.time() < deadline:
         wait_if_paused()
         watchdog_enforce()
         if _kb_pressed('f12'):
             return False
-        if (time.time() - start) >= overall_limit:
-            break
-        remaining = float(time_budget) - (time.time() - start)
-        if remaining <= 0:
+        remaining = max(0.0, deadline - time.time())
+        if remaining <= 0.0:
             break
         delta = _get_delta()
         prec_timeout = min(10.0, max(0.5, remaining))
@@ -3355,25 +3344,7 @@ def eksen_hedefine_git_town_yok(w, axis: str, target: int, total_timeout: float)
         micro_ok = eksen_hedefine_mikro_duzeltme(w, axis, tgt, remaining)
         if micro_ok:
             return True
-    if (time.time() - start) >= overall_limit:
-        print("[NAV] Genel navigasyon limiti aşıldı → relaunch tetiklendi.")
-        globals()['REQUEST_RELAUNCH'] = True
-        try:
-            exit_game_fast(w)
-        except Exception:
-            try:
-                close_all_game_instances()
-            except Exception:
-                pass
-    if globals().get("REQUEST_RELAUNCH", False):
-        return False
-    release_key(SC_W)
-    remaining_for_recover = max(0.0, time_budget - (time.time() - start))
-    recover_ok = recover_to_target_by_backstep(w, axis, tgt, max_sec=remaining_for_recover,
-                                               settle_hits=max(2, int(globals().get("HEDEF_OTURMA_STABIL_OKUMA",
-                                                                                    HEDEF_OTURMA_STABIL_OKUMA))),
-                                               tolerance=tol)
-    return bool(recover_ok)
+    return False
 
 
 # --- Yalnızca mevcut iki fonksiyonu override ediyoruz (imza KORUNUR) ---
@@ -3436,19 +3407,6 @@ def ascend_stairs_to_top(w):
     total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
     ok = eksen_hedefine_git_town_yok(w, 'y', target_y, total_timeout=total_limit)
     if not ok:
-        if globals().get("REQUEST_RELAUNCH", False):
-            raise WatchdogTimeout("Y_598 duzeltilemedi")
-        cur_y = _read_y_now()
-        remaining = max(0.0, _remaining_ascend_time())
-        overshoot_recovered = False
-        if cur_y is not None and remaining > 0 and int(cur_y) != target_y:
-            overshoot_recovered = recover_to_target_by_backstep(
-                w, 'y', target_y, max_sec=remaining,
-                settle_hits=max(2, int(globals().get("HEDEF_OTURMA_STABIL_OKUMA", HEDEF_OTURMA_STABIL_OKUMA))))
-        if overshoot_recovered:
-            _finalize_top(_read_y_now())
-            return
-        send_town_command()
         raise WatchdogTimeout("Y_598 duzeltilemedi")
 
     _finalize_top(_read_y_now())
