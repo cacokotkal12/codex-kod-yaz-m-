@@ -18,6 +18,9 @@ TOWN_LOCKED = False  # Merdiven sonrası town kilidi (başta kapalı)
 
 # === [PATCH] TOWN/GUI tek-sefer log helper ===
 _TOWN_ONCE_KEYS = set()
+# Tekrarlayan crash dump'ları kısıtlamak için basit zaman damgası takipçisi
+_CRASH_LAST_TS = {}
+_CRASH_MIN_INTERVAL = 5.0  # saniye
 
 
 def _town_log_once(*args, sep=' ', end='\n'):
@@ -403,6 +406,44 @@ def reset_statistics():
     _notify_stats_gui()
 
 
+def _preflight_check_assets() -> bool:
+    """Şablon/koordinat ön kontrolü; eksikleri loglar ve False döner."""
+    missing = []
+
+    def _check_path(path, label):
+        p = resource_path(path) if os.path.exists(resource_path(path)) else path
+        if not os.path.exists(p):
+            missing.append(f"{label} ({p})")
+
+    _check_path(EMPTY_SLOT_TEMPLATE_PATH, "Boş slot şablonu")
+    _check_path(NPC_OPEN_TEXT_TEMPLATE_PATH, "NPC açma şablonu")
+    _check_path(NPC_CONFIRM_TEMPLATE_PATH, "NPC onay şablonu")
+    for idx, path in enumerate(USE_STORAGE_TEMPLATE_PATHS, 1):
+        _check_path(path, f"Storage şablonu #{idx}")
+
+    def _roi_ok(left, top, right, bottom):
+        return (right - left) > 0 and (bottom - top) > 0
+
+    roi_issues = []
+    if not _roi_ok(INV_LEFT, INV_TOP, INV_RIGHT, INV_BOTTOM):
+        roi_issues.append("INV ROI")
+    if not _roi_ok(UPG_INV_LEFT, UPG_INV_TOP, UPG_INV_RIGHT, UPG_INV_BOTTOM):
+        roi_issues.append("UPG ROI")
+    if not _roi_ok(BANK_INV_LEFT, BANK_INV_TOP, BANK_INV_RIGHT, BANK_INV_BOTTOM):
+        roi_issues.append("BANK ROI")
+
+    if missing or roi_issues:
+        if missing:
+            log(f"[PREFLIGHT] Eksik şablonlar: {', '.join(missing)}", "error")
+            print(f"[PREFLIGHT] Eksik şablonlar: {', '.join(missing)}")
+        if roi_issues:
+            log(f"[PREFLIGHT] Geçersiz ROI: {', '.join(roi_issues)}", "error")
+            print(f"[PREFLIGHT] Geçersiz ROI: {', '.join(roi_issues)}")
+        return False
+    log("[PREFLIGHT] Şablon ve ROI kontrolü OK")
+    return True
+
+
 def _increment_stat(key: str, delta: int):
     global _STATISTICS
     if delta <= 0 or key not in _STATS_DEFAULT:
@@ -486,6 +527,13 @@ def _raise_gui_abort(msg: str = "GUI durdurma isteği"):
 
 def dump_crash(e: Exception, stage: str = "UNKNOWN"):
     try:
+        stage_key = stage or "UNKNOWN"
+        now = time.time()
+        last = _CRASH_LAST_TS.get(stage_key, 0)
+        if (now - last) < _CRASH_MIN_INTERVAL:
+            log(f"[CRASH] Dump atlandı (sık tekrar) stage={stage_key}", "warning")
+            return
+        _CRASH_LAST_TS[stage_key] = now
         ts = time.strftime("%Y%m%d_%H%M%S")
         with open(os.path.join(CRASH_DIR, f"crash_{ts}.txt"), "w", encoding="utf-8") as f:
             f.write(f"STAGE={stage}\n{traceback.format_exc()}")
@@ -507,6 +555,10 @@ def crashguard(stage=""):
                 raise
             except Exception as e:
                 dump_crash(e, stage or fn.__name__);
+                try:
+                    _set_mode_normal("crashguard fallback", reset_plus8_state=True)
+                except Exception:
+                    pass
                 raise
 
         return wrap
@@ -1675,7 +1727,7 @@ def _ensure_launcher_closed_strict(max_wait: float = 8.0):
 
 # ================== Pencere yardımları ==================
 def bring_game_window_to_front():
-    wins = gw.getWindowsWithTitle(WINDOW_TITLE_KEYWORD)
+    wins = [w for w in gw.getWindowsWithTitle(WINDOW_TITLE_KEYWORD) if _is_window_valid(w)]
     if not wins: return None
     w = wins[0]
     if w.isMinimized: w.restore()
@@ -1683,6 +1735,12 @@ def bring_game_window_to_front():
     time.sleep(0.5);
     ctypes.windll.user32.SetForegroundWindow(w._hWnd);
     time.sleep(0.2);
+    try:
+        active = gw.getActiveWindow()
+        if not active or active._hWnd != w._hWnd:
+            log("[WINDOW] Oyun penceresi öne alınamadı.", "warning")
+    except Exception:
+        pass
     return w
 
 
@@ -1887,19 +1945,25 @@ def read_coordinates(window):
     """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
     left, top = window.left, window.top;
     bbox = (left + 104, top + 102, left + 160, top + 120)
-    img = ImageGrab.grab(bbox);
-    gray = img.convert('L').resize((img.width * 2, img.height * 2))
-    TOWN_LOCKED = False
-    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-    TOWN_LOCKED = False
-    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-    gray = ImageEnhance.Contrast(gray).enhance(3.0);
-    gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
-    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
-    text = pytesseract.image_to_string(gray, config=cfg).strip()
-    parts = re.split(r'[,.\s]+', text);
-    nums = [p for p in parts if p.isdigit()]
-    if len(nums) >= 2: return int(nums[0]), int(nums[1])
+    fail_seq = 0
+    for attempt in range(3):
+        img = ImageGrab.grab(bbox);
+        gray = img.convert('L').resize((img.width * 2, img.height * 2))
+        if attempt == 0:
+            # Kilit sıfırlama tek seferlik
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (koordinat okuma).")
+        gray = ImageEnhance.Contrast(gray).enhance(3.0);
+        gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
+        cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
+        text = pytesseract.image_to_string(gray, config=cfg).strip()
+        parts = re.split(r'[,.\s]+', text);
+        nums = [p for p in parts if p.isdigit()]
+        if len(nums) >= 2:
+            return int(nums[0]), int(nums[1])
+        fail_seq += 1
+        time.sleep(0.05)
+    log(f"[OCR] Koordinat okunamadı (art arda {fail_seq})", "warning")
     return None, None
 
 
@@ -4417,6 +4481,8 @@ def main():
     load_plus7_templates();
     load_plus8_templates();
     load_scroll_templates()
+    if not _preflight_check_assets():
+        raise GUIAbort("Preflight başarısız (şablon/ROI)")
     print(f"[AYAR] +7 taraması NPC alışından {PLUS7_START_FROM_TURN_AFTER_PURCHASE}. tur sonra aktif.")
     print(f"[AYAR] Başlangıç: GLOBAL_CYCLE={GLOBAL_CYCLE}, NEXT_PLUS7_CHECK_AT={NEXT_PLUS7_CHECK_AT}")
     if AUTO_SPEED_PROFILE: _apply_profile("BALANCED"); maybe_autotune(True)
@@ -4534,6 +4600,11 @@ def check_and_correct_y(target_y, read_func=None):
         step = 0;
         last_change = time.time()
         while abs(current_y - target_y) != 0:
+            wait_if_paused()
+            watchdog_enforce()
+            if _abort_requested():
+                print("[MİKRO] GUI abort algılandı, döngü sonlandırıldı.")
+                return
             if current_y > target_y:
                 keyboard.press('s')
             elif current_y < target_y:
@@ -4578,6 +4649,11 @@ def check_and_correct_x(target_x, read_func=None):
         step = 0;
         last_change = time.time()
         while abs(current_x - target_x) != 0:
+            wait_if_paused()
+            watchdog_enforce()
+            if _abort_requested():
+                print("[MİKRO] GUI abort algılandı, döngü sonlandırıldı.")
+                return
             if current_x > target_x:
                 keyboard.press('a')
             elif current_x < target_x:
@@ -4632,6 +4708,11 @@ def post_598_to_597():
             return
         print(f"[598→597] Başlatıldı. Şu an Y={y}, hedef={target}")
         while y != target:
+            wait_if_paused()
+            watchdog_enforce()
+            if _abort_requested():
+                print("[598→597] GUI abort algılandı, döngü kesildi.")
+                return
             if y is None:
                 y = _read_y_safe();
                 continue
