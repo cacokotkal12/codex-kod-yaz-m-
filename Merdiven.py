@@ -4247,17 +4247,30 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
     set_stage("LOADING_TO_INGAME");
     print("[WAIT] HP bar bekleniyor.")
     t0 = time.time();
+    deadline = t0 + max(0.0, float(timeout))
     last_enter = 0.0
-    while time.time() - t0 < timeout:
+    while True:
         wait_if_paused();
         watchdog_enforce()
         if _kb_pressed('f12'): print("[WAIT] F12 iptal."); return False
-        if _ingame_by_hpbar_once(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
+        reason = None
+        try:
+            if _ingame_by_hpbar_once(w):
+                reason = "HP"
+            elif _coords_read_ok(w):
+                reason = "KOORD"
+        except Exception:
+            reason = None
+        if reason:
+            print(f"[WAIT] Oyunda teyit ({reason}).");
+            ensure_ui_closed();
+            return True
         if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
             w); last_enter = time.time()
+        if time.time() >= deadline:
+            print("[WAIT] Zaman aşımı: HP bar/koordinat yok.");
+            raise WatchdogTimeout("HP/Koordinat teyidi 90 sn içinde gelmedi.")
         time.sleep(poll)
-    print("[WAIT] Zaman aşımı: HP bar yok.");
-    return False
 
 
 @with_retry("RELAUNCH_LOGIN", attempts=3, delay=2.0)
@@ -8239,6 +8252,12 @@ try:
         # --- Güvenlik/Town ---
         "TOWN_MIN_INTERVAL_SEC": 1.2,
     }
+    try:
+        _hp_src = globals().get("_GLOBAL_PATCH_CFG", {}).get("HP_POINTS", globals().get("HP_POINTS", []))
+        _hp_pts = [(int(x), int(y)) for (x, y) in _ensure_pair_list(_hp_src)]
+        _YAMA_GUI_DEFAULTS["HP_POINTS"] = _hp_pts if _hp_pts else [(185, 68), (218, 74)]
+    except Exception:
+        _YAMA_GUI_DEFAULTS["HP_POINTS"] = [(185, 68), (218, 74)]
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS, list) and FABRIC_STEPS:
         _YAMA_GUI_DEFAULTS["FABRIC_STEPS"] = [(int(x), int(y), int(c), str(b)) for (x, y, c, b) in FABRIC_STEPS[:5]]
