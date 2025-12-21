@@ -1177,6 +1177,7 @@ _MICRO_DEFAULTS = {
 WATCHDOG_STAGE_TIMEOUTS = {
     "HEDEFLE_Y_598": MERDIVEN_TOPLAM_DUZELTME_SURESI,
     "DUZELT_Y_598": MERDIVEN_TOPLAM_DUZELTME_SURESI,
+    "ASCEND_STAIRS": MERDIVEN_TOPLAM_DUZELTME_SURESI,
 }
 
 
@@ -1208,6 +1209,9 @@ def _refresh_watchdog_stage_timeouts():
     WATCHDOG_STAGE_TIMEOUTS.update({
         f"HEDEFLE_Y_{top_y}": base_limit,
         f"DUZELT_Y_{top_y}": base_limit,
+        f"APPROACH_Y_{top_y}": base_limit,
+        f"RECOVER_Y_{top_y}": base_limit,
+        "ASCEND_STAIRS": base_limit,
     })
 
 
@@ -1342,7 +1346,7 @@ def _stage_timeout_limit():
         limit = float(limit_val)
     except Exception:
         limit = WATCHDOG_TIMEOUT
-    if isinstance(_current_stage, str) and _current_stage.startswith(("HEDEFLE_", "DUZELT_")):
+    if isinstance(_current_stage, str) and _current_stage.startswith(("HEDEFLE_", "DUZELT_", "APPROACH_", "RECOVER_", "ASCEND_")):
         try:
             limit = float(WATCHDOG_STAGE_TIMEOUTS.get(_current_stage,
                                                       globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI",
@@ -2899,6 +2903,70 @@ def _targets_from_value(target_set_or_value) -> List[int]:
     return sorted(set(vals))
 
 
+def recover_to_target_by_backstep(w, axis: str, target: int, max_sec: float = 5.0, pulse: float = None,
+                                  settle_hits: int = None, tolerance: int = 0) -> bool:
+    """
+    NE İŞE YARAR: W ile hedefi aşınca S mikro vuruşlarıyla geri gelir ve hedefe 2x doğrulamayla oturur.
+    - axis: 'x' veya 'y'
+    - pulse: S mikro basış süresi (None ise jitterlı global min/max aralığı kullanılır)
+    - settle_hits: hedefte art arda okunması gereken tekrar sayısı
+    - tolerance: ±band toleransı
+    """
+    axis = axis.lower()
+    assert axis in ('x', 'y')
+    target_val = int(target)
+    read_wait = float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME))
+    stable_need = max(1, int(settle_hits if settle_hits is not None else globals().get("HEDEF_OTURMA_STABIL_OKUMA",
+                                                                                       HEDEF_OTURMA_STABIL_OKUMA)))
+    min_pulse = float(globals().get("MIKRO_ADIM_BASIS_MIN", MIKRO_ADIM_BASIS_MIN))
+    max_pulse = float(globals().get("MIKRO_ADIM_BASIS_MAX", MIKRO_ADIM_BASIS_MAX))
+    back_pulse = float(pulse) if pulse is not None else None
+    deadline = time.time() + float(max_sec if max_sec is not None else 0.0)
+    direction = detect_w_direction(w, axis, target=target_val)
+    set_stage(f"RECOVER_{axis.upper()}_{target_val}")
+    release_key(SC_W)
+    stable = 0
+    while time.time() < deadline:
+        wait_if_paused()
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            return False
+        cur = _read_axis(w, axis)
+        if cur is None:
+            time.sleep(read_wait)
+            continue
+        try:
+            cur_val = int(cur)
+        except Exception:
+            time.sleep(read_wait)
+            stable = 0
+            continue
+        diff = target_val - cur_val
+        if direction == 0:
+            direction = 1 if cur_val < target_val else -1
+        if abs(diff) <= abs(int(tolerance)):
+            stable += 1
+            if stable >= stable_need:
+                return True
+            time.sleep(read_wait)
+            continue
+        stable = 0
+        overshoot = False
+        if direction > 0:
+            overshoot = diff < -abs(int(tolerance))
+        elif direction < 0:
+            overshoot = diff > abs(int(tolerance))
+        else:
+            overshoot = (cur_val != target_val) and (
+                    (target_val < cur_val) if diff < 0 else (target_val > cur_val))
+        if not overshoot:
+            return False
+        pulse_val = back_pulse if back_pulse is not None else random.uniform(min_pulse, max_pulse)
+        micro_tap(SC_S, pulse_val)
+        time.sleep(read_wait)
+    return False
+
+
 def approach_coord_with_overshoot_fix(win, axis, target_set_or_value, move_key='W', back_key='S', tolerance=0,
                                       micro_step=0.03, max_fix_seconds=300, overall_timeout=300):
     """
@@ -3297,7 +3365,15 @@ def eksen_hedefine_git_town_yok(w, axis: str, target: int, total_timeout: float)
                 close_all_game_instances()
             except Exception:
                 pass
-    return False
+    if globals().get("REQUEST_RELAUNCH", False):
+        return False
+    release_key(SC_W)
+    remaining_for_recover = max(0.0, time_budget - (time.time() - start))
+    recover_ok = recover_to_target_by_backstep(w, axis, tgt, max_sec=remaining_for_recover,
+                                               settle_hits=max(2, int(globals().get("HEDEF_OTURMA_STABIL_OKUMA",
+                                                                                    HEDEF_OTURMA_STABIL_OKUMA))),
+                                               tolerance=tol)
+    return bool(recover_ok)
 
 
 # --- Yalnızca mevcut iki fonksiyonu override ediyoruz (imza KORUNUR) ---
@@ -3327,6 +3403,11 @@ def ascend_stairs_to_top(w):
         x = None
     if x not in VALID_X: print("[STAIRS] X geçersiz → hizalanıyor."); town_until_valid_x(w)
     target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
+    ascend_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
+    ascend_deadline = time.time() + ascend_limit
+
+    def _remaining_ascend_time():
+        return ascend_deadline - time.time()
 
     def _finalize_top(y_val=None):
         global NEED_STAIRS_REALIGN
@@ -3355,6 +3436,19 @@ def ascend_stairs_to_top(w):
     total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
     ok = eksen_hedefine_git_town_yok(w, 'y', target_y, total_timeout=total_limit)
     if not ok:
+        if globals().get("REQUEST_RELAUNCH", False):
+            raise WatchdogTimeout("Y_598 duzeltilemedi")
+        cur_y = _read_y_now()
+        remaining = max(0.0, _remaining_ascend_time())
+        overshoot_recovered = False
+        if cur_y is not None and remaining > 0 and int(cur_y) != target_y:
+            overshoot_recovered = recover_to_target_by_backstep(
+                w, 'y', target_y, max_sec=remaining,
+                settle_hits=max(2, int(globals().get("HEDEF_OTURMA_STABIL_OKUMA", HEDEF_OTURMA_STABIL_OKUMA))))
+        if overshoot_recovered:
+            _finalize_top(_read_y_now())
+            return
+        send_town_command()
         raise WatchdogTimeout("Y_598 duzeltilemedi")
 
     _finalize_top(_read_y_now())
