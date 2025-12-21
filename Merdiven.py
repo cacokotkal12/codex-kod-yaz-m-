@@ -605,6 +605,11 @@ pyautogui.PAUSE = 0.030
 oyuna_giris_enter_suresi = 0.5
 # ---- Watchdog ----
 WATCHDOG_TIMEOUT = 120;
+MERDIVEN_TOPLAM_DUZELTME_SURESI = 300.0  # sn
+MIKRO_ADIM_BASIS_MIN = 0.02  # sn
+MIKRO_ADIM_BASIS_MAX = 0.06  # sn
+HEDEF_OTURMA_STABIL_OKUMA = 2
+MIKRO_OKUMA_BEKLEME = 0.04  # sn
 F_WAIT_TIMEOUT_SECONDS = 30.0
 # ---- Banka +8 otomatik başlatma ----
 AUTO_BANK_PLUS8 = True  # True: 30 sn sonra otomatik +8 döngüsüne gir
@@ -1150,6 +1155,73 @@ _stage_enter_ts = time.time()
 _GUI_STAGE_DETAIL = None
 _WATCHDOG_SUSPENDED = False
 _WATCHDOG_SUSPEND_REASON = None
+_MICRO_DEFAULTS = {
+    "MERDIVEN_TOPLAM_DUZELTME_SURESI": MERDIVEN_TOPLAM_DUZELTME_SURESI,
+    "MIKRO_ADIM_BASIS_MIN": MIKRO_ADIM_BASIS_MIN,
+    "MIKRO_ADIM_BASIS_MAX": MIKRO_ADIM_BASIS_MAX,
+    "HEDEF_OTURMA_STABIL_OKUMA": HEDEF_OTURMA_STABIL_OKUMA,
+    "MIKRO_OKUMA_BEKLEME": MIKRO_OKUMA_BEKLEME,
+}
+WATCHDOG_STAGE_TIMEOUTS = {
+    "HEDEFLE_Y_598": MERDIVEN_TOPLAM_DUZELTME_SURESI,
+    "DUZELT_Y_598": MERDIVEN_TOPLAM_DUZELTME_SURESI,
+}
+
+
+def _safe_float(val, default):
+    try:
+        return float(val)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(val, default):
+    try:
+        return int(val)
+    except Exception:
+        return int(default)
+
+
+def _refresh_watchdog_stage_timeouts():
+    global WATCHDOG_STAGE_TIMEOUTS
+    try:
+        base_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
+    except Exception:
+        base_limit = MERDIVEN_TOPLAM_DUZELTME_SURESI
+    top_y = globals().get("STAIRS_TOP_Y", STAIRS_TOP_Y)
+    try:
+        top_y = int(top_y)
+    except Exception:
+        top_y = STAIRS_TOP_Y
+    WATCHDOG_STAGE_TIMEOUTS.update({
+        f"HEDEFLE_Y_{top_y}": base_limit,
+        f"DUZELT_Y_{top_y}": base_limit,
+    })
+
+
+def _normalize_micro_adjust_settings():
+    g = globals()
+    base_timeout = _safe_float(g.get("MERDIVEN_TOPLAM_DUZELTME_SURESI", _MICRO_DEFAULTS["MERDIVEN_TOPLAM_DUZELTME_SURESI"]),
+                               _MICRO_DEFAULTS["MERDIVEN_TOPLAM_DUZELTME_SURESI"])
+    min_pulse = _safe_float(g.get("MIKRO_ADIM_BASIS_MIN", _MICRO_DEFAULTS["MIKRO_ADIM_BASIS_MIN"]),
+                            _MICRO_DEFAULTS["MIKRO_ADIM_BASIS_MIN"])
+    max_pulse = _safe_float(g.get("MIKRO_ADIM_BASIS_MAX", _MICRO_DEFAULTS["MIKRO_ADIM_BASIS_MAX"]),
+                            _MICRO_DEFAULTS["MIKRO_ADIM_BASIS_MAX"])
+    if min_pulse > max_pulse:
+        min_pulse, max_pulse = max_pulse, min_pulse
+    stable_hits = _safe_int(g.get("HEDEF_OTURMA_STABIL_OKUMA", _MICRO_DEFAULTS["HEDEF_OTURMA_STABIL_OKUMA"]),
+                            _MICRO_DEFAULTS["HEDEF_OTURMA_STABIL_OKUMA"])
+    read_wait = _safe_float(g.get("MIKRO_OKUMA_BEKLEME", _MICRO_DEFAULTS["MIKRO_OKUMA_BEKLEME"]),
+                            _MICRO_DEFAULTS["MIKRO_OKUMA_BEKLEME"])
+    g["MERDIVEN_TOPLAM_DUZELTME_SURESI"] = base_timeout
+    g["MIKRO_ADIM_BASIS_MIN"] = min_pulse
+    g["MIKRO_ADIM_BASIS_MAX"] = max_pulse
+    g["HEDEF_OTURMA_STABIL_OKUMA"] = max(1, stable_hits)
+    g["MIKRO_OKUMA_BEKLEME"] = max(0.0, read_wait)
+    _refresh_watchdog_stage_timeouts()
+
+
+_normalize_micro_adjust_settings()
 
 
 def set_stage(name: str):
@@ -1249,6 +1321,25 @@ def _wait_with_stage_detail(total_seconds: float, detail_builder: Optional[Calla
         time.sleep(min(1.0, remaining, 0.5))
 
 
+def _stage_timeout_limit():
+    try:
+        limit_val = WATCHDOG_STAGE_TIMEOUTS.get(_current_stage, WATCHDOG_TIMEOUT)
+    except Exception:
+        limit_val = WATCHDOG_TIMEOUT
+    try:
+        limit = float(limit_val)
+    except Exception:
+        limit = WATCHDOG_TIMEOUT
+    if isinstance(_current_stage, str) and _current_stage.startswith(("HEDEFLE_", "DUZELT_")):
+        try:
+            limit = float(WATCHDOG_STAGE_TIMEOUTS.get(_current_stage,
+                                                      globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI",
+                                                                    WATCHDOG_TIMEOUT)))
+        except Exception:
+            limit = WATCHDOG_TIMEOUT
+    return max(0.0, limit)
+
+
 def watchdog_enforce():
     global _stage_enter_ts
     if globals().get("_WATCHDOG_SUSPENDED", False):
@@ -1256,8 +1347,9 @@ def watchdog_enforce():
     if _abort_requested():
         raise GUIAbort("GUI durdurma isteği")
     if bool(ctypes.windll.user32.GetKeyState(0x14) & 1): _stage_enter_ts = time.time(); return
-    if (time.time() - _stage_enter_ts) > WATCHDOG_TIMEOUT: raise WatchdogTimeout(
-        f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
+    limit = _stage_timeout_limit()
+    if (time.time() - _stage_enter_ts) > limit: raise WatchdogTimeout(
+        f"Aşama '{_current_stage}' {limit:.0f}s ilerlemiyor.")
     maybe_autotune(False)
 
 
@@ -2940,22 +3032,36 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
     return ok
 def town_until_valid_x(w):
-    set_stage("TOWN_ALIGN_FOR_VALID_X");
-    attempts = 0
-    while True:
-        wait_if_paused();
+    set_stage("ALIGN_VALID_X");
+    candidates = sorted(int(v) for v in VALID_X)
+    if not candidates:
+        raise WatchdogTimeout("VALID_X listesi boş.")
+    start = time.time()
+    total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
+    tried: Set[int] = set()
+    while (time.time() - start) < total_limit:
+        wait_if_paused()
         watchdog_enforce()
         try:
             x, _ = read_coordinates(w)
         except Exception:
             x = None
-        if x in VALID_X: print(f"[ALIGN] Geçerli X: {x} (deneme={attempts})"); return x
-        print(f"[ALIGN] X={x} geçersiz → town.");
-        ensure_ui_closed();
-        send_town_command();
-        attempts += 1;
-        set_stage("TOWN_ALIGN_FOR_VALID_X");
-        time.sleep(0.2)
+        target = None
+        if x is not None:
+            try:
+                target = min((c for c in candidates if c not in tried), key=lambda v: abs(int(x) - v))
+            except ValueError:
+                target = None
+        if target is None:
+            target = next((c for c in candidates if c not in tried), candidates[0])
+        remaining = total_limit - (time.time() - start)
+        ok = eksen_hedefine_git_town_yok(w, 'x', target, total_timeout=remaining)
+        if ok:
+            return target
+        tried.add(target)
+        if len(tried) >= len(candidates):
+            tried.clear()
+    raise WatchdogTimeout("Geçerli X'e hizalanamadı.")
 
 
 # >>> SPEED_AWARE_BEGIN_v2
@@ -2977,21 +3083,80 @@ def _get_speed_profile():
 def _get_delta(): return int(_SPEED_PRE_BRAKE.get(_get_speed_profile(), _SPEED_PRE_BRAKE["FAST"]))
 
 
+def eksen_hedefine_mikro_duzeltme(w, axis: str, target: int, total_timeout: float) -> bool:
+    assert axis in ('x', 'y')
+    tgt = int(target)
+    set_stage(f"DUZELT_{axis.upper()}_{tgt}")
+    t0 = time.time()
+    stable = 0
+    while (time.time() - t0) < float(total_timeout):
+        wait_if_paused()
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            return False
+        cur = _read_axis(w, axis)
+        if cur is None:
+            time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+            continue
+        try:
+            cur_val = int(cur)
+        except Exception:
+            time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+            stable = 0
+            continue
+        if cur_val == tgt:
+            stable += 1
+            if stable >= int(globals().get("HEDEF_OTURMA_STABIL_OKUMA", HEDEF_OTURMA_STABIL_OKUMA)):
+                return True
+        else:
+            stable = 0
+            pulse = random.uniform(float(globals().get("MIKRO_ADIM_BASIS_MIN", MIKRO_ADIM_BASIS_MIN)),
+                                   float(globals().get("MIKRO_ADIM_BASIS_MAX", MIKRO_ADIM_BASIS_MAX)))
+            if cur_val > tgt:
+                micro_tap(SC_S, pulse)
+            else:
+                micro_tap(SC_W, pulse)
+        time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+    return False
+
+
+def eksen_hedefine_git_town_yok(w, axis: str, target: int, total_timeout: float) -> bool:
+    assert axis in ('x', 'y')
+    tgt = int(target)
+    set_stage(f"HEDEFLE_{axis.upper()}_{tgt}")
+    start = time.time()
+    while (time.time() - start) < float(total_timeout):
+        wait_if_paused()
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            return False
+        remaining = float(total_timeout) - (time.time() - start)
+        if remaining <= 0:
+            break
+        delta = _get_delta()
+        prec_timeout = min(10.0, max(0.5, remaining))
+        ok = precise_move_w_to_axis(w, axis, tgt, timeout=prec_timeout, pre_brake_delta=delta, force_exact=True)
+        if ok:
+            return True
+        micro_ok = eksen_hedefine_mikro_duzeltme(w, axis, tgt, remaining)
+        if micro_ok:
+            return True
+    return False
+
+
 # --- Yalnızca mevcut iki fonksiyonu override ediyoruz (imza KORUNUR) ---
 def go_w_to_y(w, target_y: int, timeout: float = None) -> bool:
     # NE İŞE YARAR: Y hedefe yaklaşırken profilden gelen delta ile mikro fren uygular
     if timeout is None:
-        timeout = globals().get("Y_SEEK_TIMEOUT", 20.0)
-    d = _get_delta()
-    return precise_move_w_to_axis(w, 'y', int(target_y), timeout=timeout, pre_brake_delta=d, force_exact=True)
+        timeout = globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI)
+    return eksen_hedefine_git_town_yok(w, 'y', int(target_y), total_timeout=float(timeout))
 
 
 def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
     # NE İŞE YARAR: X hedefe yaklaşırken profilden gelen delta ile mikro fren uygular
     if timeout is None:
-        timeout = globals().get("NPC_SEEK_TIMEOUT", 20.0)
-    d = _get_delta()
-    return precise_move_w_to_axis(w, 'x', int(target_x), timeout=timeout, pre_brake_delta=d, force_exact=True)
+        timeout = globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI)
+    return eksen_hedefine_git_town_yok(w, 'x', int(target_x), total_timeout=float(timeout))
 
 
 # <<< SPEED_AWARE_END_v2
@@ -3004,7 +3169,7 @@ def ascend_stairs_to_top(w):
         x, _ = read_coordinates(w)
     except Exception:
         x = None
-    if x not in VALID_X: print("[STAIRS] X geçersiz → town hizala."); town_until_valid_x(w)
+    if x not in VALID_X: print("[STAIRS] X geçersiz → hizalanıyor."); town_until_valid_x(w)
     target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
 
     def _finalize_top(y_val=None):
@@ -3031,11 +3196,10 @@ def ascend_stairs_to_top(w):
         _finalize_top(y_now)
         return
 
-    ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
+    total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
+    ok = eksen_hedefine_git_town_yok(w, 'y', target_y, total_timeout=total_limit)
     if not ok:
-        print("[STAIRS] go_w_to_y başarısız → town & retry");
-        send_town_command()
-        return
+        raise WatchdogTimeout("Y_598 duzeltilemedi")
 
     _finalize_top(_read_y_now())
 def go_to_anvil_from_top(start_x):
@@ -3061,13 +3225,16 @@ def move_to_769_and_turn_from_top(w):
     press_key(SC_A);
     time.sleep(TURN_LEFT_SEC);
     release_key(SC_A)
-    ok = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
-    if not ok: print("[Uyarı] 768 x hedeflemesi zaman aşımı (storage).")
+    total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
+    ok = eksen_hedefine_git_town_yok(w, 'x', TARGET_NPC_X, total_timeout=total_limit)
+    if not ok:
+        raise WatchdogTimeout("Storage X hizalaması başarısız")
     press_key(SC_D);
     time.sleep(TURN_RIGHT_SEC);
     release_key(SC_D)
-    ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
-    if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
+    ok = eksen_hedefine_git_town_yok(w, 'y', TARGET_Y_AFTER_TURN, total_timeout=total_limit)
+    if not ok:
+        raise WatchdogTimeout("Storage Y hizalaması başarısız")
     time.sleep(0.05);
     press_key(SC_B);
     release_key(SC_B);
@@ -3489,9 +3656,7 @@ def _item_sale_handle_bank(w):
         post_598_to_597()
     except Exception as e:
         print("[ITEM_SATIS] 598→597 hata:", e)
-    if not move_to_769_and_turn_from_top(new_w):
-        print("[ITEM_SATIS] Banka açılamadı.")
-        return False
+    move_to_769_and_turn_from_top(new_w)
     try:
         take_count = int(globals().get("ITEM_SALE_BANK_WITHDRAW_COUNT", ITEM_SALE_BANK_WITHDRAW_COUNT))
     except Exception:
@@ -4046,8 +4211,10 @@ def npc_post_purchase_route_to_anvil_and_upgrade(w):
     press_key(SC_A);
     time.sleep(NPC_POSTBUY_FIRST_A_DURATION);
     release_key(SC_A)
+    total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
     set_stage("NPC_POSTBUY_W_TO_795");
-    go_w_to_x(w, NPC_POSTBUY_TARGET_X1, timeout=NPC_POSTBUY_SEEK_TIMEOUT)
+    if not eksen_hedefine_git_town_yok(w, 'x', NPC_POSTBUY_TARGET_X1, total_timeout=total_limit):
+        raise WatchdogTimeout("NPC sonrası ilk X hedefi başarısız")
     set_stage("NPC_POSTBUY_D_WHILE_W");
     press_key(SC_W);
     press_key(SC_A);
@@ -4055,7 +4222,8 @@ def npc_post_purchase_route_to_anvil_and_upgrade(w):
     release_key(SC_A);
     release_key(SC_W)
     set_stage("NPC_POSTBUY_W_TO_814");
-    go_w_to_x(w, NPC_POSTBUY_TARGET_X2, timeout=NPC_POSTBUY_SEEK_TIMEOUT)
+    if not eksen_hedefine_git_town_yok(w, 'x', NPC_POSTBUY_TARGET_X2, total_timeout=total_limit):
+        raise WatchdogTimeout("NPC sonrası ikinci X hedefi başarısız")
     set_stage("NPC_POSTBUY_A2");
     press_key(SC_A);
     time.sleep(NPC_POSTBUY_SECOND_A_DURATION);
@@ -4191,11 +4359,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
     if bank_is_open:
         print("[BANK_PLUS8] Banka açık → devam.")
     else:
-        if not move_to_769_and_turn_from_top(w):
-            print("[BANK_PLUS8] Banka açılamadı, town & tekrar.");
-            send_town_command()
-            if not move_to_769_and_turn_from_top(w): print(
-                "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); _set_mode_normal("Banka açılamadı"); return
+        move_to_769_and_turn_from_top(w)
 
     # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
     y_now = _read_y_now()
@@ -4252,14 +4416,11 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         release_key(SC_I);
         time.sleep(0.2)
         if plus8 >= 1:
-            if not move_to_769_and_turn_from_top(w):
-                print("[BANK_PLUS8] Storage açılamadı; sonraki döngü.")
-            else:
-                deposit_inventory_plusN_to_bank(w, 8)
+            move_to_769_and_turn_from_top(w)
+            deposit_inventory_plusN_to_bank(w, 8)
         else:
             print("[BANK_PLUS8] Üzerinde +8 yok.")
-            if not move_to_769_and_turn_from_top(w): print(
-                "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
+            move_to_769_and_turn_from_top(w)
 
 
 # ================== BANK_PLUS7 ORKESTRASYONU ==================
@@ -4284,10 +4445,7 @@ def run_bank_plus7_mode(w):
         release_key(SC_I);
         time.sleep(0.2)
         need_deposit = plus7_inv >= 3
-        if not move_to_769_and_turn_from_top(w):
-            print("[BANK_PLUS7] Banka açılamadı → town retry")
-            send_town_command()
-            continue
+        move_to_769_and_turn_from_top(w)
         if need_deposit:
             deposited = deposit_inventory_plusN_to_bank(w, 7)
             print(f"[BANK_PLUS7] Bankaya bırakılan +7: {deposited}")
@@ -4350,10 +4508,7 @@ def run_stairs_and_workflow(w):
                 _set_mode_bank_plus8("Klavye/Resume")
                 print("[KAMPANYA] +8 modu (F/Resume).")
                 if not BANK_OPEN:
-                    if not move_to_769_and_turn_from_top(w):
-                        print("[KAMPANYA] Banka yok; town & retry.")
-                        send_town_command()
-                        continue
+                    move_to_769_and_turn_from_top(w)
                 run_bank_plus8_cycle(w, bank_is_open=BANK_OPEN)
                 print("[KAMPANYA] +8 modu tamam → NORMAL.")
                 _set_mode_normal("BANK_PLUS8 döngü tamam")
@@ -4367,8 +4522,8 @@ def run_stairs_and_workflow(w):
                 continue
 
             if x not in VALID_X:
-                print(f"[CHECK] X={x} geçersiz → town.")
-                send_town_command()
+                print(f"[CHECK] X={x} geçersiz → hizalanıyor.")
+                town_until_valid_x(w)
                 continue
 
             start_x = x
@@ -4397,20 +4552,18 @@ def run_stairs_and_workflow(w):
 
             if do_plus7 and plus7_count >= 3:
                 print("[Karar] Üzerinde ≥3 +7 → STORAGE akışı.")
-                if move_to_769_and_turn_from_top(w):
-                    deposit_inventory_plusN_to_bank(w, 7)
-                    md = after_deposit_check_and_decide_mode(w)
-                    if md == "BANK_PLUS8":
-                        run_bank_plus8_cycle(w, bank_is_open=True)
-                        ensure_ui_closed()
-                        return (True, False)
-                    elif md == "ABORT":
-                        return (False, False)
-                    else:
-                        ensure_ui_closed()
-                        return (True, False)
-                else:
+                move_to_769_and_turn_from_top(w)
+                deposit_inventory_plusN_to_bank(w, 7)
+                md = after_deposit_check_and_decide_mode(w)
+                if md == "BANK_PLUS8":
+                    run_bank_plus8_cycle(w, bank_is_open=True)
+                    ensure_ui_closed()
+                    return (True, False)
+                elif md == "ABORT":
                     return (False, False)
+                else:
+                    ensure_ui_closed()
+                    return (True, False)
 
             if empty_slots >= EMPTY_SLOT_THRESHOLD:
                 print("[Karar] Boş slot ≥ eşik → NPC'den item al.")
@@ -4862,10 +5015,10 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     press_key(SC_W);
     time.sleep(NPC_GIDIS_SURESI);
     release_key(SC_W)
-    try:
-        _ = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
-    except Exception:
-        pass
+    total_limit = float(globals().get("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI))
+    ok = eksen_hedefine_git_town_yok(w, 'x', TARGET_NPC_X, total_timeout=total_limit)
+    if not ok:
+        raise WatchdogTimeout("NPC X hizalaması başarısız")
     time.sleep(0.1)
     press_key(SC_B);
     release_key(SC_B);
@@ -5032,6 +5185,22 @@ CONFIG_FIELDS: List[ConfigField] = [
                 "Merdiven sağ X değerleri.", apply=_ensure_int_set),
     ConfigField("STOP_Y", "Y duruş noktaları", "Koordinat Grupları", "list_int",
                 _cfg_default("STOP_Y", {598}), "Merdiven üstü Y değerleri.", apply=_ensure_int_set),
+    ConfigField("MERDIVEN_TOPLAM_DUZELTME_SURESI", "Merdiven Toplam Düzeltme Süresi (sn)",
+                "Koordinat Düzeltme", "float",
+                _cfg_default("MERDIVEN_TOPLAM_DUZELTME_SURESI", MERDIVEN_TOPLAM_DUZELTME_SURESI),
+                "Hedefe oturmak için toplam süre sınırı."),
+    ConfigField("MIKRO_ADIM_BASIS_MIN", "Mikro Adım Basış Min (sn)", "Koordinat Düzeltme", "float",
+                _cfg_default("MIKRO_ADIM_BASIS_MIN", MIKRO_ADIM_BASIS_MIN),
+                "Mikro düzeltme için en kısa tuş basış süresi."),
+    ConfigField("MIKRO_ADIM_BASIS_MAX", "Mikro Adım Basış Max (sn)", "Koordinat Düzeltme", "float",
+                _cfg_default("MIKRO_ADIM_BASIS_MAX", MIKRO_ADIM_BASIS_MAX),
+                "Mikro düzeltme için en uzun tuş basış süresi."),
+    ConfigField("HEDEF_OTURMA_STABIL_OKUMA", "Hedef Oturma Stabil Okuma", "Koordinat Düzeltme", "int",
+                _cfg_default("HEDEF_OTURMA_STABIL_OKUMA", HEDEF_OTURMA_STABIL_OKUMA),
+                "Hedefte üst üste kaç okuma olursa tamam sayılacak."),
+    ConfigField("MIKRO_OKUMA_BEKLEME", "Mikro Okuma Bekleme (sn)", "Koordinat Düzeltme", "float",
+                _cfg_default("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME),
+                "Mikro adımlar arası koordinat okuma beklemesi."),
     ConfigField("SCROLL_POS", "Scroll pozisyonu (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("SCROLL_POS", (671, 459)),
                 "Scroll satın alma konumu.", apply=_ensure_int_pair),
@@ -5303,6 +5472,10 @@ def apply_config_values(cfg: Dict[str, Any]) -> None:
     try:
         if isinstance(g.get('SCROLL_SEARCH_REGIONS'), list):
             g['SCROLL_SEARCH_REGIONS'] = tuple(g['SCROLL_SEARCH_REGIONS'])
+    except Exception:
+        pass
+    try:
+        _normalize_micro_adjust_settings()
     except Exception:
         pass
 
@@ -5610,6 +5783,12 @@ _TR = {
     'MODE': 'mod',
     'MAX_STEPS': 'maks. adım sayısı',
     'WATCHDOG_TIMEOUT': 'watchdog zaman aşımı (sn)',
+    'WATCHDOG_STAGE_TIMEOUTS': 'watchdog aşama süreleri',
+    'MERDIVEN_TOPLAM_DUZELTME_SURESI': 'merdiven toplam düzeltme süresi',
+    'MIKRO_ADIM_BASIS_MIN': 'mikro adım basış min (sn)',
+    'MIKRO_ADIM_BASIS_MAX': 'mikro adım basış max (sn)',
+    'HEDEF_OTURMA_STABIL_OKUMA': 'hedef oturma stabil okuma',
+    'MIKRO_OKUMA_BEKLEME': 'mikro okuma bekleme (sn)',
     'REQUEST_RELAUNCH': 'zaman aşımında relaunch',
     'ON_TEMPLATE_TIMEOUT_RESTART': 'şablon gecikirse yeniden başlat',
     'DEBUG_SAVE': 'debug görselleri kaydet',
@@ -5747,6 +5926,11 @@ _TR_HELP.update({
     'PRESS_MIN': 'A/D mikro adım basışının minimum süresi (sn).',
     'PRESS_MAX': 'A/D mikro adım basışının maksimum süresi (sn).',
     'PRE_BRAKE_DELTA': 'Hedefe yaklaşırken ön fren düzeltmesi (px).',
+    'MERDIVEN_TOPLAM_DUZELTME_SURESI': 'Hedef koordinata oturmak için tanınan toplam süre (sn).',
+    'MIKRO_ADIM_BASIS_MIN': 'Mikro W/S adımlarında kullanılacak minimum basış süresi (sn).',
+    'MIKRO_ADIM_BASIS_MAX': 'Mikro W/S adımlarında kullanılacak maksimum basış süresi (sn).',
+    'HEDEF_OTURMA_STABIL_OKUMA': 'Hedefte üst üste kaç ölçümde aynı değer görülürse tamam sayılacak.',
+    'MIKRO_OKUMA_BEKLEME': 'Her mikro adım sonrası koordinat okumadan önce beklenecek süre (sn).',
     'ROI_STALE_MS': 'Koordinat ROI tazeleme aralığı (ms).',
     'UPG_ROI_STALE_MS': 'Upgrade sırasında ROI tazeleme (ms).',
     'EMPTY_SLOT_TEMPLATE_PATH': 'Boş slot şablon dosyası.',
@@ -7282,6 +7466,10 @@ def _MERDIVEN_RUN_GUI():
                 d.update({"FAST": int(self.v["brake_fast"].get()), "BALANCED": int(self.v["brake_bal"].get()),
                           "SAFE": int(self.v["brake_safe"].get())})
                 setattr(m, "_SPEED_PRE_BRAKE", d)
+            except Exception:
+                pass
+            try:
+                m._normalize_micro_adjust_settings()
             except Exception:
                 pass
 
