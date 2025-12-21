@@ -484,6 +484,14 @@ def _raise_gui_abort(msg: str = "GUI durdurma isteği"):
     raise exc(msg)
 
 
+class MovementRestartRequired(RuntimeError):
+    """Hareket hedefi kilitlenemedi, yeniden başlatma yapıldı."""
+
+    def __init__(self, new_window=None, msg: str = ""):
+        super().__init__(msg or "Hareket sonrası yeniden başlatma gerekiyor.")
+        self.new_window = new_window
+
+
 def dump_crash(e: Exception, stage: str = "UNKNOWN"):
     try:
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -2139,7 +2147,12 @@ def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos
             town_until_valid_x(w)
             break
 
-    go_w_to_y(w, 605, timeout=20.0)
+    try:
+        go_w_to_y(w, 605, timeout=20.0)
+    except MovementRestartRequired as mrr:
+        print(f"{prefix} Y hedef doğrulanamadı, akış yeniden başlatılacak.")
+        w = mrr.new_window if mrr.new_window is not None else w
+        return False
 
     press_key(SC_B)
     release_key(SC_B)
@@ -2822,6 +2835,62 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     return False
 
 
+def recover_to_target_y_with_s(w, target_y: int, timeout_sec: float = 120.0) -> bool:
+    """
+    Hedef Y aşıldığında W bırakılıp S mikro dokunuşlarıyla geri toplar.
+    Başarı: hedefe (<=target_y, ±1 tolerans) oturursa True.
+    """
+    end = time.time() + max(0.0, float(timeout_sec))
+    stable = 0
+    print(f"[RECOVER] Y aşıldı → S ile toparlama (hedef={target_y}).")
+    try:
+        while time.time() < end:
+            wait_if_paused()
+            watchdog_enforce()
+            if _kb_pressed('f12'):
+                print("[RECOVER] F12 iptal.")
+                return False
+            cur = _read_axis(w, 'y')
+            if isinstance(cur, int):
+                if cur <= target_y and abs(cur - target_y) <= 1:
+                    stable += 1
+                    if stable >= 3:
+                        print(f"[RECOVER] Hedef Y yakalandı (cur={cur}).")
+                        return True
+                else:
+                    stable = 0
+            with key_tempo(0.0):
+                press_key(SC_S)
+                time.sleep(random.uniform(PRESS_MIN, PRESS_MAX))
+                release_key(SC_S)
+            time.sleep(MICRO_READ_DELAY)
+        print("[RECOVER] 120 sn içinde hedefe oturulamadı.")
+        return False
+    finally:
+        try:
+            release_key(SC_W)
+            release_key(SC_A)
+            release_key(SC_S)
+            release_key(SC_D)
+        except Exception:
+            pass
+
+
+def _restart_after_movement_failure(w, reason: str = ""):
+    """Hareket toparlanamadığında oyunu kapatıp yeniden açar ve pencere döndürür."""
+    if reason:
+        print(f"[RECOVER] Restart sebebi: {reason}")
+    try:
+        exit_game_fast(w)
+    except Exception:
+        try:
+            close_all_game_instances()
+        except Exception:
+            pass
+    time.sleep(1.0)
+    return relaunch_and_login_to_ingame()
+
+
 def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre_brake_delta: int = PRE_BRAKE_DELTA,
                            pulse: float = MICRO_PULSE_DURATION, settle_hits: int = TARGET_STABLE_HITS,
                            force_exact: bool = True) -> bool:
@@ -2858,6 +2927,20 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
+            if axis == 'y' and cur > target:
+                print(f"[PREC] Y hedef aşıldı (cur={cur} > target={target}) → geri toparla.")
+                try:
+                    release_key(SC_W)
+                except Exception:
+                    pass
+                recovered = recover_to_target_y_with_s(w, target, timeout_sec=120.0)
+                if not recovered:
+                    new_w = _restart_after_movement_failure(w, "Y overshoot toparlanamadı")
+                    raise MovementRestartRequired(new_w)
+                cur_after = _read_axis(w, axis)
+                if cur_after is not None and cur_after <= target and abs(cur_after - target) <= 1:
+                    return True
+                break
             if abs(target - cur) <= pre_brake_delta: break
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
@@ -2919,7 +3002,18 @@ def go_w_to_y(w, target_y: int, timeout: float = None) -> bool:
     if timeout is None:
         timeout = globals().get("Y_SEEK_TIMEOUT", 20.0)
     d = _get_delta()
-    return precise_move_w_to_axis(w, 'y', int(target_y), timeout=timeout, pre_brake_delta=d, force_exact=True)
+    ty = int(target_y)
+    y_now = _read_axis(w, 'y')
+    if y_now is not None and y_now > ty:
+        print(f"[PREC] Başlangıç Y hedefin üstünde (cur={y_now}, target={ty}) → S ile toparla.")
+        recovered = recover_to_target_y_with_s(w, ty, timeout_sec=120.0)
+        if not recovered:
+            new_w = _restart_after_movement_failure(w, "Başlangıç Y overshoot toparlanamadı")
+            raise MovementRestartRequired(new_w)
+        y_after = _read_axis(w, 'y')
+        if y_after is not None and y_after <= ty and abs(y_after - ty) <= 1:
+            return True
+    return precise_move_w_to_axis(w, 'y', ty, timeout=timeout, pre_brake_delta=d, force_exact=True)
 
 
 def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
@@ -2965,15 +3059,20 @@ def ascend_stairs_to_top(w):
     if y_now is not None and target_y - 1 <= int(y_now) <= target_y:
         print(f"[STAIRS] Y≈{y_now} (597-598 bandı) → go_w_to_y atlandı, konum sabitleniyor.")
         _finalize_top(y_now)
-        return
+        return w
 
-    ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
+    try:
+        ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
+    except MovementRestartRequired as mrr:
+        NEED_STAIRS_REALIGN = True
+        return mrr.new_window if mrr.new_window is not None else w
     if not ok:
         print("[STAIRS] go_w_to_y başarısız → town & retry");
         send_town_command()
-        return
+        return w
 
     _finalize_top(_read_y_now())
+    return w
 def go_to_anvil_from_top(start_x):
     set_stage("GO_TO_ANVIL");
     ensure_ui_closed()
@@ -2990,7 +3089,7 @@ def go_to_anvil_from_top(start_x):
     release_key(SC_W)
 
 
-def move_to_769_and_turn_from_top(w):
+def move_to_769_and_turn_from_top(w) -> Tuple[bool, Any]:
     global BANK_OPEN
     set_stage("MOVE_TO_STORAGE_AREA");
     ensure_ui_closed();
@@ -3002,7 +3101,11 @@ def move_to_769_and_turn_from_top(w):
     press_key(SC_D);
     time.sleep(TURN_RIGHT_SEC);
     release_key(SC_D)
-    ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
+    try:
+        ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
+    except MovementRestartRequired as mrr:
+        NEED_STAIRS_REALIGN = True
+        return False, (mrr.new_window if mrr.new_window is not None else w)
     if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
     time.sleep(0.05);
     press_key(SC_B);
@@ -3019,7 +3122,7 @@ def move_to_769_and_turn_from_top(w):
     print("[STORAGE] 'Use Storage' tıklandı → banka.");
     time.sleep(0.4);
     BANK_OPEN = True;
-    return True
+    return True, w
 
 
 def send_town_command(*a, **kw):
@@ -3420,12 +3523,13 @@ def _item_sale_handle_bank(w):
         print("[ITEM_SATIS] Yeniden giriş başarısız (banka).")
         return False
     town_until_valid_x(new_w)
-    ascend_stairs_to_top(new_w)
+    new_w = ascend_stairs_to_top(new_w)
     try:
         post_598_to_597()
     except Exception as e:
         print("[ITEM_SATIS] 598→597 hata:", e)
-    if not move_to_769_and_turn_from_top(new_w):
+    ok_move, new_w = move_to_769_and_turn_from_top(new_w)
+    if not ok_move:
         print("[ITEM_SATIS] Banka açılamadı.")
         return False
     try:
@@ -3697,7 +3801,7 @@ def run_item_sale_mode():
             print("[ITEM_SATIS] Oyuna giriş başarısız.")
             return
         town_until_valid_x(w)
-        ascend_stairs_to_top(w)
+        w = ascend_stairs_to_top(w)
         try:
             post_598_to_597()
         except Exception as e:
@@ -4041,6 +4145,104 @@ def _ingame_by_hpbar_once(win):
     return _is_red(rgb1) and _is_red(rgb2)
 
 
+def _coords_read_ok(win) -> bool:
+    """Koordinatlar sayısal okunabiliyorsa True döner (OCR yedeği)."""
+    try:
+        x, y = read_coordinates(win)
+        if isinstance(x, int) and isinstance(y, int):
+            return True
+    except Exception:
+        pass
+    try:
+        rx = read_coord_x()
+        ry = read_coord_y()
+        return isinstance(rx, int) and isinstance(ry, int)
+    except Exception:
+        return False
+
+
+def wait_for_ingame_or_restart(w, total: float = 30.0, interval: float = 10.0, also_check_coords: bool = True) -> bool:
+    """
+    4. Enter sonrası 30 sn içinde HP bar veya koordinat OCR ile oyunda olmayı doğrular.
+    total süresinde başarı olmazsa False döner.
+    """
+    set_stage("LOADING_TO_INGAME_COMBINED");
+    print(f"[WAIT] {int(total)} sn içinde HP/Koordinat teyidi bekleniyor.")
+    start = time.time();
+    last_log = None
+    while True:
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            print("[WAIT] F12 iptal.");
+            return False
+        reason = None
+        try:
+            if _ingame_by_hpbar_once(w):
+                reason = "HP"
+            elif also_check_coords and _coords_read_ok(w):
+                reason = "KOORD"
+        except Exception:
+            reason = None
+        if reason:
+            print(f"[WAIT] Oyunda teyit ({reason}).")
+            ensure_ui_closed()
+            return True
+        elapsed = time.time() - start
+        remaining = total - elapsed
+        rounded = max(0, int(math.ceil(remaining)))
+        if last_log != rounded and rounded % 5 == 0:
+            stage_detail(f"İn-game teyit bekleniyor ({rounded} sn)")
+            last_log = rounded
+        if remaining <= 0:
+            break
+        sleep_for = min(interval, remaining)
+        end_tick = time.time() + sleep_for
+        while time.time() < end_tick:
+            wait_if_paused();
+            watchdog_enforce()
+            if _kb_pressed('f12'):
+                print("[WAIT] F12 iptal.");
+                return False
+            time.sleep(min(0.25, end_tick - time.time()))
+    print("[WAIT] 30 sn içinde in-game teyidi gelmedi.")
+    return False
+
+
+def ensure_town_click_and_validate(w, timeout: float = 30.0, reissue_after: float = 10.0) -> bool:
+    """
+    Mouse ile town atar ve VALID_X + koordinat OCR ile doğrular.
+    Başarısız olursa False döner (çağıran relaunch etsin).
+    """
+    send_town_command()
+    click_ts = time.time()
+    deadline = click_ts + max(0.0, float(timeout))
+    last_log = 0.0
+    while time.time() < deadline:
+        wait_if_paused()
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            print("[TOWN] F12 iptal.")
+            return False
+        try:
+            x, y = read_coordinates(w)
+        except Exception:
+            x, y = None, None
+        if isinstance(x, int) and isinstance(y, int) and x in VALID_X:
+            print(f"[TOWN] Doğrulandı (X={x}, Y={y}).")
+            return True
+        if (time.time() - click_ts) >= reissue_after:
+            print("[TOWN] Doğrulama yok, town yeniden deneniyor.")
+            send_town_command()
+            click_ts = time.time()
+        if time.time() - last_log > 5.0:
+            print("[TOWN] Town sonrası konum teyidi bekleniyor...")
+            last_log = time.time()
+        time.sleep(0.25)
+    print("[TOWN] Town doğrulaması zaman aşımı.")
+    return False
+
+
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
     set_stage("LOADING_TO_INGAME");
     print("[WAIT] HP bar bekleniyor.")
@@ -4098,9 +4300,9 @@ def relaunch_and_login_to_ingame():
                 release_key(SC_ENTER);
                 if i < 3:
                     time.sleep(oyuna_giris_enter_suresi)
-            ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False)
+            ok = wait_for_ingame_or_restart(w, total=30.0, interval=10.0, also_check_coords=True)
             if not ok:
-                print("[RELAUNCH] HP bar teyidi yok. Kapat→yeniden.")
+                print("[RELAUNCH] In-game teyidi yok. Kapat→yeniden.")
                 try:
                     exit_game_fast(w)
                 except Exception:
@@ -4109,7 +4311,14 @@ def relaunch_and_login_to_ingame():
                 continue
         set_stage("RELAUNCH_TOWN_HIDE");
         ensure_ui_closed();
-        send_town_command();
+        if not ensure_town_click_and_validate(w, timeout=30.0, reissue_after=10.0):
+            print("[RELAUNCH] Town doğrulanamadı. Kapat→yeniden.")
+            try:
+                exit_game_fast(w)
+            except Exception:
+                close_all_game_instances()
+            time.sleep(2.0);
+            continue
         press_key(SC_O);
         release_key(SC_O);
         time.sleep(0.1)
@@ -4127,10 +4336,12 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
     if bank_is_open:
         print("[BANK_PLUS8] Banka açık → devam.")
     else:
-        if not move_to_769_and_turn_from_top(w):
+        ok_move, w = move_to_769_and_turn_from_top(w)
+        if not ok_move:
             print("[BANK_PLUS8] Banka açılamadı, town & tekrar.");
             send_town_command()
-            if not move_to_769_and_turn_from_top(w): print(
+            ok_move, w = move_to_769_and_turn_from_top(w)
+            if not ok_move: print(
                 "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); _set_mode_normal("Banka açılamadı"); return
 
     # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
@@ -4171,7 +4382,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         w = relaunch_and_login_to_ingame()
         if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); _set_mode_normal("Relaunch upgrade başarısız"); return
         sx = town_until_valid_x(w);
-        ascend_stairs_to_top(w);
+        w = ascend_stairs_to_top(w)
         go_to_anvil_from_top(sx)
         attempts = basma_dongusu(attempts_limit=taken, scroll_required="MID", win=w);
         print(f"[BANK_PLUS8] +8 deneme: {attempts}/{taken}")
@@ -4179,7 +4390,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         w = relaunch_and_login_to_ingame()
         if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); _set_mode_normal("Relaunch depozit başarısız"); return
         town_until_valid_x(w);
-        ascend_stairs_to_top(w);
+        w = ascend_stairs_to_top(w)
         press_key(SC_I);
         release_key(SC_I);
         time.sleep(0.5)
@@ -4188,13 +4399,15 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         release_key(SC_I);
         time.sleep(0.2)
         if plus8 >= 1:
-            if not move_to_769_and_turn_from_top(w):
+            ok_move, w = move_to_769_and_turn_from_top(w)
+            if not ok_move:
                 print("[BANK_PLUS8] Storage açılamadı; sonraki döngü.")
             else:
                 deposit_inventory_plusN_to_bank(w, 8)
         else:
             print("[BANK_PLUS8] Üzerinde +8 yok.")
-            if not move_to_769_and_turn_from_top(w): print(
+            ok_move, w = move_to_769_and_turn_from_top(w)
+            if not ok_move: print(
                 "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
 
 
@@ -4211,7 +4424,7 @@ def run_bank_plus7_mode(w):
             _set_mode_normal("F12")
             return False
         town_until_valid_x(w)
-        ascend_stairs_to_top(w)
+        w = ascend_stairs_to_top(w)
         press_key(SC_I);
         release_key(SC_I);
         time.sleep(0.6)
@@ -4220,7 +4433,8 @@ def run_bank_plus7_mode(w):
         release_key(SC_I);
         time.sleep(0.2)
         need_deposit = plus7_inv >= 3
-        if not move_to_769_and_turn_from_top(w):
+        ok_move, w = move_to_769_and_turn_from_top(w)
+        if not ok_move:
             print("[BANK_PLUS7] Banka açılamadı → town retry")
             send_town_command()
             continue
@@ -4240,7 +4454,7 @@ def run_bank_plus7_mode(w):
             _set_mode_normal("Relaunch upgrade başarısız")
             return False
         town_until_valid_x(w)
-        ascend_stairs_to_top(w)
+        w = ascend_stairs_to_top(w)
         try:
             start_x, _ = read_coordinates(w)
         except Exception:
@@ -4279,14 +4493,15 @@ def run_stairs_and_workflow(w):
                 set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
                 TOWN_LOCKED = False
                 town_until_valid_x(w)
-                ascend_stairs_to_top(w)
+                w = ascend_stairs_to_top(w)
                 continue
 
             if keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME:
                 _set_mode_bank_plus8("Klavye/Resume")
                 print("[KAMPANYA] +8 modu (F/Resume).")
                 if not BANK_OPEN:
-                    if not move_to_769_and_turn_from_top(w):
+                    ok_move, w = move_to_769_and_turn_from_top(w)
+                    if not ok_move:
                         print("[KAMPANYA] Banka yok; town & retry.")
                         send_town_command()
                         continue
@@ -4308,7 +4523,7 @@ def run_stairs_and_workflow(w):
                 continue
 
             start_x = x
-            ascend_stairs_to_top(w)
+            w = ascend_stairs_to_top(w)
 
             press_key(SC_I);
             release_key(SC_I);
@@ -4333,7 +4548,8 @@ def run_stairs_and_workflow(w):
 
             if do_plus7 and plus7_count >= 3:
                 print("[Karar] Üzerinde ≥3 +7 → STORAGE akışı.")
-                if move_to_769_and_turn_from_top(w):
+                ok_move, w = move_to_769_and_turn_from_top(w)
+                if ok_move:
                     deposit_inventory_plusN_to_bank(w, 7)
                     md = after_deposit_check_and_decide_mode(w)
                     if md == "BANK_PLUS8":
