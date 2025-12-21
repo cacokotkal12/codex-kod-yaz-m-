@@ -1,4 +1,4 @@
-# DENEME: 11.11.2025 – küçük test
+ DENEME: 11.11.2025 – küçük test
 TOWN_HARD_LOCK = False
 
 # -*- coding: utf-8 -*-
