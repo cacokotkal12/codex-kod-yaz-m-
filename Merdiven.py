@@ -770,6 +770,11 @@ def _choose_server_xy():
 HP_POINTS = [(185, 68), (218, 74)];
 HP_RED_MIN = 120.0;
 HP_RED_DELTA = 35.0
+# ---- Navigasyon / Overshoot ----
+OVERSHOOT_FIX_ENABLED = True  # W ile aşım olursa S mikro düzeltmesini devreye al
+OVERSHOOT_MICRO_STEP_SEC = 0.03  # Overshoot sonrası S mikro basış süresi (sn)
+OVERSHOOT_TOLERANCE = 0  # Overshoot düzeltmesinde kabul edilen ±px bandı
+NAVIGATION_OVERALL_TIMEOUT_SEC = 300.0  # Navigasyon toplam bekleme üst sınırı (sn); aşıldığında relaunch tetikler
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
@@ -802,6 +807,12 @@ MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
 MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
+# ---- LOADING bekleme ----
+LOADING_TIMEOUT_SEC = 90.0  # LOADING aşaması için tek denemedeki maksimum bekleme (sn)
+LOADING_MAX_RETRIES = 3  # LOADING teyidi en fazla kaç kez denensin
+LOADING_ALLOW_PERIODIC_ENTER = True  # LOADING sırasında periyodik Enter basmayı aç/kapat
+LOADING_SECONDARY_PIXEL = None  # Opsiyonel ikinci UI pikseli (x, y) kontrolü; kullanmayacaksan None bırak
+LOADING_SECONDARY_MIN_LUMA = 25.0  # İkinci piksel için minimum parlaklık eşiği
 # ---- Yürüme / Dönüş ----
 ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
@@ -986,6 +997,7 @@ REQUEST_RELAUNCH = False;
 BANK_OPEN = False;
 FORCE_PLUS7_ONCE = False
 NEED_STAIRS_REALIGN = True  # relaunch/yeniden giriş sonrası merdiven başlangıcı zorunlu
+LOADING_FAIL_COUNT = 0  # ardışık LOADING teyit başarısızlık sayacı
 
 
 def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
@@ -2863,6 +2875,129 @@ def _read_axis(w, axis: str):
     return x if axis == 'x' else y
 
 
+def _keycode_from_input(key, default):
+    """Harften ya da doğrudan scancode'dan kullanılabilir key code üretir."""
+    if isinstance(key, int):
+        return key
+    if isinstance(key, str):
+        k = key.strip().upper()
+        if k in ('W', 'A', 'S', 'D', 'I', 'O'):
+            return globals().get(f"SC_{k}", default)
+    return default
+
+
+def _targets_from_value(target_set_or_value) -> List[int]:
+    """Tek değer ya da koleksiyondan hedef listesini normalize eder."""
+    vals: List[int] = []
+    if isinstance(target_set_or_value, (list, tuple, set)):
+        vals = [int(v) for v in target_set_or_value if v is not None]
+    else:
+        try:
+            vals = [int(target_set_or_value)]
+        except Exception:
+            vals = []
+    return sorted(set(vals))
+
+
+def approach_coord_with_overshoot_fix(win, axis, target_set_or_value, move_key='W', back_key='S', tolerance=0,
+                                      micro_step=0.03, max_fix_seconds=300, overall_timeout=300):
+    """
+    NE İŞE YARAR: OCR ile X/Y okur, hedefe W ile yaklaşır; aşım olursa W'yi bırakıp S mikro vuruşlarıyla geri oturtur.
+    - target_set_or_value: tek değer ya da {…}/[…] dizisi (en yakın hedefe gider)
+    - tolerance: hedef bandı (±px)
+    - micro_step: overshoot düzeltmesinde S basış süresi
+    - max_fix_seconds: tek denemede maksimum düzeltme süresi
+    - overall_timeout: toplam navigasyon limiti; aşıldığında relaunch tetikler
+    """
+    axis = axis.lower()
+    assert axis in ('x', 'y')
+    targets = _targets_from_value(target_set_or_value)
+    if not targets:
+        log(f"[NAV] Hedef listesi boş (axis={axis}).", "warning")
+        return False
+    move_code = _keycode_from_input(move_key, SC_W)
+    back_code = _keycode_from_input(back_key, SC_S)
+    tol = tolerance if tolerance is not None else 0
+    micro = float(micro_step if micro_step is not None else globals().get("OVERSHOOT_MICRO_STEP_SEC", 0.03))
+    overshoot_enabled = bool(globals().get("OVERSHOOT_FIX_ENABLED", True))
+    stable_need = int(globals().get("HEDEF_OTURMA_STABIL_OKUMA", HEDEF_OTURMA_STABIL_OKUMA))
+    stage_target = ','.join(str(t) for t in targets[:3])
+    set_stage(f"APPROACH_{axis.upper()}_{stage_target}")
+    start = time.time()
+    overall_limit_val = float(overall_timeout if overall_timeout is not None else NAVIGATION_OVERALL_TIMEOUT_SEC)
+    fix_limit = float(max_fix_seconds if max_fix_seconds is not None else overall_limit_val)
+    overall_deadline = start + overall_limit_val
+    pressing_forward = False
+    stable = 0
+    direction = detect_w_direction(win, axis, target=targets[0])
+    try:
+        while True:
+            wait_if_paused()
+            watchdog_enforce()
+            if _abort_requested():
+                _raise_gui_abort()
+            if _kb_pressed('f12'):
+                if pressing_forward: release_key(move_code)
+                return False
+            now = time.time()
+            if now > overall_deadline:
+                print("[NAV] 5 dakikalık genel timeout aşıldı → relaunch istenecek.")
+                globals()['REQUEST_RELAUNCH'] = True
+                try:
+                    exit_game_fast(win)
+                except Exception:
+                    try:
+                        close_all_game_instances()
+                    except Exception:
+                        pass
+                return False
+            cur = _read_axis(win, axis)
+            if cur is None:
+                time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+                continue
+            target = min(targets, key=lambda v: abs(v - int(cur)))
+            diff = target - int(cur)
+            if abs(diff) <= tol:
+                stable += 1
+                if stable >= stable_need:
+                    if pressing_forward:
+                        release_key(move_code)
+                    return True
+                time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+                continue
+            stable = 0
+            overshoot = overshoot_enabled and ((direction > 0 and diff < -tol) or (direction < 0 and diff > tol))
+            if overshoot:
+                if pressing_forward:
+                    release_key(move_code)
+                    pressing_forward = False
+                fix_start = time.time()
+                while True:
+                    wait_if_paused()
+                    watchdog_enforce()
+                    if _abort_requested(): _raise_gui_abort()
+                    if _kb_pressed('f12'): return False
+                    if time.time() > overall_deadline or time.time() - fix_start > fix_limit:
+                        break
+                    cur_fix = _read_axis(win, axis)
+                    if cur_fix is None:
+                        time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+                        continue
+                    if abs(target - int(cur_fix)) <= tol:
+                        stable = 1
+                        break
+                    micro_tap(back_code, micro)
+                    time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+                continue
+            if not pressing_forward:
+                press_key(move_code)
+                pressing_forward = True
+            time.sleep(float(globals().get("MIKRO_OKUMA_BEKLEME", MIKRO_OKUMA_BEKLEME)))
+    finally:
+        if pressing_forward:
+            release_key(move_code)
+
+
 # >>> OVERSHOOT FİX: A/D YOK, SADECE W – YÖN-PARAM ve TOLERANSLI KABUL <<<
 def go_precise_x_no_nudge(w, target_x: int, dir: str, timeout: float = None):
     """
@@ -3124,13 +3259,24 @@ def eksen_hedefine_git_town_yok(w, axis: str, target: int, total_timeout: float)
     assert axis in ('x', 'y')
     tgt = int(target)
     set_stage(f"HEDEFLE_{axis.upper()}_{tgt}")
+    overall_limit = float(globals().get("NAVIGATION_OVERALL_TIMEOUT_SEC", NAVIGATION_OVERALL_TIMEOUT_SEC))
+    tol = int(globals().get("OVERSHOOT_TOLERANCE", OVERSHOOT_TOLERANCE))
+    micro = float(globals().get("OVERSHOOT_MICRO_STEP_SEC", OVERSHOOT_MICRO_STEP_SEC))
+    if bool(globals().get("OVERSHOOT_FIX_ENABLED", True)):
+        ok_new = approach_coord_with_overshoot_fix(w, axis, tgt, tolerance=tol, micro_step=micro,
+                                                   max_fix_seconds=total_timeout, overall_timeout=overall_limit)
+        if ok_new or globals().get("REQUEST_RELAUNCH", False):
+            return ok_new
     start = time.time()
-    while (time.time() - start) < float(total_timeout):
+    time_budget = min(float(total_timeout), overall_limit)
+    while (time.time() - start) < time_budget:
         wait_if_paused()
         watchdog_enforce()
         if _kb_pressed('f12'):
             return False
-        remaining = float(total_timeout) - (time.time() - start)
+        if (time.time() - start) >= overall_limit:
+            break
+        remaining = float(time_budget) - (time.time() - start)
         if remaining <= 0:
             break
         delta = _get_delta()
@@ -3141,6 +3287,16 @@ def eksen_hedefine_git_town_yok(w, axis: str, target: int, total_timeout: float)
         micro_ok = eksen_hedefine_mikro_duzeltme(w, axis, tgt, remaining)
         if micro_ok:
             return True
+    if (time.time() - start) >= overall_limit:
+        print("[NAV] Genel navigasyon limiti aşıldı → relaunch tetiklendi.")
+        globals()['REQUEST_RELAUNCH'] = True
+        try:
+            exit_game_fast(w)
+        except Exception:
+            try:
+                close_all_game_instances()
+            except Exception:
+                pass
     return False
 
 
@@ -4273,20 +4429,86 @@ def _ingame_by_hpbar_once(win):
     return _is_red(rgb1) and _is_red(rgb2)
 
 
+def _loading_coordinates_readable(win):
+    """Loading aşamasında küçük ROI'den koordinat okunabilirliğini kontrol et (sadece doğrulama)."""
+    left, top = win.left, win.top
+    bbox = (left + 104, top + 102, left + 148, top + 118)
+    img = ImageGrab.grab(bbox);
+    gray = img.convert('L').resize((img.width * 2, img.height * 2))
+    gray = ImageEnhance.Contrast(gray).enhance(3.0);
+    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
+    text = pytesseract.image_to_string(gray, config=cfg).strip()
+    parts = re.split(r'[,.\s]+', text);
+    nums = [p for p in parts if p.isdigit()]
+    return len(nums) >= 2
+
+
+def _loading_secondary_pixel_ok(win):
+    """Opsiyonel ikinci piksel kontrolü (örn. UI parlaklığı)."""
+    pix = globals().get("LOADING_SECONDARY_PIXEL", None)
+    if not pix or len(pix) < 2:
+        return True
+    try:
+        rx, ry = int(pix[0]), int(pix[1])
+        r, g, b = _mean_rgb_around(win, rx, ry, 5)
+        luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        return luma >= float(globals().get("LOADING_SECONDARY_MIN_LUMA", LOADING_SECONDARY_MIN_LUMA))
+    except Exception:
+        return False
+
+
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
+    global LOADING_FAIL_COUNT
+    allow_enter = bool(allow_periodic_enter if allow_periodic_enter is not None else globals().get(
+        "LOADING_ALLOW_PERIODIC_ENTER", LOADING_ALLOW_PERIODIC_ENTER))
+    timeout = float(timeout if timeout is not None else globals().get("LOADING_TIMEOUT_SEC", LOADING_TIMEOUT_SEC))
+    enter_gap = float(enter_period if enter_period is not None else 3.0)
+    max_retries = int(globals().get("LOADING_MAX_RETRIES", LOADING_MAX_RETRIES))
     set_stage("LOADING_TO_INGAME");
-    print("[WAIT] HP bar bekleniyor.")
+    attempt_no = LOADING_FAIL_COUNT + 1
+    print(f"[WAIT] HP bar + koordinat teyidi bekleniyor (deneme {attempt_no}/{max_retries}).")
     t0 = time.time();
     last_enter = 0.0
+    pause_logged = False
     while time.time() - t0 < timeout:
+        if is_capslock_on() and not pause_logged:
+            print("[WAIT] PAUSE nedeniyle LOADING'deyim.")
+            pause_logged = True
         wait_if_paused();
         watchdog_enforce()
-        if _kb_pressed('f12'): print("[WAIT] F12 iptal."); return False
-        if _ingame_by_hpbar_once(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
-        if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
-            w); last_enter = time.time()
+        if _kb_pressed('f12'):
+            print("[WAIT] F12 iptal.");
+            return False
+        hp_ok = _ingame_by_hpbar_once(w)
+        coord_ok = _loading_coordinates_readable(w)
+        pixel_ok = _loading_secondary_pixel_ok(w)
+        if hp_ok and coord_ok and pixel_ok:
+            print("[WAIT] HP/koordinat doğrulandı → oyundayız.")
+            ensure_ui_closed();
+            set_stage("INGAME_CONFIRMED");
+            LOADING_FAIL_COUNT = 0
+            return True
+        if allow_enter and (not hp_ok or not coord_ok) and (time.time() - last_enter >= enter_gap):
+            safe_press_enter_if_not_ingame(w);
+            last_enter = time.time()
         time.sleep(poll)
-    print("[WAIT] Zaman aşımı: HP bar yok.");
+    LOADING_FAIL_COUNT += 1
+    print(f"[WAIT] Zaman aşımı: HP/koordinat teyidi yok ({timeout:.0f}s). (Toplam ardışık={LOADING_FAIL_COUNT})")
+    if LOADING_FAIL_COUNT >= max_retries:
+        print("[WAIT] LOADING üst üste başarısız → hard reset (client+launcher kapatılıyor).")
+        try:
+            exit_game_fast(w)
+        except Exception as e:
+            print(f"[WAIT] LOADING çıkış hata: {e}")
+        try:
+            close_all_game_instances()
+        except Exception as e:
+            print(f"[WAIT] Tüm süreçleri kapatma hata: {e}")
+        try:
+            _ensure_launcher_closed_strict(max_wait=8.0)
+        except Exception as e:
+            print(f"[WAIT] Launcher kapatma uyarı: {e}")
+        LOADING_FAIL_COUNT = 0
     return False
 
 
@@ -4330,7 +4552,10 @@ def relaunch_and_login_to_ingame():
                 release_key(SC_ENTER);
                 if i < 3:
                     time.sleep(oyuna_giris_enter_suresi)
-            ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False)
+            load_timeout = float(globals().get("LOADING_TIMEOUT_SEC", LOADING_TIMEOUT_SEC))
+            allow_enter = bool(globals().get("LOADING_ALLOW_PERIODIC_ENTER", LOADING_ALLOW_PERIODIC_ENTER))
+            ok = confirm_loading_until_ingame(w, timeout=load_timeout, poll=0.25, enter_period=3.0,
+                                              allow_periodic_enter=allow_enter)
             if not ok:
                 print("[RELAUNCH] HP bar teyidi yok. Kapat→yeniden.")
                 try:
@@ -4496,6 +4721,23 @@ def run_stairs_and_workflow(w):
             if _kb_pressed('f12'):
                 print("[LOOP] F12 iptal.")
                 return (False, False)
+            if REQUEST_RELAUNCH:
+                print("[LOOP] Navigasyon zaman aşımı → relaunch akışı.")
+                REQUEST_RELAUNCH = False
+                try:
+                    exit_game_fast(w)
+                except Exception:
+                    try:
+                        close_all_game_instances()
+                    except Exception:
+                        pass
+                w2 = relaunch_and_login_to_ingame()
+                if not w2:
+                    print("[LOOP] Relaunch başarısız.")
+                    return (False, False)
+                w = w2
+                NEED_STAIRS_REALIGN = True
+                continue
 
             if NEED_STAIRS_REALIGN:
                 set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
@@ -4678,8 +4920,10 @@ def main():
                         release_key(SC_ENTER);
                         if i < 3:
                             time.sleep(oyuna_giris_enter_suresi)
-                    ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
-                                                      allow_periodic_enter=False)
+                    load_timeout = float(globals().get("LOADING_TIMEOUT_SEC", LOADING_TIMEOUT_SEC))
+                    allow_enter = bool(globals().get("LOADING_ALLOW_PERIODIC_ENTER", LOADING_ALLOW_PERIODIC_ENTER))
+                    ok = confirm_loading_until_ingame(w, timeout=load_timeout, poll=0.25, enter_period=3.0,
+                                                      allow_periodic_enter=allow_enter)
                     if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
                 set_stage("INGAME_TOWN");
                 ensure_ui_closed();
