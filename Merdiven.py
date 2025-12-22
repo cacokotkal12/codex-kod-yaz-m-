@@ -573,6 +573,7 @@ GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
 GAME_START_FALLBACK_RELATIVE_POS = (906, 600)
 GAME_START_VERIFY_TIMEOUT = 8.0
 TEMPLATE_EXTRA_CLICK_POS = (906, 600)
+giris_enter = 0.5
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
 LAUNCHER_START_CLICK_POS = (974, 726)
@@ -2405,6 +2406,14 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
         _click_game_start_fallback(w)
         if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
             return True
+        try:
+            enter_gap = float(globals().get("giris_enter", 0.5))
+        except Exception:
+            enter_gap = 0.5
+        for _ in range(4):
+            press_key(SC_ENTER);
+            release_key(SC_ENTER);
+            time.sleep(max(0.0, enter_gap))
         if attempt < attempts:
             time.sleep(max(0.5, float(wait_between)))
     _capture_debug_screenshot("start_fail")
