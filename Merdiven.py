@@ -1,3 +1,4 @@
+from __future__ import annotations
 # DENEME: 11.11.2025 – küçük test
 TOWN_HARD_LOCK = False
 
@@ -67,7 +68,7 @@ def _read_y_now():
 # [PATCH_Y_LOCK_END]
 
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
-    random, base64, \
+    random, \
     sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
@@ -121,151 +122,106 @@ def _MERDIVEN_CFG_PATH():
     return path
 
 
-_CREDENTIALS_FILE = PERSIST_PATH('credentials.json')
-_CREDENTIALS_LOCK = threading.Lock()
+def _accounts_default():
+    return {"accounts": [], "active": ""}
 
 
-class _DATA_BLOB(ctypes.Structure):
-    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+_ACCOUNTS_PATH = PERSIST_PATH("accounts.json")
+_ACCOUNT_CACHE: Dict[str, Any] = _accounts_default()
+_ACTIVE_ACCOUNT_NAME = ""
 
 
-def _dpapi_protect(text: str) -> Tuple[str, bool]:
+def _read_accounts_file() -> Dict[str, Any]:
+    data = _accounts_default()
+    path = _ACCOUNTS_PATH
     try:
-        CryptProtectData = ctypes.windll.crypt32.CryptProtectData
-        CryptProtectData.argtypes = [ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
-                                     ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB)]
-        CryptProtectData.restype = wintypes.BOOL
-        raw = text.encode("utf-8")
-        in_blob = _DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
-        out_blob = _DATA_BLOB()
-        if CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-            try:
-                buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-                return base64.b64encode(buf).decode("ascii"), True
-            finally:
-                try:
-                    ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-                except Exception:
-                    pass
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            data.update({"accounts": raw.get("accounts", []), "active": raw.get("active", "")})
+            if not isinstance(data.get("accounts"), list):
+                data["accounts"] = []
     except Exception:
         pass
-    return text, False
-
-
-def _dpapi_unprotect(b64_text: str, enc: bool = True) -> str:
-    if not enc:
-        return str(b64_text or "")
     try:
-        CryptUnprotectData = ctypes.windll.crypt32.CryptUnprotectData
-        CryptUnprotectData.argtypes = [ctypes.POINTER(_DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR),
-                                       ctypes.POINTER(_DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
-                                       ctypes.POINTER(_DATA_BLOB)]
-        CryptUnprotectData.restype = wintypes.BOOL
-        raw = base64.b64decode(b64_text)
-        in_blob = _DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
-        out_blob = _DATA_BLOB()
-        if CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-            try:
-                buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-                return buf.decode("utf-8", errors="ignore")
-            finally:
-                try:
-                    ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-                except Exception:
-                    pass
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-    return ""
-
-
-def _credential_default():
-    return {"active": "", "profiles": {}}
-
-
-def _load_credentials_data():
-    data = _credential_default()
-    try:
-        with open(_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data.update({k: v for k, v in loaded.items() if k in ("active", "profiles")})
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-    if not isinstance(data.get("profiles"), dict):
-        data["profiles"] = {}
-    if not isinstance(data.get("active"), str):
-        data["active"] = ""
     return data
 
 
-def _save_credentials_data(data: Dict[str, Any]):
+def _write_accounts_file(data: Dict[str, Any]) -> None:
+    global _ACCOUNT_CACHE
+    safe = _accounts_default()
+    if isinstance(data, dict):
+        safe["accounts"] = list(data.get("accounts", []))
+        safe["active"] = str(data.get("active", "") or "")
+    path = _ACCOUNTS_PATH
     try:
-        os.makedirs(os.path.dirname(_CREDENTIALS_FILE), exist_ok=True)
-        tmp = _CREDENTIALS_FILE + ".tmp"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _CREDENTIALS_FILE)
+            json.dump(safe, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        _ACCOUNT_CACHE = safe
     except Exception:
         pass
 
 
-def _decrypt_profile(profile: Dict[str, Any]) -> Tuple[str, str]:
-    user = str(profile.get("user", "") or "")
-    pw_raw = profile.get("pass", "")
-    enc = bool(profile.get("enc", True))
-    return user, _dpapi_unprotect(str(pw_raw or ""), enc=enc)
+def _accounts_cache(refresh: bool = False) -> Dict[str, Any]:
+    global _ACCOUNT_CACHE
+    if refresh or not isinstance(_ACCOUNT_CACHE, dict) or not _ACCOUNT_CACHE:
+        _ACCOUNT_CACHE = _read_accounts_file()
+    return _ACCOUNT_CACHE
 
 
-def _set_active_profile_name(name: str) -> Dict[str, Any]:
-    with _CREDENTIALS_LOCK:
-        data = _load_credentials_data()
-        profiles = data.get("profiles") or {}
-        data["active"] = name if name and name in profiles else ""
-        _save_credentials_data(data)
-        return data
+def _find_account_by_name(name: str) -> Optional[Dict[str, Any]]:
+    target = str(name or "").strip().lower()
+    if not target:
+        return None
+    data = _accounts_cache()
+    for acc in data.get("accounts", []):
+        if str(acc.get("name", "")).strip().lower() == target:
+            return acc
+    return None
 
 
-def _update_profile_entry(name: str, username: str, password: str) -> Dict[str, Any]:
-    sanitized = name.strip()
-    with _CREDENTIALS_LOCK:
-        data = _load_credentials_data()
-        profiles = data.get("profiles")
-        if not isinstance(profiles, dict):
-            profiles = {}
-        stored_pass, enc = _dpapi_protect(password or "")
-        profiles[sanitized] = {"user": username or "", "pass": stored_pass, "enc": enc}
-        data["profiles"] = profiles
-        data["active"] = sanitized
-        _save_credentials_data(data)
-        return data
+def _apply_account_credentials(acc: Dict[str, Any]) -> None:
+    global _ACTIVE_ACCOUNT_NAME
+    try:
+        globals()["LOGIN_USERNAME"] = str(acc.get("username", "") or "")
+        globals()["LOGIN_PASSWORD"] = str(acc.get("password", "") or "")
+        _ACTIVE_ACCOUNT_NAME = str(acc.get("name", "") or "")
+    except Exception:
+        pass
 
 
-def _delete_profile_entry(name: str) -> Dict[str, Any]:
-    with _CREDENTIALS_LOCK:
-        data = _load_credentials_data()
-        profiles = data.get("profiles")
-        if isinstance(profiles, dict) and name in profiles:
-            try:
-                profiles.pop(name, None)
-            except Exception:
-                pass
-        data["profiles"] = profiles if isinstance(profiles, dict) else {}
-        if data.get("active") == name:
-            data["active"] = ""
-        _save_credentials_data(data)
-        return data
+def _set_active_account(name: str) -> bool:
+    data = _accounts_cache()
+    acc = _find_account_by_name(name)
+    if not acc:
+        return False
+    data["active"] = acc.get("name", name)
+    _apply_account_credentials(acc)
+    _write_accounts_file(data)
+    return True
 
 
-def _get_active_profile_credentials() -> Tuple[str, str, str]:
-    data = _load_credentials_data()
-    profiles = data.get("profiles") or {}
-    active = str(data.get("active") or "")
-    if active and active in profiles:
-        user, pwd = _decrypt_profile(profiles.get(active) or {})
-        return active, user, pwd
-    return "", "", ""
+def _load_accounts_on_start() -> Dict[str, Any]:
+    data = _accounts_cache(refresh=True)
+    active = str(data.get("active", "") or "")
+    acc = _find_account_by_name(active)
+    if acc:
+        _apply_account_credentials(acc)
+    else:
+        globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+    return data
+
+
+_load_accounts_on_start()
 
 
 try:
@@ -484,14 +440,6 @@ def _raise_gui_abort(msg: str = "GUI durdurma isteği"):
     raise exc(msg)
 
 
-class MovementRestartRequired(RuntimeError):
-    """Hareket hedefi kilitlenemedi, yeniden başlatma yapıldı."""
-
-    def __init__(self, new_window=None, msg: str = ""):
-        super().__init__(msg or "Hareket sonrası yeniden başlatma gerekiyor.")
-        self.new_window = new_window
-
-
 def dump_crash(e: Exception, stage: str = "UNKNOWN"):
     try:
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -557,8 +505,6 @@ jitter_px = 0
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
-# ---- Oyuna giriş Enter aralığı ----
-oyuna_giris_enter_suresi = 0.5
 # ---- Watchdog ----
 WATCHDOG_TIMEOUT = 120;
 F_WAIT_TIMEOUT_SECONDS = 30.0
@@ -618,7 +564,15 @@ BANK_NEXT_PAGE_POS = (731, 389);
 BANK_PREV_PAGE_POS = (668, 389);
 BANK_PAGE_CLICK_DELAY = 0.12
 # ---- Game Start (Launcher sonrası) ----
-TEMPLATE_EXTRA_CLICK_POS = (931, 602)
+GAME_START_TEMPLATE_PATH = "oyun_start.png";
+GAME_START_TEMPLATE_PATHS = ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png");
+GAME_START_MATCH_THRESHOLD = 0.70;
+GAME_START_FIND_TIMEOUT = 8.0;
+GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
+GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
+GAME_START_FALLBACK_RELATIVE_POS = (906, 600)
+GAME_START_VERIFY_TIMEOUT = 8.0
+TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
 LAUNCHER_START_CLICK_POS = (974, 726)
@@ -627,6 +581,7 @@ WINDOW_APPEAR_TIMEOUT = 120.0
 # ---- Login Bilgileri ve Tıklama Koord. ----
 LOGIN_USERNAME = os.getenv("KO_USER", "cacokotkal12");
 LOGIN_PASSWORD = os.getenv("KO_PASS", "Vaz14999999jS@1")
+LOGIN_TYPE_DELAY = 0.03  # sn / karakter
 # Bu alanları kendi ekranına göre ayarla (gerekirse TAB ile de ilerliyor):
 LOGIN_USERNAME_CLICK_POS = (579, 326)  # kullanıcı adı alanı
 LOGIN_PASSWORD_CLICK_POS = (579, 378)  # şifre alanı
@@ -721,10 +676,6 @@ def _choose_server_xy():
 HP_POINTS = [(185, 68), (218, 74)];
 HP_RED_MIN = 120.0;
 HP_RED_DELTA = 35.0
-HP_SCAN_RECT = (120, 44, 280, 96)  # (x1, y1, x2, y2) pencere sol-üstüne göre
-HP_SCAN_MIN_RED = 95.0
-HP_SCAN_DOM_DELTA = 20.0
-HP_SCAN_MIN_RATIO = 0.015
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
@@ -1706,6 +1657,31 @@ def _is_window_valid(win) -> bool:
         return False
 
 
+def _is_foreground_window(win) -> bool:
+    try:
+        fg = ctypes.windll.user32.GetForegroundWindow()
+        return fg and int(fg) == int(getattr(win, "_hWnd", 0))
+    except Exception:
+        return False
+
+
+def _ensure_window_focus(win, timeout: float = 5.0) -> bool:
+    try:
+        start = time.time()
+        while time.time() - start < float(timeout):
+            if _is_foreground_window(win):
+                return True
+            try:
+                win.activate()
+                ctypes.windll.user32.SetForegroundWindow(win._hWnd)
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return _is_foreground_window(win)
+    except Exception:
+        return False
+
+
 def bring_launcher_window_to_front():
     wins = gw.getWindowsWithTitle("Launcher") or gw.getWindowsWithTitle("Knight Online Launcher")
     if not wins: return None
@@ -1837,39 +1813,48 @@ def launch_via_launcher_and_wait():
 
 
 # ================== LOGIN: SAĞLAM GİRİŞ ==================
-def _login_input_text(text: str, label: str = "") -> str:
-    """Login alanına metni yapıştır ya da yapıştıramazsa harf harf yaz."""
+def _login_input_text(text: str, label: str = "", target_window=None) -> str:
+    """Login alanına metni güvenli şekilde harf harf yaz."""
     text = str(text or "")
-    if paste_text_from_clipboard(text):
-        return "paste"
+    delay = float(globals().get("LOGIN_TYPE_DELAY", 0.03) or 0.03)
+    typed = 0
     for ch in text:
-        wait_if_paused();
-        watchdog_enforce();
-        keyboard.write(ch)
-        time.sleep(0.02)
-    return "typed"
-
-
-def _login_credentials_for_stage() -> Tuple[str, str, str, bool]:
-    active, user, pwd = _get_active_profile_credentials()
-    if active and (user or pwd):
-        return user, pwd, active, True
-    return LOGIN_USERNAME, LOGIN_PASSWORD, "", False
+        wait_if_paused()
+        watchdog_enforce()
+        if _abort_requested():
+            _raise_gui_abort(f"{label or 'login'} yazımı F12 ile iptal edildi")
+        if target_window is not None and not _is_foreground_window(target_window):
+            if not _ensure_window_focus(target_window, timeout=2.0):
+                _raise_gui_abort("Login penceresi odak dışı")
+        try:
+            keyboard.write(ch, delay=0)
+        except Exception:
+            try:
+                keyboard.send(ch)
+            except Exception:
+                pass
+        typed += 1
+        time.sleep(delay if delay >= 0 else 0.0)
+    return "typed" if typed else "empty"
 
 
 def perform_login_inputs(w):
     """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
-    username, password, active_name, from_profile = _login_credentials_for_stage()
-    if from_profile:
-        try:
-            print(f"[LOGIN] Aktif profil kullanılıyor: {active_name}")
-        except Exception:
-            pass
+    if w is None or not _is_window_valid(w):
+        w = bring_game_window_to_front()
+    if not w:
+        print("[LOGIN] Pencere bulunamadı; yazım başlatılmadı.")
+        return False
+    if not _ensure_window_focus(w, timeout=5.0):
+        print("[LOGIN] Pencere odakta değil; yazım başlatılmadı.")
+        return False
+    if _abort_requested():
+        _raise_gui_abort("Login yazımı başlatılmadan durduruldu")
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
     time.sleep(0.1)
-    username_method = _login_input_text(username, "username");
+    username_method = _login_input_text(LOGIN_USERNAME, "username", target_window=w);
     time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
@@ -1878,7 +1863,7 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    password_method = _login_input_text(password, "password");
+    password_method = _login_input_text(LOGIN_PASSWORD, "password", target_window=w);
     time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
@@ -1887,8 +1872,8 @@ def perform_login_inputs(w):
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     time.sleep(0.4)
-    src = f"profil={active_name}" if from_profile else "GUI alanı"
-    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) kaynağı={src} ve Enter basıldı.")
+    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
+    return True
 
 
 # ================== OCR / INV / UPG Yardımcıları (devam Parça 2'de) ==================
@@ -2151,12 +2136,7 @@ def _run_scroll_purchase_flow(w, adet, vendor_pos, *, prefix="[SCROLL]", npc_pos
             town_until_valid_x(w)
             break
 
-    try:
-        go_w_to_y(w, 605, timeout=20.0)
-    except MovementRestartRequired as mrr:
-        print(f"{prefix} Y hedef doğrulanamadı, akış yeniden başlatılacak.")
-        w = mrr.new_window if mrr.new_window is not None else w
-        return False
+    go_w_to_y(w, 605, timeout=20.0)
 
     press_key(SC_B)
     release_key(SC_B)
@@ -2281,12 +2261,153 @@ def wait_and_click_template(win, template_path, threshold=0.8, timeout=5.0, scal
         if (time.time() - t0) > timeout: print(f"[FIND] Zaman aşımı: {os.path.basename(template_path)}"); return False
         time.sleep(0.1)
 
+        def _click_template_or_restart(w, template_path, *, threshold=0.8, timeout=5.0, scales=(1.0,)):
+            """
+            NE İŞE YARAR: wait_and_click_template() çağırır.
+            - Başarılıysa (True, w) döner.
+            - Zaman aşımıysa ve ON_TEMPLATE_TIMEOUT_RESTART True ise oyunu kapatır, relaunch edip (False, w2) döner.
+            """
+            ok = wait_and_click_template(w, template_path, threshold=threshold, timeout=timeout, scales=scales)
+            if ok or not ON_TEMPLATE_TIMEOUT_RESTART:
+                return ok, w
+
+            print(f"[TIMEOUT] {template_path} bulunamadı → OYUN KAPAT/RELAUNCH tetiklendi.")
+            try:
+                exit_game_fast(w)
+            except Exception as e:
+                print(f"[TIMEOUT] exit_game_fast hata: {e}")
+            w2 = relaunch_and_login_to_ingame()
+            if not w2:
+                print("[TIMEOUT] Relaunch başarısız.")
+            return False, (w2 if w2 else w)
+
+
 def pick_existing_template(paths):
     for p in paths:
         pp = resource_path(p) if os.path.exists(resource_path(p)) else p
         if os.path.exists(pp):
             img = cv2.imread(pp, cv2.IMREAD_GRAYSCALE)
             if img is not None: return pp
+    return None
+
+
+def _capture_debug_screenshot(prefix: str = "start_fail"):
+    try:
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(CRASH_DIR, f"{prefix}_{ts}.png")
+        img = ImageGrab.grab();
+        img.save(path)
+        print(f"[DEBUG] Ekran görüntüsü kaydedildi: {path}")
+        return path
+    except Exception as e:
+        print(f"[DEBUG] Screenshot alınamadı: {e}")
+        return None
+
+
+def _game_start_scale_list():
+    scales = list(globals().get("GAME_START_SCALES", GAME_START_SCALES))
+    try:
+        extras = list(globals().get("GAME_START_EXTRA_SCALES", GAME_START_EXTRA_SCALES))
+        for s in extras:
+            if s not in scales:
+                scales.append(s)
+    except Exception:
+        pass
+    return tuple(scales)
+
+
+def _game_start_template_paths():
+    raw_list = []
+    try:
+        extra = globals().get("GAME_START_TEMPLATE_PATHS", GAME_START_TEMPLATE_PATHS)
+        if isinstance(extra, (list, tuple, set)):
+            raw_list.extend(list(extra))
+    except Exception:
+        pass
+    raw_list.append(globals().get("GAME_START_TEMPLATE_PATH", GAME_START_TEMPLATE_PATH))
+    seen = set()
+    paths = []
+    for p in raw_list:
+        if p in seen:
+            continue
+        seen.add(p)
+        pp = resource_path(p) if os.path.exists(resource_path(p)) else p
+        if os.path.exists(pp):
+            paths.append(pp)
+    return paths
+
+
+def _is_template_visible(win, templates, scales, threshold):
+    try:
+        gray = grab_window_gray(win)
+    except Exception:
+        return False
+    for path in templates:
+        tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if tmpl is None:
+            continue
+        score, _, _ = match_template_multiscale(gray, tmpl, scales)
+        if score >= threshold:
+            return True
+    return False
+
+
+def _click_game_start_fallback(win):
+    try:
+        rx, ry = globals().get("GAME_START_FALLBACK_RELATIVE_POS", GAME_START_FALLBACK_RELATIVE_POS)
+    except Exception:
+        rx, ry = GAME_START_FALLBACK_RELATIVE_POS
+    ax = int(win.left + rx)
+    ay = int(win.top + ry)
+    mouse_move(ax, ay);
+    mouse_click("left");
+    mouse_move(*TEMPLATE_EXTRA_CLICK_POS);
+    mouse_click("left");
+    print(f"[START] Fallback koordinat tıklandı @ ({ax},{ay})")
+
+
+def _wait_start_transition(win, templates, scales, timeout):
+    deadline = time.time() + timeout
+    has_templates = bool(templates)
+    while time.time() < deadline:
+        if _EMPTY_BANK_STOP_EVENT.is_set():
+            break
+        try:
+            if _ingame_by_hpbar_once(win):
+                return True
+        except Exception:
+            pass
+        if has_templates and not _is_template_visible(win, templates, scales, globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD)):
+            return True
+        time.sleep(0.4)
+    return False
+
+
+@with_retry("CLICK_START", attempts=5, delay=6)
+def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
+    set_stage("START_RETRY")
+    templates = _game_start_template_paths()
+    scales = _game_start_scale_list()
+    for attempt in range(1, int(attempts) + 1):
+        wait_if_paused();
+        watchdog_enforce()
+        if not templates:
+            print("[START] Şablon listesi boş, fallback koordinat denenecek.")
+        else:
+            for path in templates:
+                ok = wait_and_click_template(w, path, threshold=GAME_START_MATCH_THRESHOLD,
+                                             timeout=GAME_START_FIND_TIMEOUT, scales=scales)
+                if ok:
+                    if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+                        return True
+                    print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
+                    break
+        _click_game_start_fallback(w)
+        if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+            return True
+        if attempt < attempts:
+            time.sleep(max(0.5, float(wait_between)))
+    _capture_debug_screenshot("start_fail")
     return None
 
 
@@ -2839,67 +2960,9 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     return False
 
 
-def recover_to_target_y_with_s(w, target_y: int, timeout_sec: float = 120.0) -> bool:
-    """
-    Hedef Y aşıldığında W bırakılıp S mikro dokunuşlarıyla geri toplar.
-    Başarı: hedefe (<=target_y, ±1 tolerans) oturursa True.
-    """
-    end = time.time() + max(0.0, float(timeout_sec))
-    stable = 0
-    print(f"[RECOVER] Y aşıldı → S ile toparlama (hedef={target_y}).")
-    try:
-        while time.time() < end:
-            wait_if_paused()
-            watchdog_enforce()
-            if _kb_pressed('f12'):
-                print("[RECOVER] F12 iptal.")
-                return False
-            cur = _read_axis(w, 'y')
-            if isinstance(cur, int):
-                if cur <= target_y and abs(cur - target_y) <= 1:
-                    stable += 1
-                    if stable >= 3:
-                        print(f"[RECOVER] Hedef Y yakalandı (cur={cur}).")
-                        return True
-                else:
-                    stable = 0
-            with key_tempo(0.0):
-                press_key(SC_S)
-                time.sleep(random.uniform(PRESS_MIN, PRESS_MAX))
-                release_key(SC_S)
-            time.sleep(MICRO_READ_DELAY)
-        print("[RECOVER] 120 sn içinde hedefe oturulamadı.")
-        return False
-    finally:
-        try:
-            release_key(SC_W)
-            release_key(SC_A)
-            release_key(SC_S)
-            release_key(SC_D)
-        except Exception:
-            pass
-
-
-def _restart_after_movement_failure(w, reason: str = ""):
-    """Hareket toparlanamadığında oyunu kapatıp yeniden açar ve pencere döndürür."""
-    if reason:
-        print(f"[RECOVER] Restart sebebi: {reason}")
-    try:
-        exit_game_fast(w)
-    except Exception:
-        try:
-            close_all_game_instances()
-        except Exception:
-            pass
-    time.sleep(1.0)
-    return relaunch_and_login_to_ingame()
-
-
 def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre_brake_delta: int = PRE_BRAKE_DELTA,
                            pulse: float = MICRO_PULSE_DURATION, settle_hits: int = TARGET_STABLE_HITS,
                            force_exact: bool = True) -> bool:
-    start_val = _read_axis(w, axis)
-    forward_dir = detect_w_direction(w, axis, target=target)
     # [YAMA] PREC_MOVE_Y_598 başında kilit + çift tık (GUI ile yönetilir)
     try:
         if str(axis).lower() == 'y' and int(target) == 598:
@@ -2933,33 +2996,12 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
-            overshoot = False
-            if axis == 'y':
-                # Y yönü W ile hangi tarafa gidiyorsa ona göre overshoot kontrolü yap
-                if forward_dir >= 0:
-                    overshoot = cur > target
-                else:
-                    overshoot = cur < target
-            if overshoot:
-                print(f"[PREC] Y hedef aşıldı (cur={cur}, target={target}, dir={'+' if forward_dir>=0 else '-'}) → geri toparla.")
-                try:
-                    release_key(SC_W)
-                except Exception:
-                    pass
-                recovered = recover_to_target_y_with_s(w, target, timeout_sec=120.0)
-                if not recovered:
-                    new_w = _restart_after_movement_failure(w, "Y overshoot toparlanamadı")
-                    raise MovementRestartRequired(new_w)
-                cur_after = _read_axis(w, axis)
-                if cur_after is not None and cur_after <= target and abs(cur_after - target) <= 1:
-                    return True
-                break
             if abs(target - cur) <= pre_brake_delta: break
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
     finally:
         release_key(SC_W)
-    direction = forward_dir if forward_dir in (+1, -1) else detect_w_direction(w, axis, target=target);
+    direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
@@ -3014,9 +3056,8 @@ def go_w_to_y(w, target_y: int, timeout: float = None) -> bool:
     # NE İŞE YARAR: Y hedefe yaklaşırken profilden gelen delta ile mikro fren uygular
     if timeout is None:
         timeout = globals().get("Y_SEEK_TIMEOUT", 20.0)
-    return precise_move_w_to_axis(
-        w, 'y', int(target_y), timeout=timeout, pre_brake_delta=_get_delta(), force_exact=True
-    )
+    d = _get_delta()
+    return precise_move_w_to_axis(w, 'y', int(target_y), timeout=timeout, pre_brake_delta=d, force_exact=True)
 
 
 def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
@@ -3062,20 +3103,15 @@ def ascend_stairs_to_top(w):
     if y_now is not None and target_y - 1 <= int(y_now) <= target_y:
         print(f"[STAIRS] Y≈{y_now} (597-598 bandı) → go_w_to_y atlandı, konum sabitleniyor.")
         _finalize_top(y_now)
-        return w
+        return
 
-    try:
-        ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
-    except MovementRestartRequired as mrr:
-        NEED_STAIRS_REALIGN = True
-        return mrr.new_window if mrr.new_window is not None else w
+    ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
     if not ok:
         print("[STAIRS] go_w_to_y başarısız → town & retry");
         send_town_command()
-        return w
+        return
 
     _finalize_top(_read_y_now())
-    return w
 def go_to_anvil_from_top(start_x):
     set_stage("GO_TO_ANVIL");
     ensure_ui_closed()
@@ -3092,7 +3128,7 @@ def go_to_anvil_from_top(start_x):
     release_key(SC_W)
 
 
-def move_to_769_and_turn_from_top(w) -> Tuple[bool, Any]:
+def move_to_769_and_turn_from_top(w):
     global BANK_OPEN
     set_stage("MOVE_TO_STORAGE_AREA");
     ensure_ui_closed();
@@ -3104,11 +3140,7 @@ def move_to_769_and_turn_from_top(w) -> Tuple[bool, Any]:
     press_key(SC_D);
     time.sleep(TURN_RIGHT_SEC);
     release_key(SC_D)
-    try:
-        ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
-    except MovementRestartRequired as mrr:
-        NEED_STAIRS_REALIGN = True
-        return False, (mrr.new_window if mrr.new_window is not None else w)
+    ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
     if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
     time.sleep(0.05);
     press_key(SC_B);
@@ -3125,7 +3157,7 @@ def move_to_769_and_turn_from_top(w) -> Tuple[bool, Any]:
     print("[STORAGE] 'Use Storage' tıklandı → banka.");
     time.sleep(0.4);
     BANK_OPEN = True;
-    return True, w
+    return True
 
 
 def send_town_command(*a, **kw):
@@ -3526,13 +3558,12 @@ def _item_sale_handle_bank(w):
         print("[ITEM_SATIS] Yeniden giriş başarısız (banka).")
         return False
     town_until_valid_x(new_w)
-    new_w = ascend_stairs_to_top(new_w)
+    ascend_stairs_to_top(new_w)
     try:
         post_598_to_597()
     except Exception as e:
         print("[ITEM_SATIS] 598→597 hata:", e)
-    ok_move, new_w = move_to_769_and_turn_from_top(new_w)
-    if not ok_move:
+    if not move_to_769_and_turn_from_top(new_w):
         print("[ITEM_SATIS] Banka açılamadı.")
         return False
     try:
@@ -3804,7 +3835,7 @@ def run_item_sale_mode():
             print("[ITEM_SATIS] Oyuna giriş başarısız.")
             return
         town_until_valid_x(w)
-        w = ascend_stairs_to_top(w)
+        ascend_stairs_to_top(w)
         try:
             post_598_to_597()
         except Exception as e:
@@ -4142,161 +4173,27 @@ def _is_red(rgb, r_min=HP_RED_MIN, delta=HP_RED_DELTA):
     return (r >= r_min) and (r - max(g, b) >= delta)
 
 
-def _hpbar_scan_ratio(win) -> float:
-    """HP bar çevresinde kırmızı baskın piksel oranını döndürür (hatada 0.0)."""
-    try:
-        x1, y1, x2, y2 = HP_SCAN_RECT
-        bbox = (win.left + x1, win.top + y1, win.left + x2, win.top + y2)
-        img = ImageGrab.grab(bbox=bbox);
-        arr = np.array(img)[:, :, :3].astype(np.float32)
-        r = arr[:, :, 0]
-        g = arr[:, :, 1]
-        b = arr[:, :, 2]
-        red_dom = (r >= HP_SCAN_MIN_RED) & ((r - np.maximum(g, b)) >= HP_SCAN_DOM_DELTA)
-        ratio = float(red_dom.mean())
-        return ratio
-    except Exception:
-        return 0.0
-
-
 def _ingame_by_hpbar_once(win):
     rgb1 = _mean_rgb_around(win, HP_POINTS[0][0], HP_POINTS[0][1], 7);
     rgb2 = _mean_rgb_around(win, HP_POINTS[1][0], HP_POINTS[1][1], 7)
-    if _is_red(rgb1) and _is_red(rgb2):
-        return True
-    ratio = _hpbar_scan_ratio(win)
-    if ratio >= HP_SCAN_MIN_RATIO:
-        print(f"[HP] Tarama oranı={ratio:.3f} (eşik={HP_SCAN_MIN_RATIO:.3f}) → Oyunda kabul.")
-        return True
-    return False
-
-
-def _coords_read_ok(win) -> bool:
-    """Koordinatlar sayısal okunabiliyorsa True döner (OCR yedeği)."""
-    try:
-        x, y = read_coordinates(win)
-        if isinstance(x, int) and isinstance(y, int):
-            return True
-    except Exception:
-        pass
-    try:
-        rx = read_coord_x()
-        ry = read_coord_y()
-        return isinstance(rx, int) and isinstance(ry, int)
-    except Exception:
-        return False
-
-
-def wait_for_ingame_or_restart(w, total: float = 30.0, interval: float = 10.0, also_check_coords: bool = True) -> bool:
-    """
-    4. Enter sonrası 30 sn içinde HP bar veya koordinat OCR ile oyunda olmayı doğrular.
-    total süresinde başarı olmazsa False döner.
-    """
-    set_stage("LOADING_TO_INGAME_COMBINED");
-    print(f"[WAIT] {int(total)} sn içinde HP/Koordinat teyidi bekleniyor.")
-    start = time.time();
-    last_log = None
-    while True:
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'):
-            print("[WAIT] F12 iptal.");
-            return False
-        reason = None
-        try:
-            if _ingame_by_hpbar_once(w):
-                reason = "HP"
-            elif also_check_coords and _coords_read_ok(w):
-                reason = "KOORD"
-        except Exception:
-            reason = None
-        if reason:
-            print(f"[WAIT] Oyunda teyit ({reason}).")
-            ensure_ui_closed()
-            return True
-        elapsed = time.time() - start
-        remaining = total - elapsed
-        rounded = max(0, int(math.ceil(remaining)))
-        if last_log != rounded and rounded % 5 == 0:
-            stage_detail(f"İn-game teyit bekleniyor ({rounded} sn)")
-            last_log = rounded
-        if remaining <= 0:
-            break
-        sleep_for = min(interval, remaining)
-        end_tick = time.time() + sleep_for
-        while time.time() < end_tick:
-            wait_if_paused();
-            watchdog_enforce()
-            if _kb_pressed('f12'):
-                print("[WAIT] F12 iptal.");
-                return False
-            time.sleep(min(0.25, end_tick - time.time()))
-    print("[WAIT] 30 sn içinde in-game teyidi gelmedi.")
-    return False
-
-
-def ensure_town_click_and_validate(w, timeout: float = 30.0, reissue_after: float = 10.0) -> bool:
-    """
-    Mouse ile town atar ve VALID_X + koordinat OCR ile doğrular.
-    Başarısız olursa False döner (çağıran relaunch etsin).
-    """
-    send_town_command()
-    click_ts = time.time()
-    deadline = click_ts + max(0.0, float(timeout))
-    last_log = 0.0
-    while time.time() < deadline:
-        wait_if_paused()
-        watchdog_enforce()
-        if _kb_pressed('f12'):
-            print("[TOWN] F12 iptal.")
-            return False
-        try:
-            x, y = read_coordinates(w)
-        except Exception:
-            x, y = None, None
-        if isinstance(x, int) and isinstance(y, int) and x in VALID_X:
-            print(f"[TOWN] Doğrulandı (X={x}, Y={y}).")
-            return True
-        if (time.time() - click_ts) >= reissue_after:
-            print("[TOWN] Doğrulama yok, town yeniden deneniyor.")
-            send_town_command()
-            click_ts = time.time()
-        if time.time() - last_log > 5.0:
-            print("[TOWN] Town sonrası konum teyidi bekleniyor...")
-            last_log = time.time()
-        time.sleep(0.25)
-    print("[TOWN] Town doğrulaması zaman aşımı.")
-    return False
+    return _is_red(rgb1) and _is_red(rgb2)
 
 
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
     set_stage("LOADING_TO_INGAME");
     print("[WAIT] HP bar bekleniyor.")
     t0 = time.time();
-    deadline = t0 + max(0.0, float(timeout))
     last_enter = 0.0
-    while True:
+    while time.time() - t0 < timeout:
         wait_if_paused();
         watchdog_enforce()
         if _kb_pressed('f12'): print("[WAIT] F12 iptal."); return False
-        reason = None
-        try:
-            if _ingame_by_hpbar_once(w):
-                reason = "HP"
-            elif _coords_read_ok(w):
-                reason = "KOORD"
-        except Exception:
-            reason = None
-        if reason:
-            print(f"[WAIT] Oyunda teyit ({reason}).");
-            ensure_ui_closed();
-            return True
+        if _ingame_by_hpbar_once(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
         if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
             w); last_enter = time.time()
-        if time.time() >= deadline:
-            print("[WAIT] Zaman aşımı: HP bar/koordinat yok.");
-            raise WatchdogTimeout("HP/Koordinat teyidi 90 sn içinde gelmedi.")
         time.sleep(poll)
+    print("[WAIT] Zaman aşımı: HP bar yok.");
+    return False
 
 
 @with_retry("RELAUNCH_LOGIN", attempts=3, delay=2.0)
@@ -4333,15 +4230,25 @@ def relaunch_and_login_to_ingame():
             for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
             print(f"[RELAUNCH] Server seçildi: {server_xy}")
             set_stage("RELAUNCH_POST_SELECT");
+            press_key(SC_ENTER);
+            release_key(SC_ENTER);
             time.sleep(1.5)
-            for i in range(4):
-                press_key(SC_ENTER);
-                release_key(SC_ENTER);
-                if i < 3:
-                    time.sleep(oyuna_giris_enter_suresi)
-            ok = wait_for_ingame_or_restart(w, total=30.0, interval=10.0, also_check_coords=True)
+            ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
             if not ok:
-                print("[RELAUNCH] In-game teyidi yok. Kapat→yeniden.")
+                print("[RELAUNCH] oyun_start.png yok. Kapat→yeniden.")
+                try:
+                    exit_game_fast(w)
+                except Exception:
+                    close_all_game_instances()
+                time.sleep(2.0);
+                continue
+            time.sleep(1);
+            press_key(SC_ENTER);
+            release_key(SC_ENTER);
+            time.sleep(1)
+            ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False)
+            if not ok:
+                print("[RELAUNCH] HP bar teyidi yok. Kapat→yeniden.")
                 try:
                     exit_game_fast(w)
                 except Exception:
@@ -4350,14 +4257,7 @@ def relaunch_and_login_to_ingame():
                 continue
         set_stage("RELAUNCH_TOWN_HIDE");
         ensure_ui_closed();
-        if not ensure_town_click_and_validate(w, timeout=30.0, reissue_after=10.0):
-            print("[RELAUNCH] Town doğrulanamadı. Kapat→yeniden.")
-            try:
-                exit_game_fast(w)
-            except Exception:
-                close_all_game_instances()
-            time.sleep(2.0);
-            continue
+        send_town_command();
         press_key(SC_O);
         release_key(SC_O);
         time.sleep(0.1)
@@ -4375,12 +4275,10 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
     if bank_is_open:
         print("[BANK_PLUS8] Banka açık → devam.")
     else:
-        ok_move, w = move_to_769_and_turn_from_top(w)
-        if not ok_move:
+        if not move_to_769_and_turn_from_top(w):
             print("[BANK_PLUS8] Banka açılamadı, town & tekrar.");
             send_town_command()
-            ok_move, w = move_to_769_and_turn_from_top(w)
-            if not ok_move: print(
+            if not move_to_769_and_turn_from_top(w): print(
                 "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); _set_mode_normal("Banka açılamadı"); return
 
     # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
@@ -4421,7 +4319,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         w = relaunch_and_login_to_ingame()
         if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); _set_mode_normal("Relaunch upgrade başarısız"); return
         sx = town_until_valid_x(w);
-        w = ascend_stairs_to_top(w)
+        ascend_stairs_to_top(w);
         go_to_anvil_from_top(sx)
         attempts = basma_dongusu(attempts_limit=taken, scroll_required="MID", win=w);
         print(f"[BANK_PLUS8] +8 deneme: {attempts}/{taken}")
@@ -4429,7 +4327,7 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         w = relaunch_and_login_to_ingame()
         if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); _set_mode_normal("Relaunch depozit başarısız"); return
         town_until_valid_x(w);
-        w = ascend_stairs_to_top(w)
+        ascend_stairs_to_top(w);
         press_key(SC_I);
         release_key(SC_I);
         time.sleep(0.5)
@@ -4438,15 +4336,13 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         release_key(SC_I);
         time.sleep(0.2)
         if plus8 >= 1:
-            ok_move, w = move_to_769_and_turn_from_top(w)
-            if not ok_move:
+            if not move_to_769_and_turn_from_top(w):
                 print("[BANK_PLUS8] Storage açılamadı; sonraki döngü.")
             else:
                 deposit_inventory_plusN_to_bank(w, 8)
         else:
             print("[BANK_PLUS8] Üzerinde +8 yok.")
-            ok_move, w = move_to_769_and_turn_from_top(w)
-            if not ok_move: print(
+            if not move_to_769_and_turn_from_top(w): print(
                 "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
 
 
@@ -4463,7 +4359,7 @@ def run_bank_plus7_mode(w):
             _set_mode_normal("F12")
             return False
         town_until_valid_x(w)
-        w = ascend_stairs_to_top(w)
+        ascend_stairs_to_top(w)
         press_key(SC_I);
         release_key(SC_I);
         time.sleep(0.6)
@@ -4472,8 +4368,7 @@ def run_bank_plus7_mode(w):
         release_key(SC_I);
         time.sleep(0.2)
         need_deposit = plus7_inv >= 3
-        ok_move, w = move_to_769_and_turn_from_top(w)
-        if not ok_move:
+        if not move_to_769_and_turn_from_top(w):
             print("[BANK_PLUS7] Banka açılamadı → town retry")
             send_town_command()
             continue
@@ -4493,7 +4388,7 @@ def run_bank_plus7_mode(w):
             _set_mode_normal("Relaunch upgrade başarısız")
             return False
         town_until_valid_x(w)
-        w = ascend_stairs_to_top(w)
+        ascend_stairs_to_top(w)
         try:
             start_x, _ = read_coordinates(w)
         except Exception:
@@ -4532,15 +4427,14 @@ def run_stairs_and_workflow(w):
                 set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
                 TOWN_LOCKED = False
                 town_until_valid_x(w)
-                w = ascend_stairs_to_top(w)
+                ascend_stairs_to_top(w)
                 continue
 
             if keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME:
                 _set_mode_bank_plus8("Klavye/Resume")
                 print("[KAMPANYA] +8 modu (F/Resume).")
                 if not BANK_OPEN:
-                    ok_move, w = move_to_769_and_turn_from_top(w)
-                    if not ok_move:
+                    if not move_to_769_and_turn_from_top(w):
                         print("[KAMPANYA] Banka yok; town & retry.")
                         send_town_command()
                         continue
@@ -4562,7 +4456,7 @@ def run_stairs_and_workflow(w):
                 continue
 
             start_x = x
-            w = ascend_stairs_to_top(w)
+            ascend_stairs_to_top(w)
 
             press_key(SC_I);
             release_key(SC_I);
@@ -4587,8 +4481,7 @@ def run_stairs_and_workflow(w):
 
             if do_plus7 and plus7_count >= 3:
                 print("[Karar] Üzerinde ≥3 +7 → STORAGE akışı.")
-                ok_move, w = move_to_769_and_turn_from_top(w)
-                if ok_move:
+                if move_to_769_and_turn_from_top(w):
                     deposit_inventory_plusN_to_bank(w, 7)
                     md = after_deposit_check_and_decide_mode(w)
                     if md == "BANK_PLUS8":
@@ -4709,11 +4602,13 @@ def main():
                     press_key(SC_ENTER);
                     release_key(SC_ENTER);
                     time.sleep(1.5)
-                    for i in range(4):
-                        press_key(SC_ENTER);
-                        release_key(SC_ENTER);
-                        if i < 3:
-                            time.sleep(oyuna_giris_enter_suresi)
+                    ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
+                    if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
+                        "oyun_start.png tıklanamadı.")
+                    time.sleep(1);
+                    press_key(SC_ENTER);
+                    release_key(SC_ENTER);
+                    time.sleep(1)
                     ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
                                                       allow_periodic_enter=False)
                     if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
@@ -5230,8 +5125,20 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("BANK_PREV_PAGE_POS", "Banka geri (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("BANK_PREV_PAGE_POS", (668, 389)),
                 "Banka geri sayfa butonu.", apply=_ensure_int_pair),
+    ConfigField("GAME_START_TEMPLATE_PATHS", "Launcher Start şablonları", "Ölçek Listeleri", "list_str",
+                _cfg_default("GAME_START_TEMPLATE_PATHS", ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png")),
+                "Launcher Start butonu için alternatif şablonlar."),
+    ConfigField("GAME_START_SCALES", "Launcher Start ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("GAME_START_SCALES", (0.85, 0.9, 1.0, 1.1, 1.2)),
+                "Launcher Start butonu arama ölçekleri.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("GAME_START_EXTRA_SCALES", "Launcher Start ekstra ölçekleri", "Ölçek Listeleri", "list_float",
+                _cfg_default("GAME_START_EXTRA_SCALES", (0.78, 1.22, 1.35)),
+                "Eşleşme kaçtığında denenecek ek ölçekler.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("GAME_START_FALLBACK_RELATIVE_POS", "Launcher Start göreli tık (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (906, 600)),
+                "Launcher penceresine göre Start fallback tıklaması.", apply=_ensure_int_pair),
     ConfigField("TEMPLATE_EXTRA_CLICK_POS", "Ek tık (x,y)", "Koordinat Grupları", "int_pair",
-                _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (931, 602)),
+                _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (906, 600)),
                 "Template sonrası ekstra tıklama noktası.", apply=_ensure_int_pair),
     ConfigField("LAUNCHER_START_CLICK_POS", "Launcher Start (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("LAUNCHER_START_CLICK_POS", (974, 726)),
@@ -5242,6 +5149,9 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("LOGIN_PASSWORD_CLICK_POS", "Şifre alanı (x,y)", "Sunucu / Login", "int_pair",
                 _cfg_default("LOGIN_PASSWORD_CLICK_POS", (579, 378)),
                 "Launcher şifre alanı koordinatı.", apply=_ensure_int_pair),
+    ConfigField("LOGIN_TYPE_DELAY", "Login yazma hızı (sn/karakter)", "Sunucu / Login", "float",
+                _cfg_default("LOGIN_TYPE_DELAY", 0.03),
+                "Kullanıcı adı ve şifre yazılırken karakter başına bekleme süresi."),
     ConfigField("SERVER_OPEN_POS", "Sunucu listesi (x,y)", "Sunucu / Login", "int_pair",
                 _cfg_default("SERVER_OPEN_POS", (455, 231)),
                 "Sunucu seçim açılır listesinin konumu.", apply=_ensure_int_pair),
@@ -5860,7 +5770,12 @@ _TR = {
     'TOWN_WAIT': 'town bekleme (sn)',
     'WINDOW_TITLE_KEYWORD': 'pencere başlık anahtar',
     'WINDOW_APPEAR_TIMEOUT': 'pencere görünme zaman aşımı (sn)',
+    'GAME_START_TEMPLATE_PATH': "launch 'Start' şablonu", 'GAME_START_TEMPLATE_PATHS': "launch 'Start' şablonları",
+    'GAME_START_MATCH_THRESHOLD': 'Start şablon eşiği',
+    'GAME_START_FIND_TIMEOUT': 'Start arama zaman aşımı (sn)',
+    'GAME_START_EXTRA_SCALES': 'Start ekstra ölçekleri',
     'LAUNCHER_EXE': 'Launcher yolu',
+    'GAME_START_FALLBACK_RELATIVE_POS': 'Start fallback tık (göreli)',
     'SC_A': 'scan A',
     'SC_D': 'scan D',
     'SC_W': 'scan W',
@@ -5886,6 +5801,7 @@ _TR = {
     'MICRO_READ_DELAY': 'mikro okuma gecikmesi (sn)',
     'LOGIN_USERNAME': 'kullanıcı adı',
     'LOGIN_PASSWORD': 'şifre',
+    'LOGIN_TYPE_DELAY': 'login yazma hızı',
     'ITEMS_DEPLETED_FLAG': 'item bitti işareti',
     'HP_RED_MIN': 'HP kırmızı min',
     'HP_RED_DELTA': 'HP kırmızı delta',
@@ -5907,6 +5823,7 @@ _TR_HELP.update({
     "ANVIL_WALK_TIME": "Tepe noktasından anvil'e yürüme süresi.",
     'AUTO_BANK_PLUS8': '+8 sonrası otomatik bankaya gidilir.',
     'AUTO_BANK_PLUS8_DELAY': '+8 sonrası bekleme süresi (sn).',
+    'LOGIN_TYPE_DELAY': 'Login ekranında karakter başına bekleme süresi.',
     'BANK_OPEN': 'Banka penceresini otomatik aç.',
     'BANK_PAGE_CLICK_DELAY': 'Banka sayfa tıklamaları arası bekleme (sn).',
     'BANK_PANEL_ROWS': 'Banka paneli satır sayısı.',
@@ -5957,11 +5874,19 @@ _ADV_CATEGORY_RULES = (
         names=(
             'WINDOW_TITLE_KEYWORD',
             'WINDOW_APPEAR_TIMEOUT',
+            'GAME_START_TEMPLATE_PATH',
+            'GAME_START_TEMPLATE_PATHS',
+            'GAME_START_MATCH_THRESHOLD',
+            'GAME_START_FIND_TIMEOUT',
+            'GAME_START_SCALES',
+            'GAME_START_EXTRA_SCALES',
+            'GAME_START_FALLBACK_RELATIVE_POS',
             'TEMPLATE_EXTRA_CLICK_POS',
             'REQUEST_RELAUNCH',
         ),
         prefixes=(
             'WINDOW_',
+            'GAME_START_',
             'LAUNCHER_',
             'TEMPLATE_',
         ),
@@ -6290,7 +6215,7 @@ def _MERDIVEN_RUN_GUI():
     import sys, json, threading
     try:
         import tkinter as tk
-        from tkinter import ttk, messagebox
+        from tkinter import ttk
     except Exception as e:
         print("[GUI] Tkinter yok/başlatılamadı:", e)
         return False
@@ -6304,18 +6229,16 @@ def _MERDIVEN_RUN_GUI():
             root.title("Merdiven GUI");
             self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
-            self.caps_text = tk.StringVar(value="CAPSLOCK KAPALI")
-            self.active_profile = tk.StringVar(value="Aktif Profil: Yok")
-            self.profile_name_var = tk.StringVar()
-            self.profile_user_var = tk.StringVar()
-            self.profile_pass_var = tk.StringVar()
-            self.profile_choice = tk.StringVar()
-            self._caps_last_state = None
             self.stage_log = []
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
                 "username": tk.StringVar(value=getattr(m, "LOGIN_USERNAME", "")),
                 "password": tk.StringVar(value=getattr(m, "LOGIN_PASSWORD", "")),
+                "account_name": tk.StringVar(value=""),
+                "account_id": tk.StringVar(value=""),
+                "account_password": tk.StringVar(value=""),
+                "active_account": tk.StringVar(value=str(getattr(m, "_ACTIVE_ACCOUNT_NAME", ""))),
+                "login_type_delay": tk.DoubleVar(value=float(getattr(m, "LOGIN_TYPE_DELAY", 0.03))),
                 "operation_mode": tk.StringVar(value=str(getattr(m, "OPERATION_MODE", "ITEM_BASMA"))),
                 "item_basma_server": tk.StringVar(value=str(getattr(m, "ITEM_BASMA_SERVER", "Server1"))),
                 "plus8_wait_message": tk.StringVar(value=str(getattr(m, "PLUS8_WAIT_MESSAGE", ""))),
@@ -6389,6 +6312,8 @@ def _MERDIVEN_RUN_GUI():
                 "ui_last_geometry": tk.StringVar(value=str(self._cached_gui_cfg.get(
                     "ui_last_geometry", getattr(m, "UI_LAST_GEOMETRY", "")) or "")),
             }
+            self._accounts_data = _accounts_cache()
+            self._active_account_label = tk.StringVar(value="")
             self._stats_keys = ["plus7_bank_count", "plus8_bank_count", "market_sold_total", "last_tur_sold"]
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
@@ -6398,7 +6323,17 @@ def _MERDIVEN_RUN_GUI():
             self.adv_rows = []
             self._build();
             self._load_json();
-            self._load_profiles_into_ui()
+            try:
+                self.v["active_account"].set(str(getattr(m, "_ACTIVE_ACCOUNT_NAME", "")))
+            except Exception:
+                pass
+            self._refresh_account_section(refresh_data=True)
+            try:
+                if getattr(m, "_ACTIVE_ACCOUNT_NAME", ""):
+                    self.v["username"].set("")
+                    self.v["password"].set("")
+            except Exception:
+                pass
             self._hook_stage();
             try:
                 m._GUI_UPDATE_SALE_SLOT = self._update_sale_slot
@@ -6482,6 +6417,107 @@ def _MERDIVEN_RUN_GUI():
                 os.replace(tmp, path)
             except Exception:
                 pass
+
+        def _account_names(self) -> List[str]:
+            try:
+                names = [str(acc.get("name", "") or "") for acc in self._accounts_data.get("accounts", [])]
+                names = [n for n in names if n.strip()]
+                names.sort(key=str.casefold)
+                return names
+            except Exception:
+                return []
+
+        def _update_active_account_label(self):
+            active = str(getattr(sys.modules[__name__], "_ACTIVE_ACCOUNT_NAME", "") or "").strip()
+            if not active:
+                self._active_account_label.set("Aktif hesap yok")
+            else:
+                self._active_account_label.set(f"Aktif: {active}")
+
+        def _refresh_account_section(self, refresh_data: bool = False):
+            try:
+                self._accounts_data = _accounts_cache(refresh=refresh_data)
+            except Exception:
+                pass
+            try:
+                names = self._account_names()
+                if hasattr(self, "account_combo"):
+                    self.account_combo["values"] = names
+                    current = self.v["active_account"].get().strip()
+                    if current and current in names:
+                        self.account_combo.set(current)
+                self._update_active_account_label()
+            except Exception:
+                pass
+
+        def _activate_account(self, name: str):
+            name = str(name or "").strip()
+            if not name:
+                self._msg("Hesap seçili değil.")
+                return
+            if not _set_active_account(name):
+                self._msg(f"Hesap bulunamadı: {name}")
+                return
+            self.v["active_account"].set(name)
+            # GUI alanlarını boşalt; bilgiler arka planda kullanılıyor
+            try:
+                self.v["username"].set("")
+                self.v["password"].set("")
+            except Exception:
+                pass
+            self._update_active_account_label()
+            self._msg(f"Aktif hesap: {name}")
+
+        def _on_account_selected(self, *_):
+            self._activate_account(self.v["active_account"].get())
+
+        def _save_account_entry(self):
+            name = self.v["account_name"].get().strip()
+            uid = self.v["account_id"].get().strip()
+            pwd = self.v["account_password"].get()
+            if not name or not uid or not pwd:
+                self._msg("Hesap adı, ID ve şifre doldurulmalı.")
+                return
+            data = _accounts_cache(refresh=True)
+            accounts = []
+            for acc in data.get("accounts", []):
+                if str(acc.get("name", "")).strip().lower() == name.lower():
+                    continue
+                accounts.append(acc)
+            accounts.append({"name": name, "username": uid, "password": pwd})
+            data["accounts"] = accounts
+            data["active"] = name
+            _write_accounts_file(data)
+            self._accounts_data = data
+            self.v["active_account"].set(name)
+            self._activate_account(name)
+            for key in ("account_name", "account_id", "account_password"):
+                try:
+                    self.v[key].set("")
+                except Exception:
+                    pass
+            self._refresh_account_section(refresh_data=True)
+            self._msg(f"Hesap kaydedildi: {name}")
+
+        def _delete_account(self):
+            name = self.v["active_account"].get().strip()
+            if not name:
+                self._msg("Silinecek hesap seçili değil.")
+                return
+            data = _accounts_cache(refresh=True)
+            accounts = [acc for acc in data.get("accounts", []) if
+                        str(acc.get("name", "")).strip().lower() != name.lower()]
+            data["accounts"] = accounts
+            if str(data.get("active", "")).strip().lower() == name.lower():
+                data["active"] = ""
+                globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+                globals()["LOGIN_USERNAME"] = self.v["username"].get()
+                globals()["LOGIN_PASSWORD"] = self.v["password"].get()
+                self.v["active_account"].set("")
+            _write_accounts_file(data)
+            self._accounts_data = data
+            self._refresh_account_section(refresh_data=True)
+            self._msg(f"Hesap silindi: {name}")
 
         def _open_krallik(self, *_):
             url = str(getattr(m, "KRALLIK_URL", KRALLIK_URL) or "")
@@ -6621,134 +6657,6 @@ def _MERDIVEN_RUN_GUI():
                 m._GUI_ORIG_IS_PRESSED = orig
                 keyboard.is_pressed = _gui_is_pressed
 
-        def _update_caps_lock_indicator(self):
-            try:
-                state = ctypes.windll.user32.GetKeyState(0x14)
-                is_on = bool(state & 1)
-            except Exception:
-                return
-            if is_on == self._caps_last_state:
-                return
-            self._caps_last_state = is_on
-            try:
-                if is_on:
-                    self.caps_text.set("CAPSLOCK AÇIK (Kapat)")
-                    self.caps_label.configure(foreground="red")
-                else:
-                    self.caps_text.set("CAPSLOCK KAPALI")
-                    self.caps_label.configure(foreground="green")
-            except Exception:
-                pass
-
-        def _load_profiles_into_ui(self):
-            data = _load_credentials_data()
-            profiles = data.get("profiles") or {}
-            names = sorted(profiles.keys())
-            try:
-                self.profile_combo["values"] = names
-            except Exception:
-                pass
-            active = data.get("active") or ""
-            if active and active in names:
-                self.profile_choice.set(active)
-            self._apply_active_profile_fields(data)
-
-        def _apply_active_profile_fields(self, data=None):
-            try:
-                if data is None:
-                    data = _load_credentials_data()
-                profiles = data.get("profiles") or {}
-                active = str(data.get("active") or "")
-                if active and active in profiles:
-                    user, pwd = _decrypt_profile(profiles.get(active) or {})
-                    self.active_profile.set(f"Aktif Profil: {active}")
-                    self.profile_name_var.set(active)
-                    self.profile_user_var.set(user)
-                    self.profile_pass_var.set(pwd)
-                    try:
-                        self.v["username"].set(user)
-                        self.v["password"].set(pwd)
-                    except Exception:
-                        pass
-                else:
-                    self.active_profile.set("Aktif Profil: Yok")
-            except Exception:
-                self.active_profile.set("Aktif Profil: Yok")
-
-        def _on_profile_select(self, *_):
-            name = self.profile_choice.get().strip()
-            data = _set_active_profile_name(name) if name else _set_active_profile_name("")
-            profiles = data.get("profiles") or {}
-            if name and name in profiles:
-                user, pwd = _decrypt_profile(profiles.get(name) or {})
-                self.profile_name_var.set(name)
-                self.profile_user_var.set(user)
-                self.profile_pass_var.set(pwd)
-                self.active_profile.set(f"Aktif Profil: {name}")
-                try:
-                    self.v["username"].set(user)
-                    self.v["password"].set(pwd)
-                except Exception:
-                    pass
-            else:
-                self.active_profile.set("Aktif Profil: Yok")
-
-        def _save_profile(self):
-            name = self.profile_name_var.get().strip()
-            if not name:
-                messagebox.showwarning("Profil", "Profil adı boş olamaz.")
-                return
-            data_existing = _load_credentials_data()
-            exists = name in (data_existing.get("profiles") or {})
-            if exists:
-                try:
-                    if not messagebox.askyesno("Güncelle", f"{name} profili güncellensin mi?"):
-                        return
-                except Exception:
-                    pass
-            _update_profile_entry(name, self.profile_user_var.get(), self.profile_pass_var.get())
-            self.profile_choice.set(name)
-            self._load_profiles_into_ui()
-            self._msg(f"Profil kaydedildi: {name}")
-
-        def _delete_profile(self):
-            name = self.profile_choice.get().strip() or self.profile_name_var.get().strip()
-            if not name:
-                messagebox.showwarning("Profil", "Silmek için bir profil seç.")
-                return
-            try:
-                if not messagebox.askyesno("Sil", f"{name} profilini silmek istiyor musun?"):
-                    return
-            except Exception:
-                pass
-            _delete_profile_entry(name)
-            self.profile_choice.set("")
-            self._clear_profile_form()
-            self._load_profiles_into_ui()
-            try:
-                self.v["username"].set("")
-                self.v["password"].set("")
-            except Exception:
-                pass
-            self._msg(f"Profil silindi: {name}")
-
-        def _clear_profile_form(self):
-            try:
-                self.profile_name_var.set("")
-                self.profile_user_var.set("")
-                self.profile_pass_var.set("")
-                self.profile_choice.set("")
-            except Exception:
-                pass
-
-        def _set_active_profile_from_choice(self):
-            name = self.profile_choice.get().strip() or self.profile_name_var.get().strip()
-            if not name:
-                messagebox.showinfo("Profil", "Kullanılacak bir profil seç.")
-                return
-            data = _set_active_profile_name(name)
-            self._apply_active_profile_fields(data)
-
         # ---- UI kur ----
         def _build(self):
             nb = ttk.Notebook(self.root);
@@ -6757,10 +6665,6 @@ def _MERDIVEN_RUN_GUI():
             f1 = ttk.Frame(nb);
             nb.add(f1, text="Genel");
             r = 0
-            self.caps_label = tk.Label(f1, textvariable=self.caps_text, font=("Segoe UI", 12, "bold"),
-                                       foreground="green")
-            self.caps_label.grid(row=r, column=0, columnspan=4, sticky="we", padx=2, pady=(2, 4))
-            r += 1
             ttk.Label(f1, text="Durum / Makro Aşaması:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
             ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=2, sticky="e", padx=4);
@@ -6781,35 +6685,38 @@ def _MERDIVEN_RUN_GUI():
             ttk.Button(f1, text="Göster/Gizle", command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")),
                        width=14).grid(row=r, column=2, sticky="w");
             r += 1
-            lf_profiles = ttk.LabelFrame(f1, text="Hesap Profilleri")
-            lf_profiles.grid(row=r, column=0, columnspan=4, sticky="we", pady=6, padx=2)
-            lf_profiles.columnconfigure(1, weight=1)
-            ttk.Label(lf_profiles, text="Profil Adı:").grid(row=0, column=0, sticky="e", padx=2, pady=2)
-            ttk.Entry(lf_profiles, textvariable=self.profile_name_var, width=22).grid(row=0, column=1, sticky="we",
-                                                                                       padx=2, pady=2)
-            ttk.Label(lf_profiles, text="ID:").grid(row=1, column=0, sticky="e", padx=2, pady=2)
-            ttk.Entry(lf_profiles, textvariable=self.profile_user_var, width=22).grid(row=1, column=1, sticky="we",
-                                                                                       padx=2, pady=2)
-            ttk.Label(lf_profiles, text="Şifre:").grid(row=2, column=0, sticky="e", padx=2, pady=2)
-            pw_prof = ttk.Entry(lf_profiles, textvariable=self.profile_pass_var, width=22, show="*")
-            pw_prof.grid(row=2, column=1, sticky="we", padx=2, pady=2)
-            ttk.Button(lf_profiles, text="Kaydet/Güncelle", command=self._save_profile).grid(row=0, column=2,
+            ttk.Label(f1, text="Yazma Hızı (sn/karakter):").grid(row=r, column=0, sticky="e");
+            ttk.Entry(f1, textvariable=self.v["login_type_delay"], width=10).grid(row=r, column=1, sticky="w");
+            r += 1
+
+            lf_acc = ttk.LabelFrame(f1, text="Hesap Kaydet / Yönet")
+            lf_acc.grid(row=r, column=0, columnspan=4, sticky="we", pady=4)
+            ttk.Label(lf_acc, text="Hesap Adı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_acc, textvariable=self.v["account_name"], width=18).grid(row=0, column=1, sticky="w",
+                                                                                  padx=2, pady=2)
+            ttk.Label(lf_acc, text="Kullanıcı ID:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_acc, textvariable=self.v["account_id"], width=18).grid(row=0, column=3, sticky="w",
+                                                                                padx=2, pady=2)
+            ttk.Label(lf_acc, text="Şifre:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_acc, textvariable=self.v["account_password"], width=18, show="*").grid(row=1, column=1,
+                                                                                                sticky="w", padx=2,
+                                                                                                pady=2)
+            ttk.Button(lf_acc, text="Kaydet/Güncelle", command=self._save_account_entry).grid(row=1, column=2,
                                                                                               sticky="we", padx=4,
                                                                                               pady=2)
-            ttk.Button(lf_profiles, text="Sil", command=self._delete_profile).grid(row=1, column=2, sticky="we",
-                                                                                   padx=4, pady=2)
-            ttk.Button(lf_profiles, text="Temizle", command=self._clear_profile_form).grid(row=2, column=2,
-                                                                                           sticky="we", padx=4,
-                                                                                           pady=2)
-            ttk.Label(lf_profiles, text="Kayıtlı Profiller:").grid(row=3, column=0, sticky="e", padx=2, pady=4)
-            self.profile_combo = ttk.Combobox(lf_profiles, textvariable=self.profile_choice, state="readonly", width=20)
-            self.profile_combo.grid(row=3, column=1, sticky="we", padx=2, pady=4)
-            self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_select)
-            ttk.Button(lf_profiles, text="Kullan", command=self._set_active_profile_from_choice).grid(row=3, column=2,
-                                                                                                      sticky="we",
-                                                                                                      padx=4, pady=4)
-            ttk.Label(lf_profiles, textvariable=self.active_profile, foreground="blue",
-                      font=("Segoe UI", 10, "bold")).grid(row=4, column=0, columnspan=3, sticky="w", padx=2, pady=2)
+            ttk.Button(lf_acc, text="Sil", command=self._delete_account).grid(row=1, column=3, sticky="we", padx=4,
+                                                                              pady=2)
+            ttk.Label(lf_acc, text="Kayıtlı Hesap:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            self.account_combo = ttk.Combobox(lf_acc, textvariable=self.v["active_account"],
+                                              values=self._account_names(), state="readonly", width=24)
+            self.account_combo.grid(row=2, column=1, sticky="w", padx=2, pady=2, columnspan=2)
+            self.account_combo.bind("<<ComboboxSelected>>", self._on_account_selected)
+            ttk.Button(lf_acc, text="Aktif Et", command=self._on_account_selected).grid(row=2, column=3, sticky="we",
+                                                                                        padx=4, pady=2)
+            ttk.Label(lf_acc, textvariable=self._active_account_label, foreground="blue").grid(row=3, column=0,
+                                                                                               columnspan=4,
+                                                                                               sticky="w", padx=4,
+                                                                                               pady=(0, 2))
             r += 1
             ttk.Button(f1, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=r, column=0, columnspan=2,
                                                                                        sticky="w", pady=4)
@@ -7324,6 +7231,8 @@ def _MERDIVEN_RUN_GUI():
                     j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
+                if k in ("account_name", "account_id", "account_password", "active_account"):
+                    continue  # hassas alanları config'ten doldurma
                 if hasattr(self, "_stats_keys") and k in self._stats_keys:
                     continue
                 if k in self.v:
@@ -7376,8 +7285,25 @@ def _MERDIVEN_RUN_GUI():
 
         def apply_core(self):
             # login
-            if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
-            if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
+            applied_active = False
+            try:
+                active_name = self.v["active_account"].get().strip()
+                if active_name:
+                    applied_active = _set_active_account(active_name)
+            except Exception:
+                applied_active = False
+            if not applied_active:
+                if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
+                if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
+                globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+            try:
+                m.LOGIN_TYPE_DELAY = float(self.v["login_type_delay"].get())
+            except Exception:
+                pass
+            try:
+                self._update_active_account_label()
+            except Exception:
+                pass
             setattr(m, "OPERATION_MODE", self.v["operation_mode"].get().upper())
             setattr(m, "ITEM_BASMA_SERVER", self.v["item_basma_server"].get())
             setattr(m, "ITEM_SALE_PRICE_TEXT", self.v["sale_price_text"].get())
@@ -7474,6 +7400,8 @@ def _MERDIVEN_RUN_GUI():
             for k, var in self.v.items():
                 if k in getattr(self, "_stats_keys", ()):  # anlık sayaçları config'e yazma
                     continue
+                if k in ("account_name", "account_id", "account_password", "active_account"):
+                    continue
                 try:
                     data["gui"][k] = var.get()
                 except Exception:
@@ -7494,10 +7422,6 @@ def _MERDIVEN_RUN_GUI():
             self.apply_core()
 
         def _tick(self):
-            try:
-                self._update_caps_lock_indicator()
-            except Exception:
-                pass
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
 
     # Pencereyi başlat
@@ -8278,12 +8202,6 @@ try:
         # --- Güvenlik/Town ---
         "TOWN_MIN_INTERVAL_SEC": 1.2,
     }
-    try:
-        _hp_src = globals().get("_GLOBAL_PATCH_CFG", {}).get("HP_POINTS", globals().get("HP_POINTS", []))
-        _hp_pts = [(int(x), int(y)) for (x, y) in _ensure_pair_list(_hp_src)]
-        _YAMA_GUI_DEFAULTS["HP_POINTS"] = _hp_pts if _hp_pts else [(185, 68), (218, 74)]
-    except Exception:
-        _YAMA_GUI_DEFAULTS["HP_POINTS"] = [(185, 68), (218, 74)]
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS, list) and FABRIC_STEPS:
         _YAMA_GUI_DEFAULTS["FABRIC_STEPS"] = [(int(x), int(y), int(c), str(b)) for (x, y, c, b) in FABRIC_STEPS[:5]]
