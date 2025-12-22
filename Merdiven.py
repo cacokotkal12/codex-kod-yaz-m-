@@ -2898,6 +2898,8 @@ def _restart_after_movement_failure(w, reason: str = ""):
 def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre_brake_delta: int = PRE_BRAKE_DELTA,
                            pulse: float = MICRO_PULSE_DURATION, settle_hits: int = TARGET_STABLE_HITS,
                            force_exact: bool = True) -> bool:
+    start_val = _read_axis(w, axis)
+    forward_dir = detect_w_direction(w, axis, target=target)
     # [YAMA] PREC_MOVE_Y_598 başında kilit + çift tık (GUI ile yönetilir)
     try:
         if str(axis).lower() == 'y' and int(target) == 598:
@@ -2931,8 +2933,15 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
-            if axis == 'y' and cur > target:
-                print(f"[PREC] Y hedef aşıldı (cur={cur} > target={target}) → geri toparla.")
+            overshoot = False
+            if axis == 'y':
+                # Y yönü W ile hangi tarafa gidiyorsa ona göre overshoot kontrolü yap
+                if forward_dir >= 0:
+                    overshoot = cur > target
+                else:
+                    overshoot = cur < target
+            if overshoot:
+                print(f"[PREC] Y hedef aşıldı (cur={cur}, target={target}, dir={'+' if forward_dir>=0 else '-'}) → geri toparla.")
                 try:
                     release_key(SC_W)
                 except Exception:
@@ -2950,7 +2959,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             time.sleep(0.03)
     finally:
         release_key(SC_W)
-    direction = detect_w_direction(w, axis, target=target);
+    direction = forward_dir if forward_dir in (+1, -1) else detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
