@@ -721,6 +721,10 @@ def _choose_server_xy():
 HP_POINTS = [(185, 68), (218, 74)];
 HP_RED_MIN = 120.0;
 HP_RED_DELTA = 35.0
+HP_SCAN_RECT = (120, 44, 280, 96)  # (x1, y1, x2, y2) pencere sol-üstüne göre
+HP_SCAN_MIN_RED = 95.0
+HP_SCAN_DOM_DELTA = 20.0
+HP_SCAN_MIN_RATIO = 0.015
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
@@ -4139,10 +4143,33 @@ def _is_red(rgb, r_min=HP_RED_MIN, delta=HP_RED_DELTA):
     return (r >= r_min) and (r - max(g, b) >= delta)
 
 
+def _hpbar_scan_ratio(win) -> float:
+    """HP bar çevresinde kırmızı baskın piksel oranını döndürür (hatada 0.0)."""
+    try:
+        x1, y1, x2, y2 = HP_SCAN_RECT
+        bbox = (win.left + x1, win.top + y1, win.left + x2, win.top + y2)
+        img = ImageGrab.grab(bbox=bbox);
+        arr = np.array(img)[:, :, :3].astype(np.float32)
+        r = arr[:, :, 0]
+        g = arr[:, :, 1]
+        b = arr[:, :, 2]
+        red_dom = (r >= HP_SCAN_MIN_RED) & ((r - np.maximum(g, b)) >= HP_SCAN_DOM_DELTA)
+        ratio = float(red_dom.mean())
+        return ratio
+    except Exception:
+        return 0.0
+
+
 def _ingame_by_hpbar_once(win):
     rgb1 = _mean_rgb_around(win, HP_POINTS[0][0], HP_POINTS[0][1], 7);
     rgb2 = _mean_rgb_around(win, HP_POINTS[1][0], HP_POINTS[1][1], 7)
-    return _is_red(rgb1) and _is_red(rgb2)
+    if _is_red(rgb1) and _is_red(rgb2):
+        return True
+    ratio = _hpbar_scan_ratio(win)
+    if ratio >= HP_SCAN_MIN_RATIO:
+        print(f"[HP] Tarama oranı={ratio:.3f} (eşik={HP_SCAN_MIN_RATIO:.3f}) → Oyunda kabul.")
+        return True
+    return False
 
 
 def _coords_read_ok(win) -> bool:
