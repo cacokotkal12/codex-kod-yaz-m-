@@ -122,6 +122,108 @@ def _MERDIVEN_CFG_PATH():
     return path
 
 
+def _accounts_default():
+    return {"accounts": [], "active": ""}
+
+
+_ACCOUNTS_PATH = PERSIST_PATH("accounts.json")
+_ACCOUNT_CACHE: Dict[str, Any] = _accounts_default()
+_ACTIVE_ACCOUNT_NAME = ""
+
+
+def _read_accounts_file() -> Dict[str, Any]:
+    data = _accounts_default()
+    path = _ACCOUNTS_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            data.update({"accounts": raw.get("accounts", []), "active": raw.get("active", "")})
+            if not isinstance(data.get("accounts"), list):
+                data["accounts"] = []
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return data
+
+
+def _write_accounts_file(data: Dict[str, Any]) -> None:
+    global _ACCOUNT_CACHE
+    safe = _accounts_default()
+    if isinstance(data, dict):
+        safe["accounts"] = list(data.get("accounts", []))
+        safe["active"] = str(data.get("active", "") or "")
+    path = _ACCOUNTS_PATH
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(safe, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        _ACCOUNT_CACHE = safe
+    except Exception:
+        pass
+
+
+def _accounts_cache(refresh: bool = False) -> Dict[str, Any]:
+    global _ACCOUNT_CACHE
+    if refresh or not isinstance(_ACCOUNT_CACHE, dict) or not _ACCOUNT_CACHE:
+        _ACCOUNT_CACHE = _read_accounts_file()
+    return _ACCOUNT_CACHE
+
+
+def _find_account_by_name(name: str) -> Optional[Dict[str, Any]]:
+    target = str(name or "").strip().lower()
+    if not target:
+        return None
+    data = _accounts_cache()
+    for acc in data.get("accounts", []):
+        if str(acc.get("name", "")).strip().lower() == target:
+            return acc
+    return None
+
+
+def _apply_account_credentials(acc: Dict[str, Any]) -> None:
+    global _ACTIVE_ACCOUNT_NAME
+    try:
+        globals()["LOGIN_USERNAME"] = str(acc.get("username", "") or "")
+        globals()["LOGIN_PASSWORD"] = str(acc.get("password", "") or "")
+        _ACTIVE_ACCOUNT_NAME = str(acc.get("name", "") or "")
+    except Exception:
+        pass
+
+
+def _set_active_account(name: str) -> bool:
+    data = _accounts_cache()
+    acc = _find_account_by_name(name)
+    if not acc:
+        return False
+    data["active"] = acc.get("name", name)
+    _apply_account_credentials(acc)
+    _write_accounts_file(data)
+    return True
+
+
+def _load_accounts_on_start() -> Dict[str, Any]:
+    data = _accounts_cache(refresh=True)
+    active = str(data.get("active", "") or "")
+    acc = _find_account_by_name(active)
+    if acc:
+        _apply_account_credentials(acc)
+    else:
+        globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+    return data
+
+
+_load_accounts_on_start()
+
+
 try:
     import mss
 except Exception:
@@ -479,6 +581,7 @@ WINDOW_APPEAR_TIMEOUT = 120.0
 # ---- Login Bilgileri ve Tıklama Koord. ----
 LOGIN_USERNAME = os.getenv("KO_USER", "cacokotkal12");
 LOGIN_PASSWORD = os.getenv("KO_PASS", "Vaz14999999jS@1")
+LOGIN_TYPE_DELAY = 0.03  # sn / karakter
 # Bu alanları kendi ekranına göre ayarla (gerekirse TAB ile de ilerliyor):
 LOGIN_USERNAME_CLICK_POS = (579, 326)  # kullanıcı adı alanı
 LOGIN_PASSWORD_CLICK_POS = (579, 378)  # şifre alanı
@@ -1554,6 +1657,31 @@ def _is_window_valid(win) -> bool:
         return False
 
 
+def _is_foreground_window(win) -> bool:
+    try:
+        fg = ctypes.windll.user32.GetForegroundWindow()
+        return fg and int(fg) == int(getattr(win, "_hWnd", 0))
+    except Exception:
+        return False
+
+
+def _ensure_window_focus(win, timeout: float = 5.0) -> bool:
+    try:
+        start = time.time()
+        while time.time() - start < float(timeout):
+            if _is_foreground_window(win):
+                return True
+            try:
+                win.activate()
+                ctypes.windll.user32.SetForegroundWindow(win._hWnd)
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return _is_foreground_window(win)
+    except Exception:
+        return False
+
+
 def bring_launcher_window_to_front():
     wins = gw.getWindowsWithTitle("Launcher") or gw.getWindowsWithTitle("Knight Online Launcher")
     if not wins: return None
@@ -1685,26 +1813,48 @@ def launch_via_launcher_and_wait():
 
 
 # ================== LOGIN: SAĞLAM GİRİŞ ==================
-def _login_input_text(text: str, label: str = "") -> str:
-    """Login alanına metni yapıştır ya da yapıştıramazsa harf harf yaz."""
+def _login_input_text(text: str, label: str = "", target_window=None) -> str:
+    """Login alanına metni güvenli şekilde harf harf yaz."""
     text = str(text or "")
-    if paste_text_from_clipboard(text):
-        return "paste"
+    delay = float(globals().get("LOGIN_TYPE_DELAY", 0.03) or 0.03)
+    typed = 0
     for ch in text:
-        wait_if_paused();
-        watchdog_enforce();
-        keyboard.write(ch)
-        time.sleep(0.02)
-    return "typed"
+        wait_if_paused()
+        watchdog_enforce()
+        if _abort_requested():
+            _raise_gui_abort(f"{label or 'login'} yazımı F12 ile iptal edildi")
+        if target_window is not None and not _is_foreground_window(target_window):
+            if not _ensure_window_focus(target_window, timeout=2.0):
+                _raise_gui_abort("Login penceresi odak dışı")
+        try:
+            keyboard.write(ch, delay=0)
+        except Exception:
+            try:
+                keyboard.send(ch)
+            except Exception:
+                pass
+        typed += 1
+        time.sleep(delay if delay >= 0 else 0.0)
+    return "typed" if typed else "empty"
 
 
 def perform_login_inputs(w):
     """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
+    if w is None or not _is_window_valid(w):
+        w = bring_game_window_to_front()
+    if not w:
+        print("[LOGIN] Pencere bulunamadı; yazım başlatılmadı.")
+        return False
+    if not _ensure_window_focus(w, timeout=5.0):
+        print("[LOGIN] Pencere odakta değil; yazım başlatılmadı.")
+        return False
+    if _abort_requested():
+        _raise_gui_abort("Login yazımı başlatılmadan durduruldu")
     mouse_move(*LOGIN_USERNAME_CLICK_POS);
     mouse_click("left");
     time.sleep(0.1)
-    username_method = _login_input_text(LOGIN_USERNAME, "username");
+    username_method = _login_input_text(LOGIN_USERNAME, "username", target_window=w);
     time.sleep(0.1)
     press_key(SC_TAB);
     release_key(SC_TAB);
@@ -1713,7 +1863,7 @@ def perform_login_inputs(w):
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
     time.sleep(0.05)
-    password_method = _login_input_text(LOGIN_PASSWORD, "password");
+    password_method = _login_input_text(LOGIN_PASSWORD, "password", target_window=w);
     time.sleep(0.1)
     press_key(SC_ENTER);
     release_key(SC_ENTER);
@@ -1723,6 +1873,7 @@ def perform_login_inputs(w):
     release_key(SC_ENTER);
     time.sleep(0.4)
     print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
+    return True
 
 
 # ================== OCR / INV / UPG Yardımcıları (devam Parça 2'de) ==================
@@ -4998,6 +5149,9 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("LOGIN_PASSWORD_CLICK_POS", "Şifre alanı (x,y)", "Sunucu / Login", "int_pair",
                 _cfg_default("LOGIN_PASSWORD_CLICK_POS", (579, 378)),
                 "Launcher şifre alanı koordinatı.", apply=_ensure_int_pair),
+    ConfigField("LOGIN_TYPE_DELAY", "Login yazma hızı (sn/karakter)", "Sunucu / Login", "float",
+                _cfg_default("LOGIN_TYPE_DELAY", 0.03),
+                "Kullanıcı adı ve şifre yazılırken karakter başına bekleme süresi."),
     ConfigField("SERVER_OPEN_POS", "Sunucu listesi (x,y)", "Sunucu / Login", "int_pair",
                 _cfg_default("SERVER_OPEN_POS", (455, 231)),
                 "Sunucu seçim açılır listesinin konumu.", apply=_ensure_int_pair),
@@ -5647,6 +5801,7 @@ _TR = {
     'MICRO_READ_DELAY': 'mikro okuma gecikmesi (sn)',
     'LOGIN_USERNAME': 'kullanıcı adı',
     'LOGIN_PASSWORD': 'şifre',
+    'LOGIN_TYPE_DELAY': 'login yazma hızı',
     'ITEMS_DEPLETED_FLAG': 'item bitti işareti',
     'HP_RED_MIN': 'HP kırmızı min',
     'HP_RED_DELTA': 'HP kırmızı delta',
@@ -5668,6 +5823,7 @@ _TR_HELP.update({
     "ANVIL_WALK_TIME": "Tepe noktasından anvil'e yürüme süresi.",
     'AUTO_BANK_PLUS8': '+8 sonrası otomatik bankaya gidilir.',
     'AUTO_BANK_PLUS8_DELAY': '+8 sonrası bekleme süresi (sn).',
+    'LOGIN_TYPE_DELAY': 'Login ekranında karakter başına bekleme süresi.',
     'BANK_OPEN': 'Banka penceresini otomatik aç.',
     'BANK_PAGE_CLICK_DELAY': 'Banka sayfa tıklamaları arası bekleme (sn).',
     'BANK_PANEL_ROWS': 'Banka paneli satır sayısı.',
@@ -6078,6 +6234,11 @@ def _MERDIVEN_RUN_GUI():
             self.v = {
                 "username": tk.StringVar(value=getattr(m, "LOGIN_USERNAME", "")),
                 "password": tk.StringVar(value=getattr(m, "LOGIN_PASSWORD", "")),
+                "account_name": tk.StringVar(value=""),
+                "account_id": tk.StringVar(value=""),
+                "account_password": tk.StringVar(value=""),
+                "active_account": tk.StringVar(value=str(getattr(m, "_ACTIVE_ACCOUNT_NAME", ""))),
+                "login_type_delay": tk.DoubleVar(value=float(getattr(m, "LOGIN_TYPE_DELAY", 0.03))),
                 "operation_mode": tk.StringVar(value=str(getattr(m, "OPERATION_MODE", "ITEM_BASMA"))),
                 "item_basma_server": tk.StringVar(value=str(getattr(m, "ITEM_BASMA_SERVER", "Server1"))),
                 "plus8_wait_message": tk.StringVar(value=str(getattr(m, "PLUS8_WAIT_MESSAGE", ""))),
@@ -6151,6 +6312,8 @@ def _MERDIVEN_RUN_GUI():
                 "ui_last_geometry": tk.StringVar(value=str(self._cached_gui_cfg.get(
                     "ui_last_geometry", getattr(m, "UI_LAST_GEOMETRY", "")) or "")),
             }
+            self._accounts_data = _accounts_cache()
+            self._active_account_label = tk.StringVar(value="")
             self._stats_keys = ["plus7_bank_count", "plus8_bank_count", "market_sold_total", "last_tur_sold"]
             dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
@@ -6160,6 +6323,17 @@ def _MERDIVEN_RUN_GUI():
             self.adv_rows = []
             self._build();
             self._load_json();
+            try:
+                self.v["active_account"].set(str(getattr(m, "_ACTIVE_ACCOUNT_NAME", "")))
+            except Exception:
+                pass
+            self._refresh_account_section(refresh_data=True)
+            try:
+                if getattr(m, "_ACTIVE_ACCOUNT_NAME", ""):
+                    self.v["username"].set("")
+                    self.v["password"].set("")
+            except Exception:
+                pass
             self._hook_stage();
             try:
                 m._GUI_UPDATE_SALE_SLOT = self._update_sale_slot
@@ -6243,6 +6417,107 @@ def _MERDIVEN_RUN_GUI():
                 os.replace(tmp, path)
             except Exception:
                 pass
+
+        def _account_names(self) -> List[str]:
+            try:
+                names = [str(acc.get("name", "") or "") for acc in self._accounts_data.get("accounts", [])]
+                names = [n for n in names if n.strip()]
+                names.sort(key=str.casefold)
+                return names
+            except Exception:
+                return []
+
+        def _update_active_account_label(self):
+            active = str(getattr(sys.modules[__name__], "_ACTIVE_ACCOUNT_NAME", "") or "").strip()
+            if not active:
+                self._active_account_label.set("Aktif hesap yok")
+            else:
+                self._active_account_label.set(f"Aktif: {active}")
+
+        def _refresh_account_section(self, refresh_data: bool = False):
+            try:
+                self._accounts_data = _accounts_cache(refresh=refresh_data)
+            except Exception:
+                pass
+            try:
+                names = self._account_names()
+                if hasattr(self, "account_combo"):
+                    self.account_combo["values"] = names
+                    current = self.v["active_account"].get().strip()
+                    if current and current in names:
+                        self.account_combo.set(current)
+                self._update_active_account_label()
+            except Exception:
+                pass
+
+        def _activate_account(self, name: str):
+            name = str(name or "").strip()
+            if not name:
+                self._msg("Hesap seçili değil.")
+                return
+            if not _set_active_account(name):
+                self._msg(f"Hesap bulunamadı: {name}")
+                return
+            self.v["active_account"].set(name)
+            # GUI alanlarını boşalt; bilgiler arka planda kullanılıyor
+            try:
+                self.v["username"].set("")
+                self.v["password"].set("")
+            except Exception:
+                pass
+            self._update_active_account_label()
+            self._msg(f"Aktif hesap: {name}")
+
+        def _on_account_selected(self, *_):
+            self._activate_account(self.v["active_account"].get())
+
+        def _save_account_entry(self):
+            name = self.v["account_name"].get().strip()
+            uid = self.v["account_id"].get().strip()
+            pwd = self.v["account_password"].get()
+            if not name or not uid or not pwd:
+                self._msg("Hesap adı, ID ve şifre doldurulmalı.")
+                return
+            data = _accounts_cache(refresh=True)
+            accounts = []
+            for acc in data.get("accounts", []):
+                if str(acc.get("name", "")).strip().lower() == name.lower():
+                    continue
+                accounts.append(acc)
+            accounts.append({"name": name, "username": uid, "password": pwd})
+            data["accounts"] = accounts
+            data["active"] = name
+            _write_accounts_file(data)
+            self._accounts_data = data
+            self.v["active_account"].set(name)
+            self._activate_account(name)
+            for key in ("account_name", "account_id", "account_password"):
+                try:
+                    self.v[key].set("")
+                except Exception:
+                    pass
+            self._refresh_account_section(refresh_data=True)
+            self._msg(f"Hesap kaydedildi: {name}")
+
+        def _delete_account(self):
+            name = self.v["active_account"].get().strip()
+            if not name:
+                self._msg("Silinecek hesap seçili değil.")
+                return
+            data = _accounts_cache(refresh=True)
+            accounts = [acc for acc in data.get("accounts", []) if
+                        str(acc.get("name", "")).strip().lower() != name.lower()]
+            data["accounts"] = accounts
+            if str(data.get("active", "")).strip().lower() == name.lower():
+                data["active"] = ""
+                globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+                globals()["LOGIN_USERNAME"] = self.v["username"].get()
+                globals()["LOGIN_PASSWORD"] = self.v["password"].get()
+                self.v["active_account"].set("")
+            _write_accounts_file(data)
+            self._accounts_data = data
+            self._refresh_account_section(refresh_data=True)
+            self._msg(f"Hesap silindi: {name}")
 
         def _open_krallik(self, *_):
             url = str(getattr(m, "KRALLIK_URL", KRALLIK_URL) or "")
@@ -6409,6 +6684,39 @@ def _MERDIVEN_RUN_GUI():
             pw.grid(row=r, column=1, sticky="w")
             ttk.Button(f1, text="Göster/Gizle", command=lambda: pw.config(show=("" if pw.cget("show") == "*" else "*")),
                        width=14).grid(row=r, column=2, sticky="w");
+            r += 1
+            ttk.Label(f1, text="Yazma Hızı (sn/karakter):").grid(row=r, column=0, sticky="e");
+            ttk.Entry(f1, textvariable=self.v["login_type_delay"], width=10).grid(row=r, column=1, sticky="w");
+            r += 1
+
+            lf_acc = ttk.LabelFrame(f1, text="Hesap Kaydet / Yönet")
+            lf_acc.grid(row=r, column=0, columnspan=4, sticky="we", pady=4)
+            ttk.Label(lf_acc, text="Hesap Adı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_acc, textvariable=self.v["account_name"], width=18).grid(row=0, column=1, sticky="w",
+                                                                                  padx=2, pady=2)
+            ttk.Label(lf_acc, text="Kullanıcı ID:").grid(row=0, column=2, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_acc, textvariable=self.v["account_id"], width=18).grid(row=0, column=3, sticky="w",
+                                                                                padx=2, pady=2)
+            ttk.Label(lf_acc, text="Şifre:").grid(row=1, column=0, sticky="e", padx=4, pady=2)
+            ttk.Entry(lf_acc, textvariable=self.v["account_password"], width=18, show="*").grid(row=1, column=1,
+                                                                                                sticky="w", padx=2,
+                                                                                                pady=2)
+            ttk.Button(lf_acc, text="Kaydet/Güncelle", command=self._save_account_entry).grid(row=1, column=2,
+                                                                                              sticky="we", padx=4,
+                                                                                              pady=2)
+            ttk.Button(lf_acc, text="Sil", command=self._delete_account).grid(row=1, column=3, sticky="we", padx=4,
+                                                                              pady=2)
+            ttk.Label(lf_acc, text="Kayıtlı Hesap:").grid(row=2, column=0, sticky="e", padx=4, pady=2)
+            self.account_combo = ttk.Combobox(lf_acc, textvariable=self.v["active_account"],
+                                              values=self._account_names(), state="readonly", width=24)
+            self.account_combo.grid(row=2, column=1, sticky="w", padx=2, pady=2, columnspan=2)
+            self.account_combo.bind("<<ComboboxSelected>>", self._on_account_selected)
+            ttk.Button(lf_acc, text="Aktif Et", command=self._on_account_selected).grid(row=2, column=3, sticky="we",
+                                                                                        padx=4, pady=2)
+            ttk.Label(lf_acc, textvariable=self._active_account_label, foreground="blue").grid(row=3, column=0,
+                                                                                               columnspan=4,
+                                                                                               sticky="w", padx=4,
+                                                                                               pady=(0, 2))
             r += 1
             ttk.Button(f1, text="İzleme Penceresi Aç", command=self.open_monitor).grid(row=r, column=0, columnspan=2,
                                                                                        sticky="w", pady=4)
@@ -6923,6 +7231,8 @@ def _MERDIVEN_RUN_GUI():
                     j = {}
             gui_data = (j.get("gui", {}) or {})
             for k, val in gui_data.items():
+                if k in ("account_name", "account_id", "account_password", "active_account"):
+                    continue  # hassas alanları config'ten doldurma
                 if hasattr(self, "_stats_keys") and k in self._stats_keys:
                     continue
                 if k in self.v:
@@ -6975,8 +7285,25 @@ def _MERDIVEN_RUN_GUI():
 
         def apply_core(self):
             # login
-            if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
-            if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
+            applied_active = False
+            try:
+                active_name = self.v["active_account"].get().strip()
+                if active_name:
+                    applied_active = _set_active_account(active_name)
+            except Exception:
+                applied_active = False
+            if not applied_active:
+                if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
+                if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
+                globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+            try:
+                m.LOGIN_TYPE_DELAY = float(self.v["login_type_delay"].get())
+            except Exception:
+                pass
+            try:
+                self._update_active_account_label()
+            except Exception:
+                pass
             setattr(m, "OPERATION_MODE", self.v["operation_mode"].get().upper())
             setattr(m, "ITEM_BASMA_SERVER", self.v["item_basma_server"].get())
             setattr(m, "ITEM_SALE_PRICE_TEXT", self.v["sale_price_text"].get())
@@ -7072,6 +7399,8 @@ def _MERDIVEN_RUN_GUI():
                 data = {"gui": {}, "advanced": {}}
             for k, var in self.v.items():
                 if k in getattr(self, "_stats_keys", ()):  # anlık sayaçları config'e yazma
+                    continue
+                if k in ("account_name", "account_id", "account_password", "active_account"):
                     continue
                 try:
                     data["gui"][k] = var.get()
