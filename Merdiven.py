@@ -6074,6 +6074,8 @@ def _MERDIVEN_RUN_GUI():
             self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
+            self.caps_status_var = tk.StringVar(value="")
+            self._last_caps_state = None
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
                 "username": tk.StringVar(value=getattr(m, "LOGIN_USERNAME", "")),
@@ -6277,6 +6279,26 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
 
+        def _refresh_caps_indicator(self):
+            try:
+                caps_fn = getattr(m, "is_capslock_on", None)
+                state = bool(caps_fn()) if callable(caps_fn) else False
+            except Exception:
+                state = False
+            prev = getattr(self, "_last_caps_state", None)
+            self._last_caps_state = state
+            if prev is not None and prev == state:
+                return
+            try:
+                if state:
+                    self.caps_status_var.set("CAPSLOCK AÇIK (MAKRO DURAKLATILDI)")
+                    self._caps_status_label.config(fg="green")
+                else:
+                    self.caps_status_var.set("CAPSLOCK KAPALI (MAKRO ÇALIŞIYOR)")
+                    self._caps_status_label.config(fg="red")
+            except Exception:
+                pass
+
         def _reset_stats(self):
             try:
                 reset_statistics()
@@ -6390,6 +6412,10 @@ def _MERDIVEN_RUN_GUI():
             f1 = ttk.Frame(nb);
             nb.add(f1, text="Genel");
             r = 0
+            self._caps_status_label = tk.Label(f1, textvariable=self.caps_status_var, font=("Segoe UI", 12, "bold"),
+                                               fg="red")
+            self._caps_status_label.grid(row=r, column=0, columnspan=4, sticky="we", pady=(4, 6))
+            r += 1
             ttk.Label(f1, text="Durum / Makro Aşaması:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
             ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=2, sticky="e", padx=4);
@@ -7093,6 +7119,10 @@ def _MERDIVEN_RUN_GUI():
             self.apply_core()
 
         def _tick(self):
+            try:
+                self._refresh_caps_indicator()
+            except Exception:
+                pass
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
 
     # Pencereyi başlat
