@@ -3014,19 +3014,9 @@ def go_w_to_y(w, target_y: int, timeout: float = None) -> bool:
     # NE İŞE YARAR: Y hedefe yaklaşırken profilden gelen delta ile mikro fren uygular
     if timeout is None:
         timeout = globals().get("Y_SEEK_TIMEOUT", 20.0)
-    d = _get_delta()
-    ty = int(target_y)
-    y_now = _read_axis(w, 'y')
-    if y_now is not None and y_now > ty:
-        print(f"[PREC] Başlangıç Y hedefin üstünde (cur={y_now}, target={ty}) → S ile toparla.")
-        recovered = recover_to_target_y_with_s(w, ty, timeout_sec=120.0)
-        if not recovered:
-            new_w = _restart_after_movement_failure(w, "Başlangıç Y overshoot toparlanamadı")
-            raise MovementRestartRequired(new_w)
-        y_after = _read_axis(w, 'y')
-        if y_after is not None and y_after <= ty and abs(y_after - ty) <= 1:
-            return True
-    return precise_move_w_to_axis(w, 'y', ty, timeout=timeout, pre_brake_delta=d, force_exact=True)
+    return precise_move_w_to_axis(
+        w, 'y', int(target_y), timeout=timeout, pre_brake_delta=_get_delta(), force_exact=True
+    )
 
 
 def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
