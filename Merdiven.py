@@ -6230,6 +6230,7 @@ def _MERDIVEN_RUN_GUI():
             self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
+            self.caps_status_text = tk.StringVar(value="")
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
                 "username": tk.StringVar(value=getattr(m, "LOGIN_USERNAME", "")),
@@ -6543,6 +6544,22 @@ def _MERDIVEN_RUN_GUI():
 
             self.root.after(0, _apply)
 
+        def _update_caps_status(self):
+            try:
+                chk = getattr(m, "is_capslock_on", None)
+                if not chk:
+                    return
+                is_on = bool(chk())
+                text = "CAPSLOCK AÇIK (MAKRO DURAKLATILDI)" if is_on else "CAPSLOCK KAPALI (MAKRO ÇALIŞIYOR)"
+                color = "#1aa029" if is_on else "#c62828"
+                self.caps_status_text.set(text)
+                try:
+                    self.caps_status_label.config(foreground=color)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         def _refresh_stats_vars(self):
             try:
                 self.v["plus7_bank_count"].set(str(getattr(m, "PLUS7_BANK_COUNT", 0)))
@@ -6665,6 +6682,9 @@ def _MERDIVEN_RUN_GUI():
             f1 = ttk.Frame(nb);
             nb.add(f1, text="Genel");
             r = 0
+            self.caps_status_label = tk.Label(f1, textvariable=self.caps_status_text, font=("Segoe UI", 12, "bold"))
+            self.caps_status_label.grid(row=r, column=0, columnspan=4, sticky="we", pady=(6, 8))
+            r += 1
             ttk.Label(f1, text="Durum / Makro Aşaması:").grid(row=r, column=0, sticky="e");
             ttk.Label(f1, textvariable=self.stage, foreground="blue").grid(row=r, column=1, sticky="w");
             ttk.Label(f1, text="Boş Slot (Satış):").grid(row=r, column=2, sticky="e", padx=4);
@@ -7422,6 +7442,7 @@ def _MERDIVEN_RUN_GUI():
             self.apply_core()
 
         def _tick(self):
+            self._update_caps_status()
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
 
     # Pencereyi başlat
