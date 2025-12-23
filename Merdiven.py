@@ -1104,12 +1104,18 @@ _GUI_STAGE_DETAIL = None
 _WATCHDOG_SUSPENDED = False
 _WATCHDOG_SUSPEND_REASON = None
 _STAGE_TIMEOUT_EXEMPT = False
+_PROGRESS_TIMEOUT = 300.0
+_LAST_PROGRESS_TS = time.time()
+_LAST_PROGRESS_REASON = ""
+_LAST_PROGRESS_COORD = None
+_LAST_PROGRESS_COORD_TS = time.time()
 
 
 def set_stage(name: str):
     global _current_stage, _stage_enter_ts
     _current_stage = name;
     _stage_enter_ts = time.time();
+    _mark_progress(f"stage:{name}")
     print(f"[STAGE] {_current_stage}");
     maybe_autotune(False)
 
@@ -1134,6 +1140,7 @@ def watchdog_suspend(reason: str = None):
     global _WATCHDOG_SUSPENDED, _WATCHDOG_SUSPEND_REASON
     _WATCHDOG_SUSPENDED = True
     _WATCHDOG_SUSPEND_REASON = reason
+    _mark_progress("watchdog_suspend")
     if reason:
         print(f"[WATCHDOG] Devre dışı (neden: {reason})")
     else:
@@ -1147,6 +1154,7 @@ def watchdog_resume():
         _WATCHDOG_SUSPENDED = False
         _WATCHDOG_SUSPEND_REASON = None
         _stage_enter_ts = time.time()
+        _mark_progress("watchdog_resume")
         print("[WATCHDOG] Tekrar aktif")
 
 
@@ -1169,6 +1177,63 @@ def _resolve_range_values(min_val, max_val):
     lo = max(0.0, lo)
     hi = max(0.0, hi)
     return lo, hi
+
+
+def _mark_progress(reason: str = ""):
+    global _LAST_PROGRESS_TS, _LAST_PROGRESS_REASON, _LAST_PROGRESS_COORD_TS
+    _LAST_PROGRESS_TS = time.time()
+    if reason:
+        _LAST_PROGRESS_REASON = reason
+    if _LAST_PROGRESS_COORD is None:
+        _LAST_PROGRESS_COORD_TS = _LAST_PROGRESS_TS
+
+
+def _reset_progress_state(reason: str = "reset"):
+    global _LAST_PROGRESS_COORD, _LAST_PROGRESS_COORD_TS
+    _LAST_PROGRESS_COORD = None
+    _LAST_PROGRESS_COORD_TS = time.time()
+    _mark_progress(reason)
+
+
+def _update_progress_with_coord(coord):
+    global _LAST_PROGRESS_COORD, _LAST_PROGRESS_COORD_TS
+    if coord is None:
+        return
+    try:
+        cx, cy = int(coord[0]), int(coord[1])
+    except Exception:
+        return
+    new_coord = (cx, cy)
+    if _LAST_PROGRESS_COORD != new_coord:
+        _LAST_PROGRESS_COORD = new_coord
+        _LAST_PROGRESS_COORD_TS = time.time()
+        _mark_progress(f"coord:{cx},{cy}")
+
+
+def _progress_monitor_exempt() -> bool:
+    if globals().get("_WATCHDOG_SUSPENDED", False):
+        return True
+    if globals().get("_STAGE_TIMEOUT_EXEMPT", False):
+        return True
+    try:
+        if _is_in_plus8_wait_state():
+            return True
+    except Exception:
+        pass
+    try:
+        if globals().get("_PLUS8_REMOTE_WAIT_ACTIVE", False):
+            return True
+    except Exception:
+        pass
+    try:
+        if globals().get("BANK_FULL_FLAG", False) and str(globals().get("MODE", "")).upper() != "BANK_PLUS8":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+_reset_progress_state("init")
 
 
 def _random_between(min_val, max_val) -> float:
@@ -1211,14 +1276,36 @@ def _wait_with_stage_detail(total_seconds: float, detail_builder: Optional[Calla
 def watchdog_enforce():
     global _stage_enter_ts
     if globals().get("_WATCHDOG_SUSPENDED", False):
+        _reset_progress_state("suspended")
         return
     if _abort_requested():
         raise GUIAbort("GUI durdurma isteği")
-    if bool(ctypes.windll.user32.GetKeyState(0x14) & 1): _stage_enter_ts = time.time(); return
     now = time.time()
-    if (now - _stage_enter_ts) > WATCHDOG_TIMEOUT: raise WatchdogTimeout(
-        f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
+    if _progress_monitor_exempt():
+        _reset_progress_state("exempt")
+    else:
+        idle = now - float(_LAST_PROGRESS_TS or 0.0)
+        if idle >= _PROGRESS_TIMEOUT:
+            try:
+                _release_movement_keys()
+            except Exception:
+                pass
+            raise WatchdogTimeout(f"İlerleme {idle:.0f}s yok (stage='{_current_stage}').")
+    if bool(ctypes.windll.user32.GetKeyState(0x14) & 1):
+        _stage_enter_ts = now
+        _reset_progress_state("capslock_pause")
+        return
+    if (now - _stage_enter_ts) > WATCHDOG_TIMEOUT:
+        try:
+            _release_movement_keys()
+        except Exception:
+            pass
+        raise WatchdogTimeout(f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
     if (not globals().get("_STAGE_TIMEOUT_EXEMPT", False)) and (now - _stage_enter_ts) >= STAGE_TIMEOUT_LIMIT:
+        try:
+            _release_movement_keys()
+        except Exception:
+            pass
         raise WatchdogTimeout(f"Aşama '{_current_stage}' {STAGE_TIMEOUT_LIMIT:.0f}s ilerlemiyor (stage timeout).")
     maybe_autotune(False)
 
@@ -1302,6 +1389,14 @@ def release_key(sc):
     ii_.ki = KeyBdInput(0, sc, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0, ctypes.pointer(extra))
     SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(1), ii_)), ctypes.sizeof(Input));
     time.sleep(tus_hizi)
+
+
+def _release_movement_keys():
+    for sc in (SC_W, SC_A, SC_S, SC_D):
+        try:
+            release_key(sc)
+        except Exception:
+            pass
 
 
 def _rand(n): return 0 if n == 0 else np.random.randint(-n, n + 1)
@@ -1436,6 +1531,34 @@ def send_telegram_message(text: str) -> bool:
         print(f"[TELEGRAM] Hata: {exc}")
     return False
 
+
+_ERROR_NOTIFY_COOLDOWN = 60.0
+_LAST_ERROR_NOTIFY_TS = 0.0
+
+
+def _format_brief_exception(exc: Exception) -> str:
+    try:
+        tb = traceback.format_exc(limit=3).strip().splitlines()
+        if tb:
+            return tb[-1]
+    except Exception:
+        pass
+    return str(exc)
+
+
+def _notify_error_telegram_once(message: str) -> bool:
+    global _LAST_ERROR_NOTIFY_TS
+    now = time.time()
+    if now - float(_LAST_ERROR_NOTIFY_TS or 0.0) < _ERROR_NOTIFY_COOLDOWN:
+        return False
+    ok = False
+    try:
+        ok = send_telegram_message(message)
+    except Exception as exc:
+        print(f"[TELEGRAM] Hata bildirimi gönderilemedi: {exc}")
+    if ok:
+        _LAST_ERROR_NOTIFY_TS = now
+    return ok
 
 def _telegram_pin_ok(cmd_text: str) -> bool:
     pin = str(globals().get("TELEGRAM_REMOTE_START8_PIN", "") or "").strip()
@@ -1590,6 +1713,36 @@ def _trigger_empty_bank_notifications(message: str):
         _EMPTY_BANK_THREAD = threading.Thread(target=_empty_bank_notifier_loop, daemon=True)
         _EMPTY_BANK_THREAD.start()
     return True
+
+
+def _handle_runtime_error(exc: Exception, context: str, window=None):
+    brief = _format_brief_exception(exc)
+    try:
+        stg = str(globals().get("_current_stage", "") or "").strip()
+        if stg:
+            brief = f"{brief} (stage={stg})"
+    except Exception:
+        pass
+    print(f"[ERROR] {context}: {brief}")
+    try:
+        _notify_error_telegram_once(f"❌ Makro hata verdi ({context}): {brief}")
+    except Exception:
+        pass
+    try:
+        _release_movement_keys()
+    except Exception:
+        pass
+    try:
+        if window is not None:
+            exit_game_fast(window)
+        else:
+            close_all_game_instances()
+    except Exception as ee:
+        print(f"[ERROR] Kapatma hata: {ee}")
+    try:
+        _reset_progress_state("error")
+    except Exception:
+        pass
 
 
 # ---- Merdiven tepe geri adım ayarı ----
@@ -2030,7 +2183,10 @@ def read_coordinates(window):
     text = pytesseract.image_to_string(gray, config=cfg).strip()
     parts = re.split(r'[,.\s]+', text);
     nums = [p for p in parts if p.isdigit()]
-    if len(nums) >= 2: return int(nums[0]), int(nums[1])
+    if len(nums) >= 2:
+        x_val, y_val = int(nums[0]), int(nums[1])
+        _update_progress_with_coord((x_val, y_val))
+        return x_val, y_val
     return None, None
 
 
@@ -2539,14 +2695,6 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
         _click_game_start_fallback(w)
         if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
             return True
-        try:
-            enter_gap = float(globals().get("giris_enter", 0.5))
-        except Exception:
-            enter_gap = 0.5
-        for _ in range(4):
-            press_key(SC_ENTER);
-            release_key(SC_ENTER);
-            time.sleep(max(0.0, enter_gap))
         if attempt < attempts:
             time.sleep(max(0.5, float(wait_between)))
     _capture_debug_screenshot("start_fail")
@@ -4406,6 +4554,7 @@ def relaunch_and_login_to_ingame():
         print("[RELAUNCH] Town + 'O' tamam. Oyundayız.");
         BANK_OPEN = False;
         maybe_autotune(True);
+        _reset_progress_state("relaunch_success")
         return w
 
 
@@ -4788,20 +4937,21 @@ def main():
                     time.sleep(1)
                     ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
                                                       allow_periodic_enter=False)
-                    if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
-                set_stage("INGAME_TOWN");
-                ensure_ui_closed();
-                send_town_command();
-                _town_log_once("[TOWN] Bir kez town atıldı.")
-                press_key(SC_O);
-                release_key(SC_O);
-                time.sleep(0.1);
-                _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
-                maybe_autotune(True)
-                set_stage("RUN_WORKFLOW");
-                if mode == PLUS7_BANK_MODE:
-                    run_bank_plus7_mode(w)
-                    return
+                if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
+            set_stage("INGAME_TOWN");
+            ensure_ui_closed();
+            send_town_command();
+            _town_log_once("[TOWN] Bir kez town atıldı.")
+            press_key(SC_O);
+            release_key(SC_O);
+            time.sleep(0.1);
+            _town_log_once("[TOWN] 'O' basıldı; isimler gizlendi.");
+            maybe_autotune(True)
+            _reset_progress_state("ingame_entry")
+            set_stage("RUN_WORKFLOW");
+            if mode == PLUS7_BANK_MODE:
+                run_bank_plus7_mode(w)
+                return
                 cycle_done, _purchased = run_stairs_and_workflow(w)
                 if cycle_done:
                     set_stage("CYCLE_EXIT_RESTART");
@@ -4836,7 +4986,15 @@ def main():
                         close_all_game_instances()
                 except Exception as ee:
                     print(f"[WATCHDOG] Kapatma sırasında hata: {ee}")
+                try:
+                    _reset_progress_state("watchdog_restart")
+                except Exception:
+                    pass
                 time.sleep(3.0);
+                continue
+            except Exception as e:
+                _handle_runtime_error(e, "main_loop", w)
+                time.sleep(2.0);
                 continue
     except GUIAbort:
         print("[MAIN] GUI durdurma isteği alındı; çıkılıyor.")
@@ -7225,9 +7383,12 @@ def _MERDIVEN_RUN_GUI():
 
         def _adv_items(self):
             items = []
+            ignored = {"AUTO_UNPAUSE_ON_CRITICAL", "NPC_BUY_STEPS", "PAZAR_REOPEN_KEY"}
             for k in dir(m):
                 try:
                     v = getattr(m, k)
+                    if k in ignored:
+                        continue
                     if self._is_editable(k, v): items.append((k, v))
                 except:
                     pass
