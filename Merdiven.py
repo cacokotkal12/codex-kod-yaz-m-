@@ -507,6 +507,7 @@ pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
 # ---- Watchdog ----
 WATCHDOG_TIMEOUT = 120;
+STAGE_TIMEOUT_LIMIT = 300.0
 F_WAIT_TIMEOUT_SECONDS = 30.0
 # ---- Banka +8 otomatik başlatma ----
 AUTO_BANK_PLUS8 = True  # True: 30 sn sonra otomatik +8 döngüsüne gir
@@ -624,6 +625,7 @@ PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_REMOTE_START8_PIN = ""
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 ITEM_SALE_BANK_NOTIFY = True
@@ -1004,11 +1006,41 @@ def _stop_plus8_wait_notifier():
     _PLUS8_WAIT_THREAD = None
 
 
+_REMOTE_START8_TRIGGER = False
+_REMOTE_START8_LOCK = threading.Lock()
+_PLUS8_REMOTE_WAIT_ACTIVE = False
+_TELEGRAM_CMD_THREAD = None
+_TELEGRAM_CMD_STOP = threading.Event()
+_TELEGRAM_UPDATE_OFFSET = None
+
+
+def _set_plus8_remote_wait_active(v: bool):
+    global _PLUS8_REMOTE_WAIT_ACTIVE
+    _PLUS8_REMOTE_WAIT_ACTIVE = bool(v)
+
+
+def _set_remote_start8_trigger():
+    global _REMOTE_START8_TRIGGER
+    with _REMOTE_START8_LOCK:
+        _REMOTE_START8_TRIGGER = True
+
+
+def _consume_remote_start8_trigger() -> bool:
+    global _REMOTE_START8_TRIGGER
+    with _REMOTE_START8_LOCK:
+        if not _REMOTE_START8_TRIGGER:
+            return False
+        _REMOTE_START8_TRIGGER = False
+        return True
+
+
 def _wait_for_f_with_countdown(deadline_ts: float, *, label: str = "+8 F bekleme") -> str:
     """F tuşu bekleme döngüsü; watchdog'u devre dışı bırakır ve geri sayım loglar."""
     countdown_step = 60  # sn
     last_log = None
     watchdog_suspend(label)
+    set_stage_timeout_exempt(True)
+    _set_plus8_remote_wait_active(True)
     try:
         while time.time() < deadline_ts:
             wait_if_paused()
@@ -1018,6 +1050,13 @@ def _wait_for_f_with_countdown(deadline_ts: float, *, label: str = "+8 F bekleme
             if rounded != last_log:
                 stage_detail(f"[PLUS8_WAIT] F için bekleme: {rounded} sn kaldı")
                 last_log = rounded
+            if _consume_remote_start8_trigger():
+                stage_detail("[PLUS8_WAIT] Telegram tetikledi → F basılıyor")
+                w = bring_game_window_to_front()
+                if w: _ensure_window_focus(w)
+                press_key(SC_F);
+                release_key(SC_F);
+                return "F"
             if _kb_pressed('f'):
                 return "F"
             if _kb_pressed('f12'):
@@ -1025,6 +1064,8 @@ def _wait_for_f_with_countdown(deadline_ts: float, *, label: str = "+8 F bekleme
             time.sleep(0.1)
         return "TIMEOUT"
     finally:
+        _set_plus8_remote_wait_active(False)
+        set_stage_timeout_exempt(False)
         watchdog_resume()
 
 # ---- LOW scroll genel reopen limiti (anvil) ----
@@ -1062,6 +1103,7 @@ _stage_enter_ts = time.time()
 _GUI_STAGE_DETAIL = None
 _WATCHDOG_SUSPENDED = False
 _WATCHDOG_SUSPEND_REASON = None
+_STAGE_TIMEOUT_EXEMPT = False
 
 
 def set_stage(name: str):
@@ -1106,6 +1148,11 @@ def watchdog_resume():
         _WATCHDOG_SUSPEND_REASON = None
         _stage_enter_ts = time.time()
         print("[WATCHDOG] Tekrar aktif")
+
+
+def set_stage_timeout_exempt(v: bool):
+    global _STAGE_TIMEOUT_EXEMPT
+    _STAGE_TIMEOUT_EXEMPT = bool(v)
 
 
 def _resolve_range_values(min_val, max_val):
@@ -1168,8 +1215,11 @@ def watchdog_enforce():
     if _abort_requested():
         raise GUIAbort("GUI durdurma isteği")
     if bool(ctypes.windll.user32.GetKeyState(0x14) & 1): _stage_enter_ts = time.time(); return
-    if (time.time() - _stage_enter_ts) > WATCHDOG_TIMEOUT: raise WatchdogTimeout(
+    now = time.time()
+    if (now - _stage_enter_ts) > WATCHDOG_TIMEOUT: raise WatchdogTimeout(
         f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
+    if (not globals().get("_STAGE_TIMEOUT_EXEMPT", False)) and (now - _stage_enter_ts) >= STAGE_TIMEOUT_LIMIT:
+        raise WatchdogTimeout(f"Aşama '{_current_stage}' {STAGE_TIMEOUT_LIMIT:.0f}s ilerlemiyor (stage timeout).")
     maybe_autotune(False)
 
 
@@ -1184,6 +1234,7 @@ SC_I = 0x17;
 SC_C = 0x2E;
 SC_H = 0x23;
 SC_ENTER = 0x1C;
+SC_F = 0x21;
 SC_B = 0x30;
 SC_TAB = 0x0F;
 SC_ESC = 0x01;
@@ -1384,6 +1435,88 @@ def send_telegram_message(text: str) -> bool:
     except Exception as exc:
         print(f"[TELEGRAM] Hata: {exc}")
     return False
+
+
+def _telegram_pin_ok(cmd_text: str) -> bool:
+    pin = str(globals().get("TELEGRAM_REMOTE_START8_PIN", "") or "").strip()
+    if not pin:
+        return True
+    try:
+        parts = str(cmd_text or "").strip().split()
+    except Exception:
+        parts = []
+    return any(p.strip() == pin for p in parts[1:]) if len(parts) >= 2 else False
+
+
+def _telegram_command_listener_loop():
+    global _TELEGRAM_UPDATE_OFFSET
+    while not _TELEGRAM_CMD_STOP.is_set():
+        if requests is None:
+            _TELEGRAM_CMD_STOP.wait(5.0)
+            continue
+        token = str(globals().get("TELEGRAM_TOKEN", "") or "").strip()
+        chat_id = str(globals().get("TELEGRAM_CHAT_ID", "") or "").strip()
+        if not token or not chat_id:
+            _TELEGRAM_CMD_STOP.wait(5.0)
+            continue
+        params = {"timeout": 10}
+        if _TELEGRAM_UPDATE_OFFSET is not None:
+            params["offset"] = _TELEGRAM_UPDATE_OFFSET
+        try:
+            resp = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params, timeout=15)
+            if not resp.ok:
+                time.sleep(1.0)
+                continue
+            data = resp.json() if hasattr(resp, "json") else {}
+        except Exception as exc:
+            print(f"[TELEGRAM] Komut dinleme hata: {exc}")
+            time.sleep(1.0)
+            continue
+        updates = data.get("result", []) if isinstance(data, dict) else []
+        for upd in updates:
+            try:
+                _TELEGRAM_UPDATE_OFFSET = int(upd.get("update_id", 0) or 0) + 1
+            except Exception:
+                pass
+            msg = upd.get("message") or upd.get("edited_message") or {}
+            chat = msg.get("chat", {}) if isinstance(msg, dict) else {}
+            if str(chat.get("id", "")) != str(chat_id):
+                continue
+            text = str(msg.get("text", "") or "").strip()
+            if not text:
+                continue
+            low = text.lower()
+            if low.startswith("/start8") or low == "f":
+                if not _PLUS8_REMOTE_WAIT_ACTIVE:
+                    send_telegram_message("Şu an +8 başlatılamaz.")
+                    continue
+                if not _telegram_pin_ok(text):
+                    send_telegram_message("PIN geçersiz.")
+                    continue
+                _set_remote_start8_trigger()
+                send_telegram_message("Komut alındı, +8 başlatılıyor.")
+        if not updates:
+            time.sleep(0.5)
+
+
+def _start_telegram_command_listener():
+    global _TELEGRAM_CMD_THREAD, _TELEGRAM_UPDATE_OFFSET
+    if _TELEGRAM_CMD_THREAD and _TELEGRAM_CMD_THREAD.is_alive():
+        return
+    _TELEGRAM_CMD_STOP.clear()
+    _TELEGRAM_UPDATE_OFFSET = None
+    t = threading.Thread(target=_telegram_command_listener_loop, daemon=True)
+    _TELEGRAM_CMD_THREAD = t
+    t.start()
+
+
+def _stop_telegram_command_listener():
+    global _TELEGRAM_CMD_THREAD
+    _TELEGRAM_CMD_STOP.set()
+    thr = _TELEGRAM_CMD_THREAD
+    if thr and thr.is_alive():
+        thr.join(timeout=0.2)
+    _TELEGRAM_CMD_THREAD = None
 
 
 _EMPTY_BANK_NOTIFY_ACTIVE = False
@@ -4297,62 +4430,93 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
     first = True
     while True:
-        wait_if_paused();
-        watchdog_enforce()
-        if first:
-            initial = withdraw_plusN_from_bank_pages(w, 7, max_take=2);
-            print(f"[BANK_PLUS8] İlk +7: {initial}/2")
-            low_moved = deposit_low_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
-            mid_taken = withdraw_mid_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
-            print(f"[BANK_PLUS8] Scroll takası: LOW→BANK={low_moved}, MID→ENV={mid_taken}")
-            remaining = max(0, 27 - initial);
-            extra = withdraw_plusN_from_bank_pages(w, 7, max_take=remaining) if remaining > 0 else 0
-            taken = initial + extra;
-            print(f"[BANK_PLUS8] Başlangıç toplam +7: {taken}/27 (ek={extra})");
-            first = False
-        else:
-            low_moved = deposit_low_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
-            mid_taken = withdraw_mid_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
-            print(f"[BANK_PLUS8] Scroll takası(döngü): LOW→BANK={low_moved}, MID→ENV={mid_taken}")
-            taken = withdraw_plusN_from_bank_pages(w, 7, max_take=27);
-            print(f"[BANK_PLUS8] Döngü +7: {taken}/27")
-        if taken <= 0:
-            print("[BANK_PLUS8] Bankada +7 kalmadı → scroll dönüşümü ve çıkış.")
-            mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
-            low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
-            print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
-            _set_mode_normal("Bankada +7 kalmadı")
-            return
-        ensure_ui_closed();
-        exit_game_fast(w);
-        w = relaunch_and_login_to_ingame()
-        if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); _set_mode_normal("Relaunch upgrade başarısız"); return
-        sx = town_until_valid_x(w);
-        ascend_stairs_to_top(w);
-        go_to_anvil_from_top(sx)
-        attempts = basma_dongusu(attempts_limit=taken, scroll_required="MID", win=w);
-        print(f"[BANK_PLUS8] +8 deneme: {attempts}/{taken}")
-        exit_game_fast(w);
-        w = relaunch_and_login_to_ingame()
-        if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); _set_mode_normal("Relaunch depozit başarısız"); return
-        town_until_valid_x(w);
-        ascend_stairs_to_top(w);
-        press_key(SC_I);
-        release_key(SC_I);
-        time.sleep(0.5)
-        plus8 = count_inventory_plusN(w, 8, "INV");
-        press_key(SC_I);
-        release_key(SC_I);
-        time.sleep(0.2)
-        if plus8 >= 1:
-            if not move_to_769_and_turn_from_top(w):
-                print("[BANK_PLUS8] Storage açılamadı; sonraki döngü.")
+        cycle_plus8_start = 0
+        try:
+            try:
+                cycle_plus8_start = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0)
+            except Exception:
+                cycle_plus8_start = 0
+            sent_plus8_summary = [False]
+
+            def _send_plus8_cycle_summary():
+                if sent_plus8_summary[0]:
+                    return
+                try:
+                    total_now = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0)
+                except Exception:
+                    total_now = cycle_plus8_start
+                delta = max(0, total_now - cycle_plus8_start)
+                send_telegram_message(f"✅ +8 döngüsü bitti. Bu döngüde basılan +8: {delta}")
+                sent_plus8_summary[0] = True
+
+            wait_if_paused();
+            watchdog_enforce()
+            if first:
+                initial = withdraw_plusN_from_bank_pages(w, 7, max_take=2);
+                print(f"[BANK_PLUS8] İlk +7: {initial}/2")
+                low_moved = deposit_low_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
+                mid_taken = withdraw_mid_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
+                print(f"[BANK_PLUS8] Scroll takası: LOW→BANK={low_moved}, MID→ENV={mid_taken}")
+                remaining = max(0, 27 - initial);
+                extra = withdraw_plusN_from_bank_pages(w, 7, max_take=remaining) if remaining > 0 else 0
+                taken = initial + extra;
+                print(f"[BANK_PLUS8] Başlangıç toplam +7: {taken}/27 (ek={extra})");
+                first = False
             else:
-                deposit_inventory_plusN_to_bank(w, 8)
-        else:
-            print("[BANK_PLUS8] Üzerinde +8 yok.")
-            if not move_to_769_and_turn_from_top(w): print(
-                "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _set_mode_normal("Depozit banka açılamadı"); return
+                low_moved = deposit_low_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
+                mid_taken = withdraw_mid_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
+                print(f"[BANK_PLUS8] Scroll takası(döngü): LOW→BANK={low_moved}, MID→ENV={mid_taken}")
+                taken = withdraw_plusN_from_bank_pages(w, 7, max_take=27);
+                print(f"[BANK_PLUS8] Döngü +7: {taken}/27")
+            if taken <= 0:
+                print("[BANK_PLUS8] Bankada +7 kalmadı → scroll dönüşümü ve çıkış.")
+                mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
+                low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
+                print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
+                _send_plus8_cycle_summary()
+                _set_mode_normal("Bankada +7 kalmadı")
+                return
+            ensure_ui_closed();
+            exit_game_fast(w);
+            w = relaunch_and_login_to_ingame()
+            if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); _send_plus8_cycle_summary(); _set_mode_normal("Relaunch upgrade başarısız"); return
+            sx = town_until_valid_x(w);
+            ascend_stairs_to_top(w);
+            go_to_anvil_from_top(sx)
+            attempts = basma_dongusu(attempts_limit=taken, scroll_required="MID", win=w);
+            print(f"[BANK_PLUS8] +8 deneme: {attempts}/{taken}")
+            exit_game_fast(w);
+            w = relaunch_and_login_to_ingame()
+            if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); _send_plus8_cycle_summary(); _set_mode_normal("Relaunch depozit başarısız"); return
+            town_until_valid_x(w);
+            ascend_stairs_to_top(w);
+            press_key(SC_I);
+            release_key(SC_I);
+            time.sleep(0.5)
+            plus8 = count_inventory_plusN(w, 8, "INV");
+            press_key(SC_I);
+            release_key(SC_I);
+            time.sleep(0.2)
+            if plus8 >= 1:
+                if not move_to_769_and_turn_from_top(w):
+                    print("[BANK_PLUS8] Storage açılamadı; sonraki döngü.")
+                else:
+                    deposit_inventory_plusN_to_bank(w, 8)
+            else:
+                print("[BANK_PLUS8] Üzerinde +8 yok.")
+                if not move_to_769_and_turn_from_top(w): print(
+                    "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _send_plus8_cycle_summary(); _set_mode_normal("Depozit banka açılamadı"); return
+            _send_plus8_cycle_summary()
+        finally:
+            try:
+                if 'sent_plus8_summary' in locals():
+                    if not sent_plus8_summary[0]:
+                        total_now = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0) if 'cycle_plus8_start' in locals() else 0
+                        delta = max(0, total_now - cycle_plus8_start)
+                        send_telegram_message(f"✅ +8 döngüsü bitti. Bu döngüde basılan +8: {delta}")
+                        sent_plus8_summary[0] = True
+            except Exception:
+                pass
 
 
 # ================== BANK_PLUS7 ORKESTRASYONU ==================
@@ -4561,6 +4725,10 @@ def main():
     global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, BANK_FULL_FLAG  # <- GLOBAL EN BAŞTA!
     try:
         _reset_empty_bank_state()
+    except Exception:
+        pass
+    try:
+        _start_telegram_command_listener()
     except Exception:
         pass
     mode = str(globals().get("OPERATION_MODE", OPERATION_MODE)).upper()
