@@ -5135,7 +5135,14 @@ def run_bank_plus7_mode(w):
                 exit_game_fast(w)
             except Exception as e:
                 print(f"[BANK_PLUS7] Çıkış hata: {e}")
-            return True
+            set_stage("RELAUNCH")
+            w = relaunch_and_login_to_ingame()
+            if not w:
+                print("[BANK_PLUS7] Yeniden giriş başarısız (tur sonrası).")
+                _set_mode_normal("Relaunch başarısız")
+                return False
+            need_check_597 = True
+            continue
         if REQUEST_RELAUNCH:
             print("[BANK_PLUS7] Basma sırasında relaunch tetiklendi.")
             REQUEST_RELAUNCH = False
