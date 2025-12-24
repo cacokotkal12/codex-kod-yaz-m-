@@ -3641,6 +3641,9 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
+    fail_attempts = 10
+    fail_timeout = 45.0
+    t0 = time.time()
     while True:
         wait_if_paused();
         watchdog_enforce()
@@ -3655,6 +3658,14 @@ def town_until_valid_x(w):
         attempts += 1;
         set_stage("TOWN_ALIGN_FOR_VALID_X");
         time.sleep(0.2)
+        if attempts >= fail_attempts or (time.time() - t0) >= fail_timeout:
+            print(f"[ALIGN] Fail-safe tetikledi (deneme={attempts}, süre={time.time() - t0:.1f}s) → çıkış.")
+            set_stage("EXIT_GAME")
+            try:
+                exit_game_fast(w)
+            except Exception as e:
+                print(f"[ALIGN] Çıkış hata: {e}")
+            raise WatchdogTimeout("TOWN_ALIGN_FAILSAFE")
 
 
 # >>> SPEED_AWARE_BEGIN_v2
@@ -5118,6 +5129,13 @@ def run_bank_plus7_mode(w):
         attempts_done = basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w, skip_plus7=True,
                                       skip_plus8=True)
         print(f"[BANK_PLUS7] +7 deneme: {attempts_done}/{attempts_limit}")
+        if attempts_done >= attempts_limit:
+            set_stage("EXIT_GAME")
+            try:
+                exit_game_fast(w)
+            except Exception as e:
+                print(f"[BANK_PLUS7] Çıkış hata: {e}")
+            return True
         if REQUEST_RELAUNCH:
             print("[BANK_PLUS7] Basma sırasında relaunch tetiklendi.")
             REQUEST_RELAUNCH = False
