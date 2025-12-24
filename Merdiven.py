@@ -4649,7 +4649,7 @@ def perform_upgrade_on_slot(col, row, click_region, scroll_required=None, *, win
 
 
 @crashguard("UPGRADE_LOOP")
-def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_plus8: bool = False):
+def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_plus7: bool = False, skip_plus8: bool = False):
     global ITEMS_DEPLETED_FLAG, REQUEST_RELAUNCH, MODE, FORCE_PLUS7_ONCE
     ITEMS_DEPLETED_FLAG = False;
     limit = attempts_limit if attempts_limit is not None else BASMA_HAKKI
@@ -4662,7 +4662,7 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
     press_key(SC_I);
     release_key(SC_I);
     time.sleep(0.6)
-    skip_plus7 = (scroll_required == "LOW") and (win is not None)
+    skip_plus7_flag = skip_plus7 or ((scroll_required == "LOW") and (win is not None))
     # >>> YENİ: LOW akışı için global reopen sayacı sıfırla
     if scroll_required == "LOW":
         _reset_scroll_reopen_budget("LOW")
@@ -4676,7 +4676,7 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
         tmpl = _load_empty_template();
         c, r = slot
         if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
-        if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7): print(
+        if skip_plus7_flag and hover_has_plusN(win, "UPG", c, r, 7): print(
             f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
         if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
             f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
@@ -4697,20 +4697,20 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
         found_and_upgraded = False;
         seen_item = False;
         skipped_due_to_scroll = False;
-        seen_only_plus7 = True if skip_plus7 else False
+        seen_only_plus7 = True if skip_plus7_flag else False
         for i in range(len(WRAP_SLOTS)):
             idx = (wrap_cursor + i) % len(WRAP_SLOTS);
             c, r = WRAP_SLOTS[idx]
             if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): continue
             seen_item = True
-            if skip_plus7 and hover_has_plusN(win, "UPG", c, r, 7):
+            if skip_plus7_flag and hover_has_plusN(win, "UPG", c, r, 7):
                 print(f"[UPG] Slot ({c},{r}) +7 → atla.");
                 continue
             if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
                 print(f"[UPG] Slot ({c},{r}) +8 → atla.");
                 continue
             else:
-                if skip_plus7: seen_only_plus7 = False
+                if skip_plus7_flag: seen_only_plus7 = False
             res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
             if res == "DONE":
                 attempts_done += 1;
@@ -4729,7 +4729,7 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
                 ITEMS_DEPLETED_FLAG = True
                 if MODE != "BANK_PLUS8": REQUEST_RELAUNCH = True
                 break
-            if skip_plus7 and seen_only_plus7:
+            if skip_plus7_flag and seen_only_plus7:
                 print("[UPG] Görünür tüm itemler +7 → relaunch.");
                 REQUEST_RELAUNCH = True;
                 FORCE_PLUS7_ONCE = True;
@@ -5029,8 +5029,10 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
 # ================== BANK_PLUS7 ORKESTRASYONU ==================
 @crashguard("BANK_PLUS7")
 def run_bank_plus7_mode(w):
-    global MODE
+    global MODE, REQUEST_RELAUNCH
     _set_mode_bank_plus7("Başlat")
+    empty_bank_notified = False
+    need_check_597 = False
     while True:
         wait_if_paused();
         watchdog_enforce()
@@ -5038,51 +5040,95 @@ def run_bank_plus7_mode(w):
             print("[BANK_PLUS7] F12 alındı, çıkılıyor.")
             _set_mode_normal("F12")
             return False
+        set_stage("CHECK_598")
         town_until_valid_x(w)
         ascend_stairs_to_top(w)
+        if need_check_597:
+            set_stage("CHECK_597")
+            try:
+                post_598_to_597()
+            except Exception as e:
+                print("[BANK_PLUS7] 598→597 hata:", e)
+            need_check_597 = False
         press_key(SC_I);
         release_key(SC_I);
         time.sleep(0.6)
+        empty_slots = count_empty_slots("INV")
         plus7_inv = count_inventory_plusN(w, 7, "INV")
         press_key(SC_I);
         release_key(SC_I);
         time.sleep(0.2)
-        need_deposit = plus7_inv >= 3
-        if not move_to_769_and_turn_from_top(w):
-            print("[BANK_PLUS7] Banka açılamadı → town retry")
-            send_town_command()
+        if plus7_inv >= 1:
+            if not move_to_769_and_turn_from_top(w):
+                print("[BANK_PLUS7] Banka açılamadı → town retry")
+                send_town_command()
+                continue
+            set_stage("BANK_DEPOSIT_PLUS7")
+            deposit_inventory_plusN_to_bank(w, 7)
+            set_stage("BANK_WITHDRAW")
+            taken = withdraw_plus_range_from_bank_pages(w, 0, 6, max_take=27)
+            if taken <= 0:
+                if not empty_bank_notified:
+                    send_telegram_message("⚠️ Boş Banka: Bankada +7 olmayan item kalmadı.")
+                    empty_bank_notified = True
+                _set_mode_normal("PLUS7 kaynak bitti")
+                return True
+            ensure_ui_closed();
+            set_stage("RELAUNCH")
+            exit_game_fast(w);
+            w = relaunch_and_login_to_ingame()
+            if not w:
+                print("[BANK_PLUS7] Yeniden giriş başarısız (relaunch).")
+                _set_mode_normal("Relaunch başarısız")
+                return False
+            need_check_597 = True
             continue
-        if need_deposit:
-            deposited = deposit_inventory_plusN_to_bank(w, 7)
-            print(f"[BANK_PLUS7] Bankaya bırakılan +7: {deposited}")
-        taken = withdraw_plus_range_from_bank_pages(w, 1, 6, max_take=27)
-        if taken <= 0:
-            print("[BANK_PLUS7] Bankada +1…+6 kalmadı → mod bitiyor.")
-            _set_mode_normal("PLUS7 kaynak bitti")
-            return True
-        ensure_ui_closed();
-        exit_game_fast(w);
-        w = relaunch_and_login_to_ingame()
-        if not w:
-            print("[BANK_PLUS7] Yeniden giriş başarısız (upgrade).")
-            _set_mode_normal("Relaunch upgrade başarısız")
-            return False
-        town_until_valid_x(w)
-        ascend_stairs_to_top(w)
+
+        if empty_slots >= 27:
+            if not move_to_769_and_turn_from_top(w):
+                print("[BANK_PLUS7] Banka açılamadı → town retry")
+                send_town_command()
+                continue
+            set_stage("BANK_WITHDRAW")
+            taken = withdraw_plus_range_from_bank_pages(w, 0, 6, max_take=27)
+            if taken <= 0:
+                if not empty_bank_notified:
+                    send_telegram_message("⚠️ Boş Banka: Bankada +7 olmayan item kalmadı.")
+                    empty_bank_notified = True
+                _set_mode_normal("PLUS7 kaynak bitti")
+                return True
+            ensure_ui_closed();
+            set_stage("RELAUNCH")
+            exit_game_fast(w);
+            w = relaunch_and_login_to_ingame()
+            if not w:
+                print("[BANK_PLUS7] Yeniden giriş başarısız (relaunch).")
+                _set_mode_normal("Relaunch başarısız")
+                return False
+            need_check_597 = True
+            continue
+
+        set_stage("ANVIL_UPGRADE_MID")
         try:
             start_x, _ = read_coordinates(w)
         except Exception:
             start_x = None
         go_to_anvil_from_top(start_x)
-        attempts_limit = min(int(BASMA_HAKKI), int(taken))
-        attempts_done = basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w, skip_plus8=True)
+        attempts_limit = BASMA_HAKKI
+        attempts_done = basma_dongusu(attempts_limit=attempts_limit, scroll_required="MID", win=w, skip_plus7=True,
+                                      skip_plus8=True)
         print(f"[BANK_PLUS7] +7 deneme: {attempts_done}/{attempts_limit}")
-        exit_game_fast(w)
-        w = relaunch_and_login_to_ingame()
-        if not w:
-            print("[BANK_PLUS7] Yeniden giriş başarısız (depozit).")
-            _set_mode_normal("Relaunch depozit başarısız")
-            return False
+        if REQUEST_RELAUNCH:
+            print("[BANK_PLUS7] Basma sırasında relaunch tetiklendi.")
+            REQUEST_RELAUNCH = False
+            set_stage("RELAUNCH")
+            exit_game_fast(w);
+            w = relaunch_and_login_to_ingame()
+            if not w:
+                print("[BANK_PLUS7] Yeniden giriş başarısız (basma sonrası).")
+                _set_mode_normal("Relaunch başarısız")
+                return False
+            need_check_597 = True
 
 
 # ================== NORMAL ÇALIŞMA DÖNGÜSÜ ==================
