@@ -74,6 +74,10 @@ def _read_y_now():
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
     random, \
     sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser
+try:
+    import pywintypes  # type: ignore
+except Exception:
+    pywintypes = None
 from ctypes import wintypes
 from PIL import Image, ImageGrab, ImageEnhance, ImageFilter
 from contextlib import contextmanager
@@ -2057,28 +2061,206 @@ def _ensure_launcher_closed_strict(max_wait: float = 8.0):
 
 
 # ================== Pencere yardımları ==================
+_LAST_GAME_WINDOW = None
+_WIN1400_LAST_NOTIFY_TS = 0.0
+_WIN1400_NOTIFY_COOLDOWN = 30.0
+
+
+def _is_win_error_1400(exc: Exception) -> bool:
+    try:
+        if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 1400:
+            return True
+    except Exception:
+        pass
+    if pywintypes is not None:
+        try:
+            if isinstance(exc, pywintypes.error) and (getattr(exc, "winerror", None) == 1400 or (
+                    len(getattr(exc, "args", ())) >= 1 and exc.args[0] == 1400)):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _invalidate_window_cache():
+    global _LAST_GAME_WINDOW
+    _LAST_GAME_WINDOW = None
+
+
+def _maybe_stage_detail(msg: str):
+    try:
+        stage_detail(msg)
+    except Exception:
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+
+def _window_title_of(hwnd: int) -> str:
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(int(hwnd), buf, len(buf))
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def _hwnd_matches_game(hwnd: int) -> bool:
+    try:
+        if not hwnd:
+            return False
+        u32 = ctypes.windll.user32
+        if not u32.IsWindow(int(hwnd)):
+            return False
+        if not u32.IsWindowVisible(int(hwnd)):
+            return False
+        title = _window_title_of(hwnd).lower()
+        return WINDOW_TITLE_KEYWORD.lower() in title
+    except Exception:
+        return False
+
+
+def _safe_window_rect(hwnd: int):
+    rect = wintypes.RECT()
+    u32 = ctypes.windll.user32
+    if not u32.GetWindowRect(int(hwnd), ctypes.byref(rect)):
+        raise ctypes.WinError()
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def _window_retry_message(step, total):
+    _maybe_stage_detail(f"[WINDOW] KO penceresi bulunamadı, tekrar deneniyor ({step}/{total})")
+
+
+def _safe_watchdog():
+    try:
+        wait_if_paused()
+    except Exception:
+        pass
+    try:
+        watchdog_enforce()
+    except Exception:
+        pass
+
+
+def _notify_win1400(func_name: str, action: str):
+    global _WIN1400_LAST_NOTIFY_TS
+    try:
+        if callable(globals().get("is_capslock_on")) and globals()["is_capslock_on"]():
+            return
+    except Exception:
+        pass
+    now = time.time()
+    if now - float(_WIN1400_LAST_NOTIFY_TS or 0.0) < _WIN1400_NOTIFY_COOLDOWN:
+        return
+    _WIN1400_LAST_NOTIFY_TS = now
+    try:
+        ts = time.strftime("%H:%M:%S", time.localtime())
+    except Exception:
+        ts = ""
+    try:
+        stage_name = str(globals().get("_current_stage", "") or "")
+    except Exception:
+        stage_name = ""
+    lines = [f"[WIN1400] {ts} stage={stage_name} func={func_name}",
+             f"action={action}"]
+    try:
+        send_telegram_message("\n".join(lines))
+    except Exception:
+        pass
+
+
+def _handle_win1400_recovery(func_name: str, action: str, attempt: int, total: int):
+    _invalidate_window_cache()
+    _maybe_stage_detail(f"[WIN1400] {func_name}: pencere geçersiz → yeniden aranıyor ({attempt}/{total})")
+    _notify_win1400(func_name, action)
+
+
+def ensure_knight_online_window(context: str = "", existing_window=None, focus: bool = True, want_rect: bool = True,
+                                attempts: int = 10, retry_delay: float = 1.0):
+    """KO penceresini güvenle bulur, doğrular, odaklar ve gerekirse rect döndürür."""
+    global _LAST_GAME_WINDOW
+    win = existing_window or _LAST_GAME_WINDOW
+    for step in range(1, int(attempts) + 1):
+        _safe_watchdog()
+        if win is not None and not _hwnd_matches_game(getattr(win, "_hWnd", 0)):
+            win = None
+        if win is None:
+            try:
+                wins = gw.getWindowsWithTitle(WINDOW_TITLE_KEYWORD)
+                if wins:
+                    win = wins[0]
+            except Exception:
+                win = None
+        if win is not None:
+            hwnd = int(getattr(win, "_hWnd", 0) or 0)
+            if not _hwnd_matches_game(hwnd):
+                win = None
+                _invalidate_window_cache()
+            else:
+                try:
+                    if getattr(win, "isMinimized", False):
+                        win.restore()
+                except Exception as exc:
+                    if _is_win_error_1400(exc):
+                        _handle_win1400_recovery(context or "ensure_knight_online_window", "reset_hwnd refind_window", step,
+                                                 attempts)
+                        win = None
+                        continue
+                if focus:
+                    try:
+                        win.activate();
+                        ctypes.windll.user32.SetForegroundWindow(hwnd);
+                    except Exception as exc:
+                        if _is_win_error_1400(exc):
+                            _handle_win1400_recovery(context or "ensure_knight_online_window",
+                                                     "reset_hwnd refind_window", step, attempts)
+                            win = None
+                            continue
+                rect = None
+                if want_rect:
+                    try:
+                        rect = _safe_window_rect(hwnd)
+                    except Exception as exc:
+                        if _is_win_error_1400(exc):
+                            _handle_win1400_recovery(context or "ensure_knight_online_window",
+                                                     "reset_hwnd refind_window", step, attempts)
+                            win = None
+                            continue
+                        rect = None
+                _LAST_GAME_WINDOW = win
+                return win, rect
+        _window_retry_message(step, attempts)
+        try:
+            time.sleep(max(0.2, float(retry_delay)))
+        except Exception:
+            pass
+    _maybe_stage_detail("[WINDOW] KO penceresi yok, güvenli bekleme moduna alındı.")
+    try:
+        _reset_progress_state("window_missing")
+    except Exception:
+        pass
+    return None, None
+
+
 def bring_game_window_to_front():
-    wins = gw.getWindowsWithTitle(WINDOW_TITLE_KEYWORD)
-    if not wins: return None
-    w = wins[0]
-    if w.isMinimized: w.restore()
-    w.activate();
-    time.sleep(0.5);
-    ctypes.windll.user32.SetForegroundWindow(w._hWnd);
-    time.sleep(0.2);
+    w, _rect = ensure_knight_online_window("bring_game_window_to_front", existing_window=None, focus=True, want_rect=False,
+                                           attempts=10, retry_delay=1.0)
     return w
 
 
 def _is_window_valid(win) -> bool:
     try:
-        _ = win.left;
-        return True
+        return _hwnd_matches_game(getattr(win, "_hWnd", 0))
     except Exception:
         return False
 
 
 def _is_foreground_window(win) -> bool:
     try:
+        if not _hwnd_matches_game(getattr(win, "_hWnd", 0)):
+            return False
         fg = ctypes.windll.user32.GetForegroundWindow()
         return fg and int(fg) == int(getattr(win, "_hWnd", 0))
     except Exception:
@@ -2094,8 +2276,15 @@ def _ensure_window_focus(win, timeout: float = 5.0) -> bool:
             try:
                 win.activate()
                 ctypes.windll.user32.SetForegroundWindow(win._hWnd)
-            except Exception:
-                pass
+            except Exception as exc:
+                if _is_win_error_1400(exc):
+                    _handle_win1400_recovery("_ensure_window_focus", "reset_hwnd refind_window retry=1/3", 1, 3)
+                    new_w, _ = ensure_knight_online_window("_ensure_window_focus", focus=True, want_rect=False,
+                                                           attempts=3, retry_delay=0.6)
+                    if new_w is None:
+                        return False
+                    win = new_w
+                    continue
             time.sleep(0.1)
         return _is_foreground_window(win)
     except Exception:
@@ -2222,11 +2411,10 @@ def launch_via_launcher_and_wait():
         time.sleep(0.3)
     if not w_detected: print("[LAUNCHER] Zaman aşımı: KO gelmedi."); return None
     try:
-        if w_detected.isMinimized: w_detected.restore()
-        w_detected.activate();
-        time.sleep(0.3);
-        ctypes.windll.user32.SetForegroundWindow(w_detected._hWnd);
-        print("[LAUNCHER] KO öne getirildi.")
+        w_detected, _ = ensure_knight_online_window("launch_via_launcher_and_wait", existing_window=w_detected,
+                                                    focus=True, want_rect=False, attempts=5, retry_delay=0.6)
+        if w_detected:
+            print("[LAUNCHER] KO öne getirildi.")
     except Exception as e:
         print(f"[LAUNCHER] Öne getirme hata: {e}")
     return w_detected
@@ -2302,24 +2490,38 @@ def perform_login_inputs(w):
 # ================== OCR / INV / UPG Yardımcıları ==================
 def read_coordinates(window):
     """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
-    left, top = window.left, window.top;
-    bbox = (left + 104, top + 102, left + 160, top + 120)
-    img = ImageGrab.grab(bbox);
-    gray = img.convert('L').resize((img.width * 2, img.height * 2))
-    TOWN_LOCKED = False
-    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-    TOWN_LOCKED = False
-    _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-    gray = ImageEnhance.Contrast(gray).enhance(3.0);
-    gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
-    cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
-    text = pytesseract.image_to_string(gray, config=cfg).strip()
-    parts = re.split(r'[,.\s]+', text);
-    nums = [p for p in parts if p.isdigit()]
-    if len(nums) >= 2:
-        x_val, y_val = int(nums[0]), int(nums[1])
-        _update_progress_with_coord((x_val, y_val))
-        return x_val, y_val
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
+        w, rect = ensure_knight_online_window("read_coordinates", existing_window=window, focus=False, want_rect=True,
+                                              attempts=5, retry_delay=0.6)
+        if not w or rect is None:
+            return None, None
+        try:
+            left, top, _r, _b = rect
+            bbox = (left + 104, top + 102, left + 160, top + 120)
+            img = ImageGrab.grab(bbox);
+            gray = img.convert('L').resize((img.width * 2, img.height * 2))
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+            gray = ImageEnhance.Contrast(gray).enhance(3.0);
+            gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
+            cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
+            text = pytesseract.image_to_string(gray, config=cfg).strip()
+            parts = re.split(r'[,.\s]+', text);
+            nums = [p for p in parts if p.isdigit()]
+            if len(nums) >= 2:
+                x_val, y_val = int(nums[0]), int(nums[1])
+                _update_progress_with_coord((x_val, y_val))
+                return x_val, y_val
+        except Exception as exc:
+            if _is_win_error_1400(exc):
+                _handle_win1400_recovery("read_coordinates", "reset_hwnd refind_window retry=1/2", attempts, 2)
+                continue
+            else:
+                raise
     return None, None
 
 
@@ -4567,10 +4769,22 @@ def npc_post_purchase_route_to_anvil_and_upgrade(w):
 
 # ================== RE-LAUNCH & LOGIN ==================
 def safe_press_enter_if_not_ingame(w):
+    w, _ = ensure_knight_online_window("safe_press_enter_if_not_ingame", existing_window=w, focus=True, want_rect=False,
+                                       attempts=5, retry_delay=0.6)
+    if not w:
+        print("[ENTER] Pencere bulunamadı.")
+        return False
     try:
         if _ingame_by_hpbar_once(w): print("[ENTER] Oyundayız."); return False
-    except Exception:
-        pass
+    except Exception as exc:
+        if _is_win_error_1400(exc):
+            _handle_win1400_recovery("safe_press_enter_if_not_ingame", "reset_hwnd refind_window retry=1/2", 1, 2)
+            w, _ = ensure_knight_online_window("safe_press_enter_if_not_ingame", existing_window=None, focus=True,
+                                               want_rect=False, attempts=5, retry_delay=0.6)
+            if not w:
+                return False
+        else:
+            pass
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     print("[ENTER] Enter basıldı.");
@@ -4578,8 +4792,12 @@ def safe_press_enter_if_not_ingame(w):
 
 
 def _mean_rgb_around(win, rx, ry, size=7):
-    x = win.left + rx;
-    y = win.top + ry;
+    w, rect = ensure_knight_online_window("_mean_rgb_around", existing_window=win, focus=False, want_rect=True,
+                                          attempts=5, retry_delay=0.5)
+    if not w or rect is None:
+        return 0.0, 0.0, 0.0
+    x = rect[0] + rx;
+    y = rect[1] + ry;
     k = size // 2;
     x1 = max(0, x - k);
     y1 = max(0, y - k);
@@ -4607,10 +4825,21 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
     print("[WAIT] HP bar bekleniyor.")
     t0 = time.time();
     last_enter = 0.0
+    w, _ = ensure_knight_online_window("confirm_loading_until_ingame", existing_window=w, focus=True, want_rect=False,
+                                       attempts=5, retry_delay=0.6)
+    if not w:
+        print("[WAIT] KO penceresi bulunamadı (başlangıç).")
+        return False
     while time.time() - t0 < timeout:
         wait_if_paused();
         watchdog_enforce()
         if _kb_pressed('f12'): print("[WAIT] F12 iptal."); return False
+        w, _ = ensure_knight_online_window("confirm_loading_until_ingame", existing_window=w, focus=False,
+                                           want_rect=False, attempts=3, retry_delay=0.5)
+        if not w:
+            _window_retry_message(1, 3)
+            time.sleep(poll)
+            continue
         if _ingame_by_hpbar_once(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
         if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
             w); last_enter = time.time()
