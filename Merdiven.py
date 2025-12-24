@@ -2259,7 +2259,7 @@ def _login_input_text(text: str, label: str = "", target_window=None) -> str:
 
 
 def perform_login_inputs(w):
-    """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar."""
+    """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
     if w is None or not _is_window_valid(w):
         w = bring_game_window_to_front()
@@ -2285,7 +2285,14 @@ def perform_login_inputs(w):
     time.sleep(0.05)
     password_method = _login_input_text(LOGIN_PASSWORD, "password", target_window=w);
     time.sleep(0.1)
-    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}).")
+    press_key(SC_ENTER);
+    release_key(SC_ENTER);
+    time.sleep(0.4)
+    # Bazı clientlarda iki kez Enter gerekiyor:
+    press_key(SC_ENTER);
+    release_key(SC_ENTER);
+    time.sleep(0.4)
+    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
     return True
 
 
