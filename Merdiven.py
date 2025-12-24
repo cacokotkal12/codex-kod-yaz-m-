@@ -5121,12 +5121,14 @@ def main():
                     pass
                 time.sleep(3.0);
                 continue
+            except GUIAbort:
+                raise
             except Exception as e:
                 _handle_runtime_error(e, "main_loop", w)
                 time.sleep(2.0);
                 continue
     except GUIAbort:
-        print("[MAIN] GUI durdurma isteği alındı; çıkılıyor.")
+        print("[MAIN] Makro durduruldu.")
 
 
 # ===================== MİKRO ADIM DÜZELTME FONKSİYONLARI (v2) =====================
