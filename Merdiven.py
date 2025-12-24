@@ -854,8 +854,11 @@ TOOLTIP_ROI_W, TOOLTIP_ROI_H = 640, 480;
 TOOLTIP_OFFSET_Y = 40;
 TOOLTIP_FALLBACK_BBOX = (290, 95, 1007, 662)
 # ---- +N (7/8) Şablon Yolları ----
+PLUS6_TEMPLATE_PATHS = ["plus6.png"];
 PLUS7_TEMPLATE_PATHS = ["plus7.png", "plus7_var2.png"];
 PLUS8_TEMPLATE_PATHS = ["plus8.png"]
+PLUS8_DECISION_THRESHOLD = 0.88;
+PLUS8_MARGIN = 0.05;
 # ---- Scroll Takası Şablon & Ayarlcacokotkal12 ar ----
 SCROLL_LOW_TEMPLATE_PATHS = ["scroll_low.png", "scroll_low2.png"]
 SCROLL_MID_TEMPLATE_PATHS = ["scroll_mid.png", "scroll_mid2.png"]
@@ -3037,8 +3040,20 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
 
 
 # ================== +N (7/8) OCR/Şablon ==================
+PLUS6_TEMPLATES = [];
 PLUS7_TEMPLATES = [];
 PLUS8_TEMPLATES = []
+
+
+def load_plus6_templates():
+    global PLUS6_TEMPLATES;
+    PLUS6_TEMPLATES = []
+    for p in PLUS6_TEMPLATE_PATHS:
+        pp = resource_path(p) if os.path.exists(resource_path(p)) else p
+        if os.path.exists(pp):
+            img = cv2.imread(pp, cv2.IMREAD_GRAYSCALE)
+            if img is not None: PLUS6_TEMPLATES.append(img)
+    print(f"[+6] {len(PLUS6_TEMPLATES)} şablon.")
 
 
 def load_plus7_templates():
@@ -3109,6 +3124,119 @@ def _match_plus8_templates_on(gray_slice, thr=0.78):
     except Exception:
         pass
     return False
+
+
+def _max_template_score_on(gray_slice, tmpl_list):
+    if gray_slice is None or gray_slice.size == 0 or not tmpl_list: return 0.0
+    try:
+        hed = cv2.Canny(gray_slice, 60, 140)
+    except Exception:
+        hed = None
+    best = 0.0
+    for t in tmpl_list:
+        for s in (0.60, 0.70, 0.80, 0.90, 1.0, 1.15, 1.30, 1.45, 1.60):
+            try:
+                tr = cv2.resize(t, (0, 0), fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            except Exception:
+                continue
+            th, tw = tr.shape[:2]
+            if th < 8 or tw < 8 or th > gray_slice.shape[0] or tw > gray_slice.shape[1]: continue
+            try:
+                te = cv2.Canny(tr, 60, 140);
+                res = cv2.matchTemplate(hed, te, cv2.TM_CCOEFF_NORMED);
+                _, mv, _, _ = cv2.minMaxLoc(res)
+            except Exception:
+                mv = 0.0
+            if mv > best: best = float(mv)
+    return best
+
+
+def _slot_plus_roi_from_gray(gray, region, c, r):
+    try:
+        slot_roi = _cell_roi(gray, region, c, r)
+    except Exception:
+        slot_roi = None
+    if slot_roi is None or slot_roi.size == 0: return None, None
+    h, w = slot_roi.shape[:2];
+    y1 = max(0, int(h * 0.55));
+    x1 = max(0, int(w * 0.55));
+    plus_roi = slot_roi[y1:, x1:]
+    if plus_roi is None or plus_roi.size == 0: plus_roi = slot_roi
+    return slot_roi, plus_roi
+
+
+def _classify_plus_level_on_gray(gray, region, c, r):
+    slot_roi, plus_roi = _slot_plus_roi_from_gray(gray, region, c, r)
+    if plus_roi is None: return None
+    s6 = _max_template_score_on(plus_roi, PLUS6_TEMPLATES)
+    s7 = _max_template_score_on(plus_roi, PLUS7_TEMPLATES)
+    s8 = _max_template_score_on(plus_roi, PLUS8_TEMPLATES)
+    scores = {6: float(s6), 7: float(s7), 8: float(s8)}
+    best_level = max(scores, key=scores.get)
+    best_score = scores.get(best_level, 0.0)
+    other_scores = [v for k, v in scores.items() if k != best_level]
+    margin = best_score - max(other_scores) if other_scores else 0.0
+    level = best_level if best_score > 0 else None
+    if level == 8 and (best_score < PLUS8_DECISION_THRESHOLD or margin < PLUS8_MARGIN):
+        level = None
+    return {"level": level, "scores": scores, "slot_roi": slot_roi, "plus_roi": plus_roi, "margin": margin}
+
+
+def _stable_slot_plus_level(region, c, r, samples=3, wait=0.04):
+    results = []
+    for i in range(max(1, int(samples))):
+        gray_now = grab_gray_region(region)
+        info = _classify_plus_level_on_gray(gray_now, region, c, r)
+        if info is not None:
+            results.append(info)
+        if i < max(1, int(samples)) - 1:
+            time.sleep(wait)
+    if not results: return None
+    counts = {}
+    for info in results:
+        lvl = info.get("level")
+        counts[lvl] = counts.get(lvl, 0) + 1
+    if not counts: return None
+    best_count = max(counts.values())
+    best_levels = [lvl for lvl, cnt in counts.items() if cnt == best_count]
+    final_level = best_levels[0] if len(best_levels) == 1 else None
+    chosen = None
+    for info in results:
+        if info.get("level") == final_level:
+            if chosen is None:
+                chosen = info
+                continue
+            current_score = info["scores"].get(final_level, 0.0)
+            prev_score = chosen["scores"].get(final_level, 0.0)
+            if current_score > prev_score:
+                chosen = info
+    if chosen is None:
+        chosen = results[0]
+    chosen = dict(chosen)
+    chosen["level"] = final_level
+    return chosen
+
+
+def _save_plus_debug(c, r, info, tag="upg"):
+    try:
+        if not info: return
+        slot_roi = info.get("slot_roi")
+        plus_roi = info.get("plus_roi")
+        if slot_roi is None or plus_roi is None: return
+        base = PERSIST_DIR("plus_debug")
+        ts = int(time.time() * 1000)
+        fname_slot = os.path.join(base, f"{tag}_slot_{c}_{r}_{ts}.png")
+        fname_plus = os.path.join(base, f"{tag}_plus_{c}_{r}_{ts}.png")
+        cv2.imwrite(fname_slot, slot_roi)
+        cv2.imwrite(fname_plus, plus_roi)
+        txt = os.path.join(base, f"{tag}_scores_{c}_{r}_{ts}.txt")
+        scores = info.get("scores", {})
+        margin = info.get("margin", 0.0)
+        lvl = info.get("level")
+        with open(txt, "w", encoding="utf-8") as f:
+            f.write(f"level={lvl} scores:6={scores.get(6, 0.0):.2f} 7={scores.get(7, 0.0):.2f} 8={scores.get(8, 0.0):.2f} margin={margin:.2f}")
+    except Exception:
+        pass
 
 
 def _roi_has_plusN(roi_gray, N: int):
@@ -4689,8 +4817,22 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
         if slot_is_empty_in_gray(gray, c, r, "UPG", tmpl): start_index = idx_found + 1; continue
         if skip_plus7_flag and hover_has_plusN(win, "UPG", c, r, 7): print(
             f"[UPG] Slot ({c},{r}) +7 → atla."); start_index = idx_found + 1; continue
-        if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8): print(
-            f"[UPG] Slot ({c},{r}) +8 → atla."); start_index = idx_found + 1; continue
+        plus_info = _stable_slot_plus_level("UPG", c, r, samples=3) if skip_plus8 else None
+        if skip_plus8:
+            scores = plus_info.get("scores", {}) if plus_info else {}
+            margin = plus_info.get("margin", 0.0) if plus_info else 0.0
+            lvl = plus_info.get("level") if plus_info else None
+            lvl_txt = f"+{lvl}" if lvl else "UNKNOWN"
+            log_msg = f"[UPG] Slot ({c},{r}) level={lvl_txt} scores:6={scores.get(6, 0.0):.2f} 7={scores.get(7, 0.0):.2f} 8={scores.get(8, 0.0):.2f}"
+            if lvl == 8:
+                log_msg += f" margin={margin:.2f} => ATLA"
+                print(log_msg);
+                _save_plus_debug(c, r, plus_info, "upg_skip")
+                start_index = idx_found + 1;
+                continue
+            else:
+                log_msg += " => BAS"
+                print(log_msg)
         res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
         if res == "DONE":
             used.add(slot);
@@ -4717,11 +4859,22 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
             if skip_plus7_flag and hover_has_plusN(win, "UPG", c, r, 7):
                 print(f"[UPG] Slot ({c},{r}) +7 → atla.");
                 continue
-            if skip_plus8 and hover_has_plusN(win, "UPG", c, r, 8):
-                print(f"[UPG] Slot ({c},{r}) +8 → atla.");
-                continue
-            else:
-                if skip_plus7_flag: seen_only_plus7 = False
+            plus_info_wrap = _stable_slot_plus_level("UPG", c, r, samples=3) if skip_plus8 else None
+            if skip_plus8:
+                scores = plus_info_wrap.get("scores", {}) if plus_info_wrap else {}
+                margin = plus_info_wrap.get("margin", 0.0) if plus_info_wrap else 0.0
+                lvl = plus_info_wrap.get("level") if plus_info_wrap else None
+                lvl_txt = f"+{lvl}" if lvl else "UNKNOWN"
+                log_msg = f"[UPG] Slot ({c},{r}) level={lvl_txt} scores:6={scores.get(6, 0.0):.2f} 7={scores.get(7, 0.0):.2f} 8={scores.get(8, 0.0):.2f}"
+                if lvl == 8:
+                    log_msg += f" margin={margin:.2f} => ATLA"
+                    print(log_msg);
+                    _save_plus_debug(c, r, plus_info_wrap, "upg_skip_wrap")
+                    continue
+                else:
+                    log_msg += " => BAS"
+                    print(log_msg)
+            if skip_plus7_flag: seen_only_plus7 = False
             res = perform_upgrade_on_slot(c, r, click_region="UPG", scroll_required=scroll_required, win=win)
             if res == "DONE":
                 attempts_done += 1;
@@ -5317,6 +5470,7 @@ def main():
         _set_mode_bank_plus7("Başlangıç")
     _set_dpi_aware();
     _wire_tesseract_portable()
+    load_plus6_templates();
     load_plus7_templates();
     load_plus8_templates();
     load_scroll_templates()
