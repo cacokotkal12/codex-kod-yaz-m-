@@ -463,6 +463,15 @@ def crashguard(stage=""):
                 raise
             except Exception as e:
                 dump_crash(e, stage or fn.__name__);
+                try:
+                    _handle_runtime_error(e, stage or fn.__name__)
+                except GUIAbort:
+                    raise
+                except Exception as _err:
+                    try:
+                        print(f"[CRASHGUARD] Hata yakalanırken ek hata: {_err}")
+                    except Exception:
+                        pass
                 raise
 
         return wrap
@@ -1109,6 +1118,7 @@ _LAST_PROGRESS_TS = time.time()
 _LAST_PROGRESS_REASON = ""
 _LAST_PROGRESS_COORD = None
 _LAST_PROGRESS_COORD_TS = time.time()
+_LAST_COORD_PROGRESS_TS = time.time()
 
 
 def set_stage(name: str):
@@ -1189,14 +1199,15 @@ def _mark_progress(reason: str = ""):
 
 
 def _reset_progress_state(reason: str = "reset"):
-    global _LAST_PROGRESS_COORD, _LAST_PROGRESS_COORD_TS
+    global _LAST_PROGRESS_COORD, _LAST_PROGRESS_COORD_TS, _LAST_COORD_PROGRESS_TS
     _LAST_PROGRESS_COORD = None
     _LAST_PROGRESS_COORD_TS = time.time()
+    _LAST_COORD_PROGRESS_TS = _LAST_PROGRESS_COORD_TS
     _mark_progress(reason)
 
 
 def _update_progress_with_coord(coord):
-    global _LAST_PROGRESS_COORD, _LAST_PROGRESS_COORD_TS
+    global _LAST_PROGRESS_COORD, _LAST_PROGRESS_COORD_TS, _LAST_COORD_PROGRESS_TS
     if coord is None:
         return
     try:
@@ -1207,7 +1218,16 @@ def _update_progress_with_coord(coord):
     if _LAST_PROGRESS_COORD != new_coord:
         _LAST_PROGRESS_COORD = new_coord
         _LAST_PROGRESS_COORD_TS = time.time()
+        _LAST_COORD_PROGRESS_TS = _LAST_PROGRESS_COORD_TS
         _mark_progress(f"coord:{cx},{cy}")
+
+
+def _movement_stage_active() -> bool:
+    st = str(globals().get("_current_stage", "") or "").upper()
+    if not st:
+        return False
+    keywords = ("MOVE", "GO_", "_W_", "ASCEND", "ROUTE", "STAIRS", "PREC_MOVE")
+    return any(k in st for k in keywords)
 
 
 def _progress_monitor_exempt() -> bool:
@@ -1281,16 +1301,19 @@ def watchdog_enforce():
     if _abort_requested():
         raise GUIAbort("GUI durdurma isteği")
     now = time.time()
+    idle = now - float(_LAST_PROGRESS_TS or 0.0)
+    coord_idle = now - float(_LAST_COORD_PROGRESS_TS or _LAST_PROGRESS_TS or 0.0)
+    movement_stalled = _movement_stage_active() and coord_idle >= _PROGRESS_TIMEOUT
     if _progress_monitor_exempt():
         _reset_progress_state("exempt")
     else:
-        idle = now - float(_LAST_PROGRESS_TS or 0.0)
-        if idle >= _PROGRESS_TIMEOUT:
+        if movement_stalled or idle >= _PROGRESS_TIMEOUT:
             try:
                 _release_movement_keys()
             except Exception:
                 pass
-            raise WatchdogTimeout(f"İlerleme {idle:.0f}s yok (stage='{_current_stage}').")
+            raise WatchdogTimeout(
+                f"İlerleme {max(idle, coord_idle):.0f}s yok (stage='{_current_stage}').")
     if bool(ctypes.windll.user32.GetKeyState(0x14) & 1):
         _stage_enter_ts = now
         _reset_progress_state("capslock_pause")
@@ -2126,7 +2149,7 @@ def _login_input_text(text: str, label: str = "", target_window=None) -> str:
 
 
 def perform_login_inputs(w):
-    """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
+    """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
     if w is None or not _is_window_valid(w):
         w = bring_game_window_to_front()
@@ -2152,14 +2175,7 @@ def perform_login_inputs(w):
     time.sleep(0.05)
     password_method = _login_input_text(LOGIN_PASSWORD, "password", target_window=w);
     time.sleep(0.1)
-    press_key(SC_ENTER);
-    release_key(SC_ENTER);
-    time.sleep(0.4)
-    # Bazı clientlarda iki kez Enter gerekiyor:
-    press_key(SC_ENTER);
-    release_key(SC_ENTER);
-    time.sleep(0.4)
-    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
+    print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}).")
     return True
 
 
@@ -4520,8 +4536,6 @@ def relaunch_and_login_to_ingame():
             for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
             print(f"[RELAUNCH] Server seçildi: {server_xy}")
             set_stage("RELAUNCH_POST_SELECT");
-            press_key(SC_ENTER);
-            release_key(SC_ENTER);
             time.sleep(1.5)
             ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
             if not ok:
@@ -4533,8 +4547,6 @@ def relaunch_and_login_to_ingame():
                 time.sleep(2.0);
                 continue
             time.sleep(1);
-            press_key(SC_ENTER);
-            release_key(SC_ENTER);
             time.sleep(1)
             ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False)
             if not ok:
@@ -4925,15 +4937,11 @@ def main():
                     for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
                     print(f"[SERVER] Seçilen server: {server_xy}")
                     set_stage("SERVER_POST_SELECT");
-                    press_key(SC_ENTER);
-                    release_key(SC_ENTER);
                     time.sleep(1.5)
                     ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
                     if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
                         "oyun_start.png tıklanamadı.")
                     time.sleep(1);
-                    press_key(SC_ENTER);
-                    release_key(SC_ENTER);
                     time.sleep(1)
                     ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
                                                       allow_periodic_enter=False)
@@ -4979,6 +4987,10 @@ def main():
                     continue
             except WatchdogTimeout as e:
                 print(f"[WATCHDOG] {e} → Oyun yeniden başlatılıyor...")
+                try:
+                    _release_movement_keys()
+                except Exception:
+                    pass
                 try:
                     if w is not None:
                         exit_game_fast(w)
@@ -6576,7 +6588,6 @@ def _MERDIVEN_RUN_GUI():
                 "active_account": tk.StringVar(value=str(getattr(m, "_ACTIVE_ACCOUNT_NAME", ""))),
                 "login_type_delay": tk.DoubleVar(value=float(getattr(m, "LOGIN_TYPE_DELAY", 0.03))),
                 "operation_mode": tk.StringVar(value=str(getattr(m, "OPERATION_MODE", "ITEM_BASMA"))),
-                "item_basma_server": tk.StringVar(value=str(getattr(m, "ITEM_BASMA_SERVER", "Server1"))),
                 "plus8_wait_message": tk.StringVar(value=str(getattr(m, "PLUS8_WAIT_MESSAGE", ""))),
                 "plus8_wait_interval": tk.DoubleVar(value=float(getattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 10.0))),
                 "buy_mode": tk.StringVar(value=getattr(m, "BUY_MODE", "LINEN")),
@@ -7130,15 +7141,9 @@ def _MERDIVEN_RUN_GUI():
             ttk.Entry(f2, textvariable=self.v["scroll_mid"], width=8).grid(row=3, column=1, sticky="w")
             ttk.Label(f2, text=_tr_name("BASMA_HAKKI")).grid(row=4, column=0, sticky="e");
             ttk.Entry(f2, textvariable=self.v["basma_hakki"], width=8).grid(row=4, column=1, sticky="w")
-            lf_server = ttk.LabelFrame(f2, text="Item Basma / Server Seçimi")
-            lf_server.grid(row=5, column=0, columnspan=3, sticky="we", pady=6)
-            ttk.Radiobutton(lf_server, text="Server1", value="Server1", variable=self.v["item_basma_server"]).grid(
-                row=0, column=0, sticky="w", padx=4, pady=2)
-            ttk.Radiobutton(lf_server, text="Server2", value="Server2", variable=self.v["item_basma_server"]).grid(
-                row=0, column=1, sticky="w", padx=4, pady=2)
 
             lf_plus8_msg = ttk.LabelFrame(f2, text="+8 Bekleme Telegram")
-            lf_plus8_msg.grid(row=6, column=0, columnspan=3, sticky="we", pady=6)
+            lf_plus8_msg.grid(row=5, column=0, columnspan=3, sticky="we", pady=6)
             ttk.Label(lf_plus8_msg, text="+8 item basma mesajı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_message"], width=42).grid(row=0, column=1,
                                                                                                 sticky="w", padx=4,
@@ -7663,7 +7668,6 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
             setattr(m, "OPERATION_MODE", self.v["operation_mode"].get().upper())
-            setattr(m, "ITEM_BASMA_SERVER", self.v["item_basma_server"].get())
             setattr(m, "ITEM_SALE_PRICE_TEXT", self.v["sale_price_text"].get())
             setattr(m, "PAZAR_ESIK_1", int(self.v["sale_threshold_1"].get()))
             setattr(m, "PAZAR_ESIK_2", int(self.v["sale_threshold_2"].get()))
