@@ -17,6 +17,10 @@ TOWN_MIN_INTERVAL_SEC = 8  # town debouncer (saniye)
 
 TOWN_LOCKED = False  # Merdiven sonrası town kilidi (başta kapalı)
 
+GAME_EXE_NAMES = ["KnightOnline.exe"]
+PRIORITY_MODE = "HIGH"
+CHECK_INTERVAL = 0.5
+
 # === [PATCH] TOWN/GUI tek-sefer log helper ===
 _TOWN_ONCE_KEYS = set()
 
@@ -91,6 +95,112 @@ def _town_lock(v: bool, reason: str = ""):
 
 
 # [PATCH_TOWN_LOCK_END]
+
+_PROCESS_PRIORITY_CLASSES = {
+    "ABOVE_NORMAL": 0x00008000,
+    "HIGH": 0x00000080,
+}
+
+
+def _enum_target_processes(names):
+    result = []
+    snapshot = None
+    try:
+        target = {str(n).strip().lower() for n in names if str(n).strip()}
+        if not target:
+            return result
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * wintypes.MAX_PATH),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+        if snapshot == INVALID_HANDLE_VALUE:
+            return result
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        success = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while success:
+            exe_name = entry.szExeFile
+            if exe_name and exe_name.lower() in target:
+                result.append((int(entry.th32ProcessID), exe_name))
+            success = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    except Exception:
+        pass
+    finally:
+        try:
+            if snapshot not in (None, ctypes.c_void_p(-1).value):
+                ctypes.windll.kernel32.CloseHandle(snapshot)
+        except Exception:
+            pass
+    return result
+
+
+def _set_priority_for_pid(pid, priority_class):
+    try:
+        PROCESS_SET_INFORMATION = 0x0200
+        PROCESS_QUERY_INFORMATION = 0x0400
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, False, pid)
+        if not handle:
+            return
+        try:
+            kernel32.SetPriorityClass(handle, priority_class)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def _priority_booster_worker():
+    desired = _PROCESS_PRIORITY_CLASSES.get(str(PRIORITY_MODE).upper())
+    names = list(GAME_EXE_NAMES)
+    if not desired or not names:
+        return
+    try:
+        interval = float(CHECK_INTERVAL)
+    except Exception:
+        interval = 0.5
+    if interval <= 0:
+        interval = 0.5
+    while True:
+        try:
+            for pid, _ in _enum_target_processes(names):
+                _set_priority_for_pid(pid, desired)
+        except Exception:
+            pass
+        try:
+            time.sleep(interval)
+        except Exception:
+            try:
+                time.sleep(0.5)
+            except Exception:
+                break
+
+
+def start_priority_booster():
+    if os.name.lower() != "nt":
+        return
+    if getattr(start_priority_booster, "_started", False):
+        return
+    start_priority_booster._started = True
+    try:
+        threading.Thread(target=_priority_booster_worker, name="priority_booster", daemon=True).start()
+    except Exception:
+        pass
 
 # === Kalıcı ayar yolu (EXE/py fark etmez) ===
 def PERSIST_PATH(name):
@@ -9105,4 +9215,8 @@ def scroll_alma_stage_mid(w, adet=SCROLL_MID_ALIM_ADET):
 
 
 if __name__ == "__main__":
+    try:
+        start_priority_booster()
+    except Exception:
+        pass
     _MERDIVEN_GUI_ENTRY(auto_open=True)
