@@ -621,7 +621,7 @@ def _bye(): log("[EXIT] program sonlandı")
 
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
-tus_hizi = 0.050;
+tus_hizi = 0.030;
 mouse_hizi = 0.1;
 jitter_px = 0
 # ---- OCR / Tesseract ----
@@ -635,7 +635,7 @@ STAGE_TIMEOUT_LIMIT = 300.0
 F_WAIT_TIMEOUT_SECONDS = 30.0
 # ---- Banka +8 otomatik başlatma ----
 AUTO_BANK_PLUS8 = True  # True: 30 sn sonra otomatik +8 döngüsüne gir
-AUTO_BANK_PLUS8_DELAY = 30.0  # saniye; istersen değeri değiştir
+AUTO_BANK_PLUS8_DELAY = 1800.0  # saniye; istersen değeri değiştir
 # ---- Merdiven Başlangıç Koord. ----
 VALID_X_LEFT = {811, 812, 813};
 VALID_X_RIGHT = {819, 820, 821};
@@ -691,12 +691,12 @@ BANK_PAGE_CLICK_DELAY = 0.12
 # ---- Game Start (Launcher sonrası) ----
 GAME_START_TEMPLATE_PATH = "oyun_start.png";
 GAME_START_TEMPLATE_PATHS = ("oyun_start.png", "oyun_start2.png", "oyun_start_alt.png");
-GAME_START_MATCH_THRESHOLD = 0.70;
-GAME_START_FIND_TIMEOUT = 8.0;
+GAME_START_MATCH_THRESHOLD = 0.80;
+GAME_START_FIND_TIMEOUT = 11.0;
 GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
 GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
 GAME_START_FALLBACK_RELATIVE_POS = (906, 600)
-GAME_START_VERIFY_TIMEOUT = 8.0
+GAME_START_VERIFY_TIMEOUT = 11.0
 TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 giris_enter = 0.5
 # ---- Launcher ----
@@ -707,7 +707,7 @@ WINDOW_APPEAR_TIMEOUT = 120.0
 # ---- Login Bilgileri ve Tıklama Koord. ----
 LOGIN_USERNAME = os.getenv("KO_USER", "cacokotkal12");
 LOGIN_PASSWORD = os.getenv("KO_PASS", "Vaz14999999jS@1")
-LOGIN_TYPE_DELAY = 0.03  # sn / karakter
+LOGIN_TYPE_DELAY = 0.04  # sn / karakter
 # Bu alanları kendi ekranına göre ayarla (gerekirse TAB ile de ilerliyor):
 LOGIN_USERNAME_CLICK_POS = (579, 326)  # kullanıcı adı alanı
 LOGIN_PASSWORD_CLICK_POS = (579, 378)  # şifre alanı
@@ -721,13 +721,13 @@ PAZAR_PARK_X = 805
 ITEM_SALE_VALID_X = (810, 805, 800)
 ITEM_SALE_FACE_A_DURATION = 1.45
 ITEM_SALE_PRICE_TEXT = "PAZAR_FIYAT_METNI"
-PAZAR_ESIK_1 = 10
-PAZAR_ESIK_2 = 15
-PAZAR_ESIK_3 = 20
+PAZAR_ESIK_1 = 7
+PAZAR_ESIK_2 = 14
+PAZAR_ESIK_3 = 21
 PAZAR_YENILEME_BEKELEME_MIN = 120.0
 PAZAR_YENILEME_BEKELEME_MAX = 120.0
 PAZAR_YENILEME_BEKELEME_SURESI = PAZAR_YENILEME_BEKELEME_MAX  # geriye dönük uyum
-PAZAR_ILK_BEKELEME_SURESI = 5.0
+PAZAR_ILK_BEKELEME_SURESI = 25.0
 AUTO_MARKET_REFRESH_ENABLED = False
 AUTO_MARKET_REFRESH_INTERVAL_HOURS = 3.0
 _AUTO_MARKET_LAST_REFRESH_TS = 0.0
@@ -806,7 +806,7 @@ HP_RED_DELTA = 35.0
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-X_TOL_READ_DELAY = 0.015  # X okuma aralığı (sn)
+X_TOL_READ_DELAY = 0.1  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
@@ -840,8 +840,8 @@ ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
 NPC_SEEK_TIMEOUT = 20.0;
 Y_SEEK_TIMEOUT = 20.0
-TURN_LEFT_SEC = 1.432;
-TURN_RIGHT_SEC = 1.432
+TURN_LEFT_SEC = 1.41;
+TURN_RIGHT_SEC = 1.41
 # ---- Town ----
 TOWN_CLICK_POS = (775, 775);
 TOWN_WAIT = 2.5
