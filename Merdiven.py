@@ -630,6 +630,7 @@ pyautogui.FAILSAFE = False;
 pyautogui.PAUSE = 0.030
 # ---- Watchdog ----
 WATCHDOG_TIMEOUT = 120;
+STAGE_WATCHDOG_TIMEOUTS = {"ITEM_SATIS_PAZAR_DOLDUR": 240.0}
 STAGE_TIMEOUT_LIMIT = 300.0
 F_WAIT_TIMEOUT_SECONDS = 30.0
 # ---- Banka +8 otomatik başlatma ----
@@ -1236,6 +1237,9 @@ _LAST_PROGRESS_REASON = ""
 _LAST_PROGRESS_COORD = None
 _LAST_PROGRESS_COORD_TS = time.time()
 _LAST_COORD_PROGRESS_TS = time.time()
+_LAST_STAGE_DETAIL = ""
+_LAST_WATCHDOG_KICK_REASON = ""
+_LAST_WATCHDOG_KICK_TS = 0.0
 
 
 def set_stage(name: str):
@@ -1253,6 +1257,10 @@ def stage_detail(info: str):
         return
     if _current_stage:
         text = f"{_current_stage} — {text}"
+    try:
+        globals()["_LAST_STAGE_DETAIL"] = text
+    except Exception:
+        pass
     print(f"[STAGE-INFO] {text}")
     cb = globals().get("_GUI_STAGE_DETAIL")
     if callable(cb):
@@ -1347,6 +1355,42 @@ def _movement_stage_active() -> bool:
     return any(k in st for k in keywords)
 
 
+def watchdog_kick(reason: str = ""):
+    """Watchdog sayaçlarını canlı tutar."""
+    global _stage_enter_ts, _LAST_WATCHDOG_KICK_REASON, _LAST_WATCHDOG_KICK_TS
+    now = time.time()
+    _stage_enter_ts = now
+    _mark_progress(reason or "watchdog_kick")
+    _LAST_WATCHDOG_KICK_TS = now
+    if reason:
+        _LAST_WATCHDOG_KICK_REASON = reason
+
+
+def _watchdog_extra_context() -> str:
+    parts = []
+    try:
+        last_detail = globals().get("_LAST_STAGE_DETAIL", "")
+        if last_detail:
+            parts.append(f"detail='{last_detail}'")
+    except Exception:
+        pass
+    try:
+        last_reason = globals().get("_LAST_WATCHDOG_KICK_REASON", "")
+        if last_reason:
+            parts.append(f"kick='{last_reason}'")
+    except Exception:
+        pass
+    try:
+        filled_val = globals().get("ITEM_SALE_LAST_FILLED", None)
+        if filled_val not in (None, ""):
+            parts.append(f"filled={filled_val}")
+    except Exception:
+        pass
+    if not parts:
+        return ""
+    return " (" + "; ".join(parts) + ")"
+
+
 def _progress_monitor_exempt() -> bool:
     if globals().get("_WATCHDOG_SUSPENDED", False):
         return True
@@ -1407,6 +1451,7 @@ def _wait_with_stage_detail(total_seconds: float, detail_builder: Optional[Calla
             if msg and msg != last_msg:
                 stage_detail(msg)
                 last_msg = msg
+        watchdog_kick("wait")
         time.sleep(min(1.0, remaining, 0.5))
 
 
@@ -1435,18 +1480,25 @@ def watchdog_enforce():
         _stage_enter_ts = now
         _reset_progress_state("capslock_pause")
         return
-    if (now - _stage_enter_ts) > WATCHDOG_TIMEOUT:
+    try:
+        effective_timeout = float(STAGE_WATCHDOG_TIMEOUTS.get(_current_stage, WATCHDOG_TIMEOUT))
+    except Exception:
+        effective_timeout = WATCHDOG_TIMEOUT
+    if (now - _stage_enter_ts) > effective_timeout:
         try:
             _release_movement_keys()
         except Exception:
             pass
-        raise WatchdogTimeout(f"Aşama '{_current_stage}' {WATCHDOG_TIMEOUT:.0f}s ilerlemiyor.")
+        extra_ctx = _watchdog_extra_context()
+        raise WatchdogTimeout(f"Aşama '{_current_stage}' {effective_timeout:.0f}s ilerlemiyor.{extra_ctx}")
     if (not globals().get("_STAGE_TIMEOUT_EXEMPT", False)) and (now - _stage_enter_ts) >= STAGE_TIMEOUT_LIMIT:
         try:
             _release_movement_keys()
         except Exception:
             pass
-        raise WatchdogTimeout(f"Aşama '{_current_stage}' {STAGE_TIMEOUT_LIMIT:.0f}s ilerlemiyor (stage timeout).")
+        extra_ctx = _watchdog_extra_context()
+        raise WatchdogTimeout(
+            f"Aşama '{_current_stage}' {STAGE_TIMEOUT_LIMIT:.0f}s ilerlemiyor (stage timeout).{extra_ctx}")
     maybe_autotune(False)
 
 
@@ -4175,8 +4227,12 @@ def _item_sale_type_price_text(price_text: str, key_delay: float):
 def _item_sale_fill_market(price_text: str) -> int:
     set_stage("ITEM_SATIS_PAZAR_DOLDUR")
     filled = 0
+    try:
+        globals()["ITEM_SALE_LAST_FILLED"] = filled
+    except Exception:
+        pass
     key_delay = 0.20
-    for row_y in (375, 425, 475, 525):
+    for row_idx, row_y in enumerate((375, 425, 475, 525)):
         for i in range(7):
             wait_if_paused()
             watchdog_enforce()
@@ -4185,6 +4241,11 @@ def _item_sale_fill_market(price_text: str) -> int:
             time.sleep(0.1)
             _item_sale_type_price_text(price_text, key_delay)
             filled += 1
+            try:
+                globals()["ITEM_SALE_LAST_FILLED"] = filled
+            except Exception:
+                pass
+            watchdog_kick(f"slot {row_idx}-{i}")
     for _ in range(2):
         mouse_move(656, 610)
         mouse_click("left")
@@ -4195,10 +4256,11 @@ def _item_sale_fill_market(price_text: str) -> int:
         time.sleep(0.2)
     mouse_move(476, 644)
     mouse_click("left")
-    time.sleep(61.0)
+    _wait_with_stage_detail(61.0)
+    watchdog_kick("market_wait")
     mouse_move(476, 644)
     mouse_click("left")
-    time.sleep(2.0)
+    _wait_with_stage_detail(2.0)
     mouse_move(806, 776)
     mouse_click("left")
     time.sleep(key_delay)
