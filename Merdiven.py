@@ -752,6 +752,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_REMOTE_START8_PIN = ""
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
+PLUS8_CYCLE_BANK_START = 0
+PLUS8_CYCLE_SUMMARY_SENT = False
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
@@ -5145,8 +5147,32 @@ def relaunch_and_login_to_ingame():
 # ================== BANK_PLUS8 ORKESTRASYONU ==================
 @crashguard("BANK_PLUS8")
 def run_bank_plus8_cycle(w, bank_is_open: bool = False):
-    global MODE
+    global MODE, PLUS8_CYCLE_BANK_START, PLUS8_CYCLE_SUMMARY_SENT
     set_stage("BANK_PLUS8_CYCLE")
+    try:
+        cycle_plus8_start = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0)
+    except Exception:
+        cycle_plus8_start = 0
+    PLUS8_CYCLE_BANK_START = cycle_plus8_start
+    summary_sent = False
+    PLUS8_CYCLE_SUMMARY_SENT = False
+
+    def send_plus8_summary_once(reason: str = ""):
+        nonlocal summary_sent, cycle_plus8_start
+        if summary_sent:
+            return
+        try:
+            total_now = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0)
+        except Exception:
+            total_now = cycle_plus8_start
+        delta = max(0, total_now - cycle_plus8_start)
+        msg = f"✅ +8 döngüsü bitti. Bu döngüde bankaya bırakılan toplam +8: {delta}"
+        if reason:
+            msg = f"{msg} ({reason})"
+        send_telegram_message(msg)
+        summary_sent = True
+        globals()["PLUS8_CYCLE_SUMMARY_SENT"] = True
+
     if bank_is_open:
         print("[BANK_PLUS8] Banka açık → devam.")
     else:
@@ -5154,7 +5180,8 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             print("[BANK_PLUS8] Banka açılamadı, town & tekrar.");
             send_town_command()
             if not move_to_769_and_turn_from_top(w): print(
-                "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); _set_mode_normal("Banka açılamadı"); return
+                "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); send_plus8_summary_once("Banka açılamadı"); _set_mode_normal(
+                "Banka açılamadı"); return
 
     # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
     y_now = _read_y_now()
@@ -5162,26 +5189,8 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
     if TOWN_LOCKED:
         _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
     first = True
-    while True:
-        cycle_plus8_start = 0
-        try:
-            try:
-                cycle_plus8_start = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0)
-            except Exception:
-                cycle_plus8_start = 0
-            sent_plus8_summary = [False]
-
-            def _send_plus8_cycle_summary():
-                if sent_plus8_summary[0]:
-                    return
-                try:
-                    total_now = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0)
-                except Exception:
-                    total_now = cycle_plus8_start
-                delta = max(0, total_now - cycle_plus8_start)
-                send_telegram_message(f"✅ +8 döngüsü bitti. Bu döngüde basılan +8: {delta}")
-                sent_plus8_summary[0] = True
-
+    try:
+        while True:
             wait_if_paused();
             watchdog_enforce()
             if first:
@@ -5206,13 +5215,14 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
                 mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
                 low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
                 print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
-                _send_plus8_cycle_summary()
+                send_plus8_summary_once("PLUS7 kaynak bitti")
                 _set_mode_normal("Bankada +7 kalmadı")
                 return
             ensure_ui_closed();
             exit_game_fast(w);
             w = relaunch_and_login_to_ingame()
-            if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); _send_plus8_cycle_summary(); _set_mode_normal("Relaunch upgrade başarısız"); return
+            if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (upgrade)."); send_plus8_summary_once(
+                "Relaunch upgrade başarısız"); _set_mode_normal("Relaunch upgrade başarısız"); return
             sx = town_until_valid_x(w);
             ascend_stairs_to_top(w);
             go_to_anvil_from_top(sx)
@@ -5220,7 +5230,8 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             print(f"[BANK_PLUS8] +8 deneme: {attempts}/{taken}")
             exit_game_fast(w);
             w = relaunch_and_login_to_ingame()
-            if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); _send_plus8_cycle_summary(); _set_mode_normal("Relaunch depozit başarısız"); return
+            if not w: print("[BANK_PLUS8] Yeniden giriş başarısız (depozit)."); send_plus8_summary_once(
+                "Relaunch depozit başarısız"); _set_mode_normal("Relaunch depozit başarısız"); return
             town_until_valid_x(w);
             ascend_stairs_to_top(w);
             press_key(SC_I);
@@ -5238,18 +5249,13 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             else:
                 print("[BANK_PLUS8] Üzerinde +8 yok.")
                 if not move_to_769_and_turn_from_top(w): print(
-                    "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); _send_plus8_cycle_summary(); _set_mode_normal("Depozit banka açılamadı"); return
-            _send_plus8_cycle_summary()
-        finally:
-            try:
-                if 'sent_plus8_summary' in locals():
-                    if not sent_plus8_summary[0]:
-                        total_now = int(globals().get("PLUS8_BANK_COUNT", PLUS8_BANK_COUNT) or 0) if 'cycle_plus8_start' in locals() else 0
-                        delta = max(0, total_now - cycle_plus8_start)
-                        send_telegram_message(f"✅ +8 döngüsü bitti. Bu döngüde basılan +8: {delta}")
-                        sent_plus8_summary[0] = True
-            except Exception:
-                pass
+                    "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); send_plus8_summary_once(
+                    "Depozit banka açılamadı"); _set_mode_normal("Depozit banka açılamadı"); return
+    finally:
+        try:
+            send_plus8_summary_once()
+        except Exception:
+            pass
 
 
 # ================== BANK_PLUS7 ORKESTRASYONU ==================
@@ -6790,7 +6796,9 @@ _TR = {
     'PLUS7_TEMPLATE_TIMEOUT': '+7 şablon zaman aşımı',
     'PLUS8_TEMPLATE_TIMEOUT': '+8 şablon zaman aşımı',
     'PLUS8_WAIT_MESSAGE': '+8 bekleme mesajı',
-    'PLUS8_WAIT_MESSAGE_INTERVAL_MIN': '+8 bekleme mesaj aralığı (dk)'
+    'PLUS8_WAIT_MESSAGE_INTERVAL_MIN': '+8 bekleme mesaj aralığı (dk)',
+    'PLUS8_CYCLE_BANK_START': '+8 döngü başlangıç bank sayacı',
+    'PLUS8_CYCLE_SUMMARY_SENT': '+8 döngü özeti gönderim işareti'
 }
 
 # === TR yardım sözlüğü ve Tooltip ===
@@ -6835,6 +6843,8 @@ _TR_HELP.update({
     'TOOLTIP_ROI_H': 'Tooltip ROI yüksekliği.',
     'PLUS8_WAIT_MESSAGE': '+8 bekleme modunda gönderilecek Telegram mesajı.',
     'PLUS8_WAIT_MESSAGE_INTERVAL_MIN': '+8 bekleme modunda mesaj tekrar aralığı (dakika).',
+    'PLUS8_CYCLE_BANK_START': '+8 döngüsü başlarken bankadaki +8 sayacı.',
+    'PLUS8_CYCLE_SUMMARY_SENT': '+8 döngüsü özeti gönderildi mi işareti.',
     # … sende olan diğer anahtarlar aynı şekilde devam edecek …
 })
 
