@@ -1271,29 +1271,14 @@ def _yaklasik_valid_x(x):
         xi = int(x)
     except Exception:
         return None
-    if xi in VALID_X:
-        return xi
-    try:
-        tol = int(globals().get("X_TOLERANS", X_TOLERANS))
-    except Exception:
-        tol = X_TOLERANS
-    yakin = None
-    fark = None
-    try:
-        for vx in VALID_X:
-            df = abs(int(vx) - xi)
-            if fark is None or df < fark:
-                fark = df
-                yakin = vx
-    except Exception:
-        return None
-    if fark is not None and fark <= tol:
-        return yakin
-    return None
+    return xi if xi in VALID_X else None
 
 
 def _is_valid_x(x) -> bool:
-    return _yaklasik_valid_x(x) is not None
+    try:
+        return int(x) in VALID_X
+    except Exception:
+        return False
 
 
 def _stabil_x_oku(w, adet=None):
@@ -4169,16 +4154,21 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
-    fail_attempts = 10
+    fail_attempts = 20
     fail_timeout = 45.0
     t0 = time.time()
     while True:
         wait_if_paused();
         watchdog_enforce()
         x, _y, _samples = _stabil_x_oku(w)
-        yaklasik = _yaklasik_valid_x(x)
-        if yaklasik is not None: print(f"[ALIGN] Geçerli X: {yaklasik} (deneme={attempts})"); return yaklasik
-        print(f"[ALIGN] X={x} geçersiz → town.");
+        try:
+            xi = int(x)
+        except Exception:
+            xi = None
+        if xi is not None and _is_valid_x(xi):
+            print(f"[ALIGN] X={xi} strict geçerli.");
+            return xi
+        print(f"[ALIGN] X={x} strict geçersiz → town.");
         ensure_ui_closed();
         send_town_command();
         attempts += 1;
