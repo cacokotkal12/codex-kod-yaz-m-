@@ -956,8 +956,6 @@ except Exception as _e:
     print('[MikroAdim] sabit denetimi uyarı:', _e)
 
 PRE_BRAKE_DELTA = 2;
-Y_tus_hizi = 0.03
-Y_SLOWMODE_AKTIF = True
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
@@ -1785,7 +1783,6 @@ SC_D = 0x20;
 SC_I = 0x17;
 SC_C = 0x2E;
 SC_H = 0x23;
-SC_Y = 0x15;
 SC_ENTER = 0x1C;
 SC_F = 0x21;
 SC_B = 0x30;
@@ -4126,57 +4123,16 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
     t0 = time.time();
-    try:
-        deadline_abs = t0 + float(timeout)
-    except Exception:
-        deadline_abs = t0 + 20.0
-    slow_enabled = bool(globals().get("Y_SLOWMODE_AKTIF", True))
-    try:
-        y_tempo = float(globals().get("Y_tus_hizi", 0.03))
-    except Exception:
-        y_tempo = 0.03
-    slow_on = False
-
-    def _set_y_slow(on: bool, log_msg: Optional[str] = None):
-        nonlocal slow_on
-        if not slow_enabled:
-            return
-        if on and not slow_on:
-            if log_msg:
-                print(log_msg)
-            try:
-                with key_tempo(y_tempo):
-                    press_key(SC_Y)
-                    release_key(SC_Y)
-            except Exception:
-                pass
-            slow_on = True
-        elif (not on) and slow_on:
-            if log_msg:
-                print(log_msg)
-            try:
-                with key_tempo(y_tempo):
-                    press_key(SC_Y)
-                    release_key(SC_Y)
-            except Exception:
-                pass
-            slow_on = False
-
     press_key(SC_W)
-    paused_released = False
     try:
         while True:
-            resumed = wait_if_paused()
-            paused_released = paused_released or resumed
+            wait_if_paused();
             watchdog_enforce()
-            if paused_released and not is_capslock_on():
-                press_key(SC_W)
-                paused_released = False
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
             if abs(target - cur) <= pre_brake_delta: break
-            if time.time() > deadline_abs: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
+            if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
     finally:
         release_key(SC_W)
@@ -4186,57 +4142,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
-    if slow_enabled:
-        _set_y_slow(True, "[WALK] pre_brake yakalandı → Y slow ON")
-        w_slow_active = False
-        paused_released = False
-        abort_slow = False
-        try:
-            press_key(SC_W)
-            w_slow_active = True
-            while True:
-                resumed = wait_if_paused()
-                paused_released = paused_released or resumed
-                watchdog_enforce()
-                if paused_released and not is_capslock_on():
-                    press_key(SC_W)
-                    paused_released = False
-                    w_slow_active = True
-                if _kb_pressed('f12'):
-                    abort_slow = True
-                    break
-                cur = _read_axis(w, axis)
-                if cur is None:
-                    time.sleep(MICRO_READ_DELAY)
-                    continue
-                if cur == target:
-                    if w_slow_active:
-                        release_key(SC_W)
-                        w_slow_active = False
-                    _set_y_slow(False, "[WALK] target görüldü → W stop + Y slow OFF")
-                    break
-                if (direction == 1 and cur > target) or (direction == -1 and cur < target):
-                    if w_slow_active:
-                        release_key(SC_W)
-                        w_slow_active = False
-                    print("[WALK] overshoot → mikro düzeltme")
-                    break
-                if time.time() > deadline_abs:
-                    abort_slow = True
-                    break
-                time.sleep(MICRO_READ_DELAY)
-        finally:
-            if w_slow_active:
-                try:
-                    release_key(SC_W)
-                except Exception:
-                    pass
-            _set_y_slow(False)
-        if abort_slow:
-            return False
-
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
-    remaining_timeout = max(0.0, deadline_abs - time.time())
+    remaining_timeout = max(0.0, float(timeout) - (time.time() - t0))
     deadline = time.time() + remaining_timeout
     matched = _micro_adjust_axis(lambda: _read_axis(w, axis), axis, target, direction, seq, settle_hits,
                                  max_duration=MICRO_ADJUST_MAX_DURATION, deadline=deadline)
@@ -6378,7 +6285,6 @@ def _check_hotkeys_for_buy_mode():
 
 def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
     told = False
-    released = False
     abort_fn = globals().get("_abort_requested")
     AbortExc = globals().get("GUIAbort", GUIAbort)
 
@@ -6391,15 +6297,9 @@ def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
         wdog = globals().get("watchdog_enforce")
         if not is_caps or not wdog:
             _ensure_not_aborted()
-            return released
+            return True
         while is_caps():
             _ensure_not_aborted()
-            if not released:
-                try:
-                    _release_movement_keys()
-                except Exception:
-                    pass
-                released = True
             if not told:
                 print("[PAUSE] CapsLock AÇIK. Devam için kapat.")
                 told = True
@@ -6412,7 +6312,7 @@ def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
         raise
     except Exception:
         _ensure_not_aborted()
-    return released
+    return True
 
 
 def go_to_npc_from_top(w):  # moda göre sayfa seçimi
@@ -7273,7 +7173,6 @@ _TR = {
     'SC_D': 'scan D',
     'SC_W': 'scan W',
     'SC_S': 'scan S',
-    'SC_Y': 'scan Y',
     'SC_I': 'scan I',
     'SC_O': 'scan O',
     'SC_TAB': 'scan TAB',
@@ -7293,8 +7192,6 @@ _TR = {
     'CF_UNICODETEXT': 'pano unicode formatı',
     'MICRO_PULSE_DURATION': 'mikro nabız süre (sn)',
     'MICRO_READ_DELAY': 'mikro okuma gecikmesi (sn)',
-    'Y_tus_hizi': 'Y tus hizi',
-    'Y_SLOWMODE_AKTIF': 'Y yavas mod aktif',
     'LOGIN_USERNAME': 'kullanıcı adı',
     'LOGIN_PASSWORD': 'şifre',
     'LOGIN_TYPE_DELAY': 'login yazma hızı',
@@ -7336,8 +7233,6 @@ _TR_HELP.update({
     'PRESS_MIN': 'A/D mikro adım basışının minimum süresi (sn).',
     'PRESS_MAX': 'A/D mikro adım basışının maksimum süresi (sn).',
     'PRE_BRAKE_DELTA': 'Hedefe yaklaşırken ön fren düzeltmesi (px).',
-    'Y_tus_hizi': 'Y tusuna bas-birak hiz gecikmesi (yurume modu ac/kapat).',
-    'Y_SLOWMODE_AKTIF': 'Duraklamaya yaklasinca Y ile yavas yuruyus modunu kullan.',
     'ROI_STALE_MS': 'Koordinat ROI tazeleme aralığı (ms).',
     'UPG_ROI_STALE_MS': 'Upgrade sırasında ROI tazeleme (ms).',
     'EMPTY_SLOT_TEMPLATE_PATH': 'Boş slot şablon dosyası.',
@@ -7497,8 +7392,6 @@ _ADV_CATEGORY_RULES = (
             'PRE_BRAKE_DELTA',
             'MAX_STEPS',
             'STUCK_TIMEOUT',
-            'Y_tus_hizi',
-            'Y_SLOWMODE_AKTIF',
         ),
         prefixes=(
             'AUTO_SPEED_',
