@@ -4226,7 +4226,7 @@ def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
 # <<< SPEED_AWARE_END_v2
 
 def ascend_stairs_to_top(w):
-    global NEED_STAIRS_REALIGN
+    global NEED_STAIRS_REALIGN, REQUEST_RELAUNCH
     set_stage("ASCEND_STAIRS");
     ensure_ui_closed()
     try:
@@ -4262,8 +4262,9 @@ def ascend_stairs_to_top(w):
 
     ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
     if not ok:
-        print("[STAIRS] go_w_to_y başarısız → town & retry");
-        send_town_command()
+        print("[STAIRS] go_w_to_y başarısız → RELAUNCH");
+        REQUEST_RELAUNCH = True
+        NEED_STAIRS_REALIGN = True
         return
 
     _finalize_top(_read_y_now())
@@ -5788,6 +5789,20 @@ def run_stairs_and_workflow(w):
             if _kb_pressed('f12'):
                 print("[LOOP] F12 iptal.")
                 return (False, False)
+
+            if REQUEST_RELAUNCH:
+                REQUEST_RELAUNCH = False
+                set_stage("EXIT_GAME")
+                try:
+                    exit_game_fast(w)
+                except Exception:
+                    pass
+                set_stage("RELAUNCH")
+                w = relaunch_and_login_to_ingame()
+                if not w:
+                    return (False, False)
+                NEED_STAIRS_REALIGN = True
+                continue
 
             if NEED_STAIRS_REALIGN:
                 set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
