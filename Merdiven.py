@@ -756,6 +756,9 @@ AUTO_BANK_PLUS8_DELAY = 30.0  # saniye; istersen değeri değiştir
 VALID_X_LEFT = {811, 812, 813};
 VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
+X_TOLERANS = 2
+X_OKUMA_ADET = 5
+X_OKUMA_GECIKME = 0.06
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -1263,6 +1266,64 @@ def _reset_invalid_x_recover_state():
         st["force_used"] = False
 
 
+def _yaklasik_valid_x(x):
+    try:
+        xi = int(x)
+    except Exception:
+        return None
+    if xi in VALID_X:
+        return xi
+    try:
+        tol = int(globals().get("X_TOLERANS", X_TOLERANS))
+    except Exception:
+        tol = X_TOLERANS
+    yakin = None
+    fark = None
+    try:
+        for vx in VALID_X:
+            df = abs(int(vx) - xi)
+            if fark is None or df < fark:
+                fark = df
+                yakin = vx
+    except Exception:
+        return None
+    if fark is not None and fark <= tol:
+        return yakin
+    return None
+
+
+def _is_valid_x(x) -> bool:
+    return _yaklasik_valid_x(x) is not None
+
+
+def _stabil_x_oku(w, adet=None):
+    try:
+        hedef = int(adet if adet is not None else globals().get("X_OKUMA_ADET", X_OKUMA_ADET))
+    except Exception:
+        hedef = X_OKUMA_ADET
+    try:
+        bekleme = float(globals().get("X_OKUMA_GECIKME", X_OKUMA_GECIKME))
+    except Exception:
+        bekleme = X_OKUMA_GECIKME
+    xs = []
+    son_y = None
+    for _ in range(max(1, hedef)):
+        try:
+            cx, cy = read_coordinates(w)
+        except Exception:
+            cx, cy = None, None
+        xs.append(cx)
+        if cy is not None:
+            son_y = cy
+        time.sleep(max(0.0, bekleme))
+    aday = None
+    sayilar = [int(v) for v in xs if isinstance(v, (int, float))]
+    if sayilar:
+        sayilar.sort()
+        aday = sayilar[len(sayilar) // 2]
+    return aday, son_y, xs
+
+
 def recover_from_invalid_x(w, cur_x, cur_y, samples=None):
     global _INVALID_X_RECOVER_STATE
     state = globals().get("_INVALID_X_RECOVER_STATE")
@@ -1333,7 +1394,7 @@ def recover_from_invalid_x(w, cur_x, cur_y, samples=None):
         new_x, _ny = read_coordinates(w)
     except Exception:
         new_x = None
-    if new_x in VALID_X:
+    if _is_valid_x(new_x):
         _reset_invalid_x_recover_state()
         return w
     now = time.time()
@@ -2323,6 +2384,17 @@ def _launcher_alive() -> bool:
     return False
 
 
+def _ko_surec_var_mi() -> bool:
+    try:
+        isimler = {str(n).lower() for n in (GAME_EXE_NAMES + ["KnightOnLine.exe", "KO.exe", "KO.exe"])}
+    except Exception:
+        isimler = {"knightonline.exe", "knightonLine.exe", "ko.exe"}
+    try:
+        return bool(_pids_by_image(isimler))
+    except Exception:
+        return False
+
+
 def _ensure_launcher_closed_strict(max_wait: float = 8.0):
     """Launcher'ı (pencere + süreç) kesin kapat. Yönetici gerekebilir."""
     start = time.time()
@@ -2475,6 +2547,23 @@ def ensure_knight_online_window(context: str = "", existing_window=None, focus: 
                                 attempts: int = 10, retry_delay: float = 1.0):
     """KO penceresini güvenle bulur, doğrular, odaklar ve gerekirse rect döndürür."""
     global _LAST_GAME_WINDOW
+    stage_now = str(globals().get("_current_stage", "") or "").upper()
+    exit_modu = stage_now == "EXIT_GAME" or str(context or "").lower().startswith("exit_game")
+    if exit_modu and (not _ko_surec_var_mi()) and (not _launcher_alive()):
+        try:
+            print("[EXIT] KO süreç yok, çıkış tamam.")
+        except Exception:
+            pass
+        try:
+            _reset_progress_state("exit_game_process_yok")
+        except Exception:
+            pass
+        try:
+            if stage_now == "EXIT_GAME":
+                set_stage("BOOT")
+        except Exception:
+            pass
+        return None, None
     win = existing_window or _LAST_GAME_WINDOW
     for step in range(1, int(attempts) + 1):
         _safe_watchdog()
@@ -2530,6 +2619,23 @@ def ensure_knight_online_window(context: str = "", existing_window=None, focus: 
             time.sleep(max(0.2, float(retry_delay)))
         except Exception:
             pass
+    stage_now = str(globals().get("_current_stage", "") or "").upper()
+    exit_modu = stage_now == "EXIT_GAME" or str(context or "").lower().startswith("exit_game")
+    if exit_modu:
+        try:
+            print("[EXIT] KO penceresi yok, çıkış tamam.")
+        except Exception:
+            pass
+        try:
+            _reset_progress_state("exit_game_window_missing")
+        except Exception:
+            pass
+        try:
+            if stage_now == "EXIT_GAME":
+                set_stage("BOOT")
+        except Exception:
+            pass
+        return None, None
     _maybe_stage_detail("[WINDOW] KO penceresi yok, güvenli bekleme moduna alındı.")
     try:
         _reset_progress_state("window_missing")
@@ -4069,17 +4175,18 @@ def town_until_valid_x(w):
     while True:
         wait_if_paused();
         watchdog_enforce()
-        try:
-            x, _ = read_coordinates(w)
-        except Exception:
-            x = None
-        if x in VALID_X: print(f"[ALIGN] Geçerli X: {x} (deneme={attempts})"); return x
+        x, _y, _samples = _stabil_x_oku(w)
+        yaklasik = _yaklasik_valid_x(x)
+        if yaklasik is not None: print(f"[ALIGN] Geçerli X: {yaklasik} (deneme={attempts})"); return yaklasik
         print(f"[ALIGN] X={x} geçersiz → town.");
         ensure_ui_closed();
         send_town_command();
         attempts += 1;
         set_stage("TOWN_ALIGN_FOR_VALID_X");
-        time.sleep(0.2)
+        try:
+            time.sleep(random.uniform(0.8, 1.2))
+        except Exception:
+            time.sleep(0.9)
         if attempts >= fail_attempts or (time.time() - t0) >= fail_timeout:
             print(f"[ALIGN] Fail-safe tetikledi (deneme={attempts}, süre={time.time() - t0:.1f}s) → çıkış.")
             set_stage("EXIT_GAME")
@@ -4136,7 +4243,7 @@ def ascend_stairs_to_top(w):
         x, _ = read_coordinates(w)
     except Exception:
         x = None
-    if x not in VALID_X: print("[STAIRS] X geçersiz → town hizala."); town_until_valid_x(w)
+    if not _is_valid_x(x): print("[STAIRS] X geçersiz → town hizala."); town_until_valid_x(w)
     target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
 
     def _finalize_top(y_val=None):
@@ -5719,35 +5826,21 @@ def run_stairs_and_workflow(w):
             if x is None or y is None:
                 continue
 
-            if x not in VALID_X:
-                samples = [(x, y)]
-                for _ in range(2):
-                    time.sleep(0.15)
-                    try:
-                        nx, ny = read_coordinates(w)
-                    except Exception:
-                        nx, ny = None, None
-                    samples.append((nx, ny))
-                valid_counts = {}
-                valid_y_map = {}
-                for vx, vy in samples:
-                    if vx in VALID_X:
-                        valid_counts[vx] = valid_counts.get(vx, 0) + 1
-                        valid_y_map[vx] = vy
-                chosen_x = None
-                if valid_counts:
-                    chosen_x = max(valid_counts.items(), key=lambda kv: kv[1])[0]
-                    if valid_counts.get(chosen_x, 0) >= 2:
-                        x = chosen_x
-                        y = valid_y_map.get(chosen_x, y)
-                        print(f"[CHECK] X yeniden okuma ile düzeldi: {x}")
-                        _reset_invalid_x_recover_state()
-                if x not in VALID_X:
-                    print(f"[CHECK] X={x} geçersiz → recovery.")
-                    w = recover_from_invalid_x(w, x, y, samples)
-                    continue
-                else:
+            if not _is_valid_x(x):
+                stab_x, stab_y, stab_samples = _stabil_x_oku(w)
+                yeni_x = _yaklasik_valid_x(stab_x)
+                if yeni_x is not None:
+                    x = yeni_x
+                    if stab_y is not None:
+                        y = stab_y
+                    print(f"[CHECK] X yeniden okuma ile düzeldi: {x}")
                     _reset_invalid_x_recover_state()
+                else:
+                    print(f"[CHECK] X={stab_x} geçersiz → recovery.")
+                    w = recover_from_invalid_x(w, x, y, [(sx, None) for sx in stab_samples])
+                    continue
+            else:
+                _reset_invalid_x_recover_state()
 
             start_x = x
             ascend_stairs_to_top(w)
