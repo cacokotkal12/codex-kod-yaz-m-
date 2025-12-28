@@ -73,7 +73,7 @@ def _read_y_now():
 
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
     random, \
-    sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser, statistics, queue
+    sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser, queue
 try:
     import pywintypes  # type: ignore
 except Exception:
@@ -957,15 +957,6 @@ MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
 MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
-# ---- Zaman Bazlı Final Yaklaşım ----
-ENABLE_TIMED_FINAL_APPROACH = bool(globals().get('ENABLE_TIMED_FINAL_APPROACH', True))
-TIMED_SPEED_MIN_SAMPLES = int(globals().get('TIMED_SPEED_MIN_SAMPLES', 5))
-TIMED_SPEED_WINDOW_SIZE = int(globals().get('TIMED_SPEED_WINDOW_SIZE', 8))
-TIMED_SAFETY_FACTOR = float(globals().get('TIMED_SAFETY_FACTOR', 0.90))
-TIMED_PRESS_MIN_SEC = float(globals().get('TIMED_PRESS_MIN_SEC', 0.05))
-TIMED_PRESS_MAX_SEC = float(globals().get('TIMED_PRESS_MAX_SEC', 3.50))
-TIMED_POST_RELEASE_SETTLE_SEC = float(globals().get('TIMED_POST_RELEASE_SETTLE_SEC', 0.03))
-TIMED_FINAL_DEBUG = bool(globals().get('TIMED_FINAL_DEBUG', False))
 # ---- Yürüme / Dönüş ----
 ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
@@ -4042,9 +4033,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     ensure_ui_closed();
     t0 = time.time();
     press_key(SC_W)
-    timed_samples: List[float] = []
-    last_val = None
-    last_ts = None
     try:
         while True:
             wait_if_paused();
@@ -4052,15 +4040,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
-            now = time.time()
-            if last_val is not None and cur != last_val and last_ts is not None:
-                dt = now - last_ts
-                if dt > 0:
-                    timed_samples.append(dt)
-                    if len(timed_samples) > max(1, TIMED_SPEED_WINDOW_SIZE):
-                        timed_samples.pop(0)
-            last_val = cur
-            last_ts = now
             if abs(target - cur) <= pre_brake_delta: break
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
@@ -4069,37 +4048,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     cur_after_brake = _read_axis(w, axis)
     if cur_after_brake is not None:
         cur = cur_after_brake
-    if bool(globals().get('ENABLE_TIMED_FINAL_APPROACH', ENABLE_TIMED_FINAL_APPROACH)) and len(
-            timed_samples) >= int(globals().get('TIMED_SPEED_MIN_SAMPLES', TIMED_SPEED_MIN_SAMPLES)):
-        unit_time = statistics.median(
-            timed_samples[-int(max(1, globals().get('TIMED_SPEED_WINDOW_SIZE', TIMED_SPEED_WINDOW_SIZE))):])
-        remaining = abs(int(target) - int(cur if cur is not None else target))
-        if unit_time > 0 and remaining > 0:
-            raw = remaining * unit_time
-            safety = float(globals().get('TIMED_SAFETY_FACTOR', TIMED_SAFETY_FACTOR))
-            press_sec = raw * safety
-            press_sec = max(float(globals().get('TIMED_PRESS_MIN_SEC', TIMED_PRESS_MIN_SEC)),
-                            min(press_sec, float(globals().get('TIMED_PRESS_MAX_SEC', TIMED_PRESS_MAX_SEC))))
-            if bool(globals().get('TIMED_FINAL_DEBUG', TIMED_FINAL_DEBUG)):
-                try:
-                    print(f"[PREC_TIMED] kalan={remaining} birim unit={unit_time:.4f}s raw={raw:.4f}s press={press_sec:.4f}s safety={safety}")
-                except Exception:
-                    pass
-            press_key(SC_W)
-            t_end = time.time() + press_sec
-            while time.time() < t_end:
-                wait_if_paused();
-                watchdog_enforce()
-                if _kb_pressed('f12'):
-                    release_key(SC_W)
-                    return False
-                time.sleep(0.02)
-            release_key(SC_W)
-            try:
-                time.sleep(float(globals().get('TIMED_POST_RELEASE_SETTLE_SEC', TIMED_POST_RELEASE_SETTLE_SEC)))
-            except Exception:
-                pass
-            cur = _read_axis(w, axis)
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
@@ -6617,38 +6565,6 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("KRALLIK_TIKLAMA_SURESI", "Krallık tıklama süresi", "Item Satış", "float",
                 _cfg_default("KRALLIK_TIKLAMA_SURESI", 0.05),
                 "Krallık tıklamasının basılı kalma süresi (sn)."),
-    ConfigField("ENABLE_TIMED_FINAL_APPROACH", "zamanli_final_yaklasim_aktif (ENABLE_TIMED_FINAL_APPROACH)",
-                "Hedefe Oturma (Zaman Bazli)", "bool",
-                _cfg_default("ENABLE_TIMED_FINAL_APPROACH", True),
-                "Fren sonrasi mikro W yerine sure bazli W basma kullanir."),
-    ConfigField("TIMED_SPEED_MIN_SAMPLES", "hiz_olcum_min_ornek (TIMED_SPEED_MIN_SAMPLES)",
-                "Hedefe Oturma (Zaman Bazli)", "int",
-                _cfg_default("TIMED_SPEED_MIN_SAMPLES", 5),
-                "Birim sure hesaplamak icin minimum ornek sayisi."),
-    ConfigField("TIMED_SPEED_WINDOW_SIZE", "hiz_olcum_pencere (TIMED_SPEED_WINDOW_SIZE)",
-                "Hedefe Oturma (Zaman Bazli)", "int",
-                _cfg_default("TIMED_SPEED_WINDOW_SIZE", 8),
-                "Son kac ornekten medyan hesaplanacak."),
-    ConfigField("TIMED_SAFETY_FACTOR", "sure_guvenlik_orani (TIMED_SAFETY_FACTOR)",
-                "Hedefe Oturma (Zaman Bazli)", "float",
-                _cfg_default("TIMED_SAFETY_FACTOR", 0.90),
-                "Hesaplanan sureyi carpip kisaltir. Ornek: 2.6 * 0.90 = 2.34. Tasma riskini azaltir."),
-    ConfigField("TIMED_PRESS_MIN_SEC", "sure_min_saniye (TIMED_PRESS_MIN_SEC)",
-                "Hedefe Oturma (Zaman Bazli)", "float",
-                _cfg_default("TIMED_PRESS_MIN_SEC", 0.05),
-                "Sure bunun altina dusmez."),
-    ConfigField("TIMED_PRESS_MAX_SEC", "sure_max_saniye (TIMED_PRESS_MAX_SEC)",
-                "Hedefe Oturma (Zaman Bazli)", "float",
-                _cfg_default("TIMED_PRESS_MAX_SEC", 3.50),
-                "Sure bunun ustune cikmaz (hata guvenligi)."),
-    ConfigField("TIMED_POST_RELEASE_SETTLE_SEC", "birakma_sonrasi_bekleme (TIMED_POST_RELEASE_SETTLE_SEC)",
-                "Hedefe Oturma (Zaman Bazli)", "float",
-                _cfg_default("TIMED_POST_RELEASE_SETTLE_SEC", 0.03),
-                "W biraktiktan sonra okuma oncesi bekleme."),
-    ConfigField("TIMED_FINAL_DEBUG", "zamanli_debug_log (TIMED_FINAL_DEBUG)",
-                "Hedefe Oturma (Zaman Bazli)", "bool",
-                _cfg_default("TIMED_FINAL_DEBUG", False),
-                "Sure hesaplarini ve kararlarini logla."),
 ]
 
 
@@ -9693,16 +9609,6 @@ try:
 
         # --- Güvenlik/Town ---
         "TOWN_MIN_INTERVAL_SEC": 1.2,
-
-        # --- Hedefe Oturma (Zaman Bazli) ---
-        "ENABLE_TIMED_FINAL_APPROACH": True,
-        "TIMED_SPEED_MIN_SAMPLES": 5,
-        "TIMED_SPEED_WINDOW_SIZE": 8,
-        "TIMED_SAFETY_FACTOR": 0.90,
-        "TIMED_PRESS_MIN_SEC": 0.05,
-        "TIMED_PRESS_MAX_SEC": 3.50,
-        "TIMED_POST_RELEASE_SETTLE_SEC": 0.03,
-        "TIMED_FINAL_DEBUG": False,
     }
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS, list) and FABRIC_STEPS:
