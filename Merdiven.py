@@ -1153,6 +1153,7 @@ REQUEST_RELAUNCH = False;
 BANK_OPEN = False;
 FORCE_PLUS7_ONCE = False
 NEED_STAIRS_REALIGN = True  # relaunch/yeniden giriş sonrası merdiven başlangıcı zorunlu
+_INVALID_X_RECOVER_STATE = {"start_ts": 0.0, "force_used": False}
 
 
 def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
@@ -1262,6 +1263,108 @@ def _stop_plus8_wait_notifier():
     if thr and thr.is_alive():
         thr.join(timeout=0.2)
     _PLUS8_WAIT_THREAD = None
+
+
+def _reset_invalid_x_recover_state():
+    st = globals().get("_INVALID_X_RECOVER_STATE")
+    if isinstance(st, dict):
+        st["start_ts"] = 0.0
+        st["force_used"] = False
+
+
+def recover_from_invalid_x(w, cur_x, cur_y, samples=None):
+    global _INVALID_X_RECOVER_STATE
+    state = globals().get("_INVALID_X_RECOVER_STATE")
+    if not isinstance(state, dict):
+        state = {"start_ts": 0.0, "force_used": False}
+    now = time.time()
+    if not state.get("start_ts"):
+        state["start_ts"] = now
+    else:
+        if (now - state.get("start_ts", 0.0)) > 60:
+            state["start_ts"] = now
+            state["force_used"] = False
+    duration = now - state.get("start_ts", now)
+    actions = ["ensure_front"]
+    try:
+        w_front = bring_game_window_to_front()
+        if w_front:
+            w = w_front
+    except Exception:
+        pass
+    ensure_ui_closed()
+    y_val = cur_y if cur_y is not None else _read_y_now()
+    try:
+        _set_town_lock_by_y(y_val)
+    except Exception:
+        pass
+    try:
+        top_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
+    except Exception:
+        top_y = STAIRS_TOP_Y
+    if y_val is not None:
+        try:
+            if int(y_val) in (top_y, top_y - 1):
+                actions.append("post_598_to_597")
+                try:
+                    post_598_to_597()
+                    y_val = _read_y_now()
+                    _set_town_lock_by_y(y_val)
+                except Exception as e:
+                    print("[RECOVER] 598→597 hata:", e)
+        except Exception:
+            pass
+    force_once = bool(duration >= 10.0 and not state.get("force_used", False))
+    if force_once and globals().get("TOWN_LOCKED", False):
+        actions.append("force_town_once")
+        _town_log_once("[TOWN] Kilit aktif ama force=True ile tek sefer deneniyor")
+        try:
+            _logger.info("[TOWN] Kilit aktif ama force=True ile tek sefer deneniyor")
+        except Exception:
+            pass
+        send_town_command(force=True)
+        state["force_used"] = True
+    actions.append("town_until_valid_x")
+    log_line = f"[RECOVER] X invalid ({cur_x}), Y={y_val} -> " + " -> ".join(actions)
+    try:
+        print(log_line)
+    except Exception:
+        pass
+    try:
+        _logger.info(log_line)
+    except Exception:
+        pass
+    try:
+        town_until_valid_x(w)
+    except Exception as e:
+        print("[RECOVER] town_until_valid_x hata:", e)
+    try:
+        new_x, _ny = read_coordinates(w)
+    except Exception:
+        new_x = None
+    if new_x in VALID_X:
+        _reset_invalid_x_recover_state()
+        return w
+    now = time.time()
+    if (now - state.get("start_ts", now)) >= 25.0:
+        try:
+            print("[RECOVER] Fail-safe: süre doldu → çıkış ve relaunch.")
+        except Exception:
+            pass
+        try:
+            exit_game_fast(w)
+        except Exception as e:
+            print("[RECOVER] exit_game_fast hata:", e)
+        try:
+            new_w = relaunch_and_login_to_ingame()
+            if new_w:
+                w = new_w
+        except Exception as e:
+            print("[RECOVER] relaunch hata:", e)
+        state["start_ts"] = time.time()
+        state["force_used"] = False
+    _INVALID_X_RECOVER_STATE = state
+    return w
 
 
 _REMOTE_START8_TRIGGER = False
@@ -1896,6 +1999,7 @@ def _telegram_pin_ok(cmd_text: str) -> bool:
 
 def _telegram_command_listener_loop():
     global _TELEGRAM_UPDATE_OFFSET
+    backoff_time = 1.0
     while not _TELEGRAM_CMD_STOP.is_set():
         if requests is None:
             _TELEGRAM_CMD_STOP.wait(5.0)
@@ -1905,18 +2009,25 @@ def _telegram_command_listener_loop():
         if not token or not chat_id:
             _TELEGRAM_CMD_STOP.wait(5.0)
             continue
-        params = {"timeout": 10}
+        params = {"timeout": 8}
         if _TELEGRAM_UPDATE_OFFSET is not None:
             params["offset"] = _TELEGRAM_UPDATE_OFFSET
         try:
-            resp = requests.get(f"https://api.telegram.org/bot{token}/getUpdates", params=params, timeout=15)
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params=params,
+                timeout=(5, 10),
+            )
             if not resp.ok:
-                time.sleep(1.0)
+                _TELEGRAM_CMD_STOP.wait(backoff_time)
+                backoff_time = min(backoff_time * 2, 30.0)
                 continue
             data = resp.json() if hasattr(resp, "json") else {}
+            backoff_time = 1.0
         except Exception as exc:
             print(f"[TELEGRAM] Komut dinleme hata: {exc}")
-            time.sleep(1.0)
+            _TELEGRAM_CMD_STOP.wait(backoff_time)
+            backoff_time = min(backoff_time * 2, 30.0)
             continue
         updates = data.get("result", []) if isinstance(data, dict) else []
         for upd in updates:
@@ -1942,7 +2053,7 @@ def _telegram_command_listener_loop():
                 _set_remote_start8_trigger()
                 send_telegram_message("Komut alındı, +8 başlatılıyor.")
         if not updates:
-            time.sleep(0.5)
+            _TELEGRAM_CMD_STOP.wait(0.5)
 
 
 def _start_telegram_command_listener():
@@ -4159,22 +4270,36 @@ def move_to_769_and_turn_from_top(w):
     return True
 
 
-def send_town_command(*a, **kw):
+def send_town_command(*a, force=False, **kw):
     # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
     global TOWN_LOCKED, BANK_OPEN
     # [YAMA] HardLock aktifse town tamamen kapalı
     if globals().get('TOWN_HARD_LOCK', False):
         _town_log_once('[TOWN] HardLock aktif — komut iptal.')
+        try:
+            _logger.info("[TOWN] HardLock aktif — komut iptal.")
+        except Exception:
+            pass
         return False
     y_now = _read_y_now();
     _set_town_lock_by_y(y_now)
-    if TOWN_LOCKED:
+    if TOWN_LOCKED and not force:
         _town_log_once('[TOWN] Kilit aktif (Y=598) — komut iptal edildi')
+        try:
+            _logger.info("[TOWN] Kilit aktif (Y=598) — komut iptal edildi")
+        except Exception:
+            pass
         return False
+    if TOWN_LOCKED and force:
+        try:
+            _logger.info("[TOWN] Kilit aktif ama force=True — tek sefer izin veriliyor")
+        except Exception:
+            pass
     mouse_move(*TOWN_CLICK_POS);
     mouse_click('left');
     time.sleep(TOWN_WAIT)
     BANK_OPEN = False
+    return True
 
 
 # ================== Storage / Banka Sayfa ==================
@@ -5647,9 +5772,34 @@ def run_stairs_and_workflow(w):
                 continue
 
             if x not in VALID_X:
-                print(f"[CHECK] X={x} geçersiz → town.")
-                send_town_command()
-                continue
+                samples = [(x, y)]
+                for _ in range(2):
+                    time.sleep(0.15)
+                    try:
+                        nx, ny = read_coordinates(w)
+                    except Exception:
+                        nx, ny = None, None
+                    samples.append((nx, ny))
+                valid_counts = {}
+                valid_y_map = {}
+                for vx, vy in samples:
+                    if vx in VALID_X:
+                        valid_counts[vx] = valid_counts.get(vx, 0) + 1
+                        valid_y_map[vx] = vy
+                chosen_x = None
+                if valid_counts:
+                    chosen_x = max(valid_counts.items(), key=lambda kv: kv[1])[0]
+                    if valid_counts.get(chosen_x, 0) >= 2:
+                        x = chosen_x
+                        y = valid_y_map.get(chosen_x, y)
+                        print(f"[CHECK] X yeniden okuma ile düzeldi: {x}")
+                        _reset_invalid_x_recover_state()
+                if x not in VALID_X:
+                    print(f"[CHECK] X={x} geçersiz → recovery.")
+                    w = recover_from_invalid_x(w, x, y, samples)
+                    continue
+                else:
+                    _reset_invalid_x_recover_state()
 
             start_x = x
             ascend_stairs_to_top(w)
@@ -8860,7 +9010,7 @@ if not _TOWN_WRAPPED:
 
 
     def _wrap_town_like():
-        names = ('town', 'go_town', 'cast_town', 'send_town', 'do_town')
+        names = ('town', 'go_town', 'cast_town', 'send_town', 'do_town', 'send_town_command')
         wrapped_any = False
         for nm in names:
             orig = globals().get(nm, None)
