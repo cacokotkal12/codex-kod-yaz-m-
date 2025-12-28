@@ -805,6 +805,10 @@ def _choose_server_xy():
 HP_POINTS = [(185, 68), (218, 74)];
 HP_RED_MIN = 120.0;
 HP_RED_DELTA = 35.0
+MARKET_TEMPLATE_PATH = "market.png"
+MARKET_ROI = (14, 759, 50, 792)
+MARKET_THRESHOLD = 0.80
+MARKET_SCALES = (0.90, 1.00, 1.10)
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
@@ -3064,7 +3068,7 @@ def _wait_start_transition(win, templates, scales, timeout):
         if _EMPTY_BANK_STOP_EVENT.is_set():
             break
         try:
-            if _ingame_by_hpbar_once(win):
+            if is_ingame(win):
                 return True
         except Exception:
             pass
@@ -5058,7 +5062,7 @@ def safe_press_enter_if_not_ingame(w):
         print("[ENTER] Pencere bulunamadı.")
         return False
     try:
-        if _ingame_by_hpbar_once(w): print("[ENTER] Oyundayız."); return False
+        if is_ingame(w): print("[ENTER] Oyundayız."); return False
     except Exception as exc:
         if _is_win_error_1400(exc):
             _handle_win1400_recovery("safe_press_enter_if_not_ingame", "reset_hwnd refind_window retry=1/2", 1, 2)
@@ -5103,6 +5107,49 @@ def _ingame_by_hpbar_once(win):
     return _is_red(rgb1) and _is_red(rgb2)
 
 
+def _market_icon_score(win):
+    try:
+        w, rect = ensure_knight_online_window("_market_icon_score", existing_window=win, focus=False, want_rect=True,
+                                              attempts=3, retry_delay=0.5)
+        if (not w) or rect is None:
+            return 0.0
+        x1 = int(rect[0] + MARKET_ROI[0]);
+        y1 = int(rect[1] + MARKET_ROI[1]);
+        x2 = int(rect[0] + MARKET_ROI[2]);
+        y2 = int(rect[1] + MARKET_ROI[3]);
+        img = ImageGrab.grab(bbox=(x1, y1, x2, y2));
+        hay = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        tmpl_path = resource_path(MARKET_TEMPLATE_PATH) if os.path.exists(resource_path(MARKET_TEMPLATE_PATH)) else MARKET_TEMPLATE_PATH
+        tmpl = cv2.imread(tmpl_path, cv2.IMREAD_GRAYSCALE)
+        if tmpl is None:
+            return 0.0
+        score, _, _ = match_template_multiscale(hay, tmpl, MARKET_SCALES);
+        return float(score)
+    except Exception:
+        return 0.0
+
+
+def is_ingame(win):
+    hp_ok = False;
+    market_score = 0.0;
+    market_ok = False
+    try:
+        hp_ok = _ingame_by_hpbar_once(win)
+    except Exception:
+        hp_ok = False
+    try:
+        market_score = _market_icon_score(win)
+        market_ok = market_score >= float(MARKET_THRESHOLD)
+    except Exception:
+        market_score = 0.0;
+        market_ok = False
+    try:
+        print(f"[INGAME] HP={hp_ok} Market={market_score:.3f} → {'OK' if (hp_ok or market_ok) else 'BEKLE'}")
+    except Exception:
+        pass
+    return hp_ok or market_ok
+
+
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
     set_stage("LOADING_TO_INGAME");
     print("[WAIT] HP bar bekleniyor.")
@@ -5123,7 +5170,7 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
             _window_retry_message(1, 3)
             time.sleep(poll)
             continue
-        if _ingame_by_hpbar_once(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
+        if is_ingame(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
         if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
             w); last_enter = time.time()
         time.sleep(poll)
