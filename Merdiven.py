@@ -4183,61 +4183,61 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     slow_hit = False
     if slow_mode_enabled:
         try:
-            print("[WALK] pre_brake yakalandı → Y slow ON")
-        except Exception:
-            pass
-        _toggle_y_slow()
-        press_key(SC_W);
-        w_down = True
-        while True:
-            wait_if_paused();
-            if _consume_pause_release():
+            try:
+                print("[WALK] pre_brake yakalandı → Y slow ON")
+            except Exception:
+                pass
+            _toggle_y_slow()
+            press_key(SC_W);
+            w_down = True
+            while True:
+                wait_if_paused();
+                if _consume_pause_release():
+                    w_down = False
+                    press_key(SC_W);
+                    w_down = True
+                watchdog_enforce()
+                if _kb_pressed('f12'):
+                    if w_down:
+                        release_key(SC_W)
+                        w_down = False
+                    _ensure_y_off()
+                    return False
+                cur = _read_axis(w, axis)
+                if cur is None:
+                    time.sleep(MICRO_READ_DELAY)
+                    continue
+                if cur == target:
+                    if w_down:
+                        release_key(SC_W)
+                        w_down = False
+                    try:
+                        print("[WALK] target görüldü → W stop + Y slow OFF")
+                    except Exception:
+                        pass
+                    slow_hit = True
+                    break
+                if (direction == 1 and cur > target) or (direction == -1 and cur < target):
+                    if w_down:
+                        release_key(SC_W)
+                        w_down = False
+                    try:
+                        print("[WALK] overshoot → mikro düzeltme")
+                    except Exception:
+                        pass
+                    break
+                if (time.time() - t0) > timeout:
+                    if w_down:
+                        release_key(SC_W)
+                        w_down = False
+                    print(f"[PREC] timeout slow cur={cur} target={target}")
+                    return False
+                time.sleep(0.02)
+        finally:
+            if w_down:
+                release_key(SC_W)
                 w_down = False
-                press_key(SC_W);
-                w_down = True
-            watchdog_enforce()
-            if _kb_pressed('f12'):
-                if w_down:
-                    release_key(SC_W)
-                    w_down = False
-                _ensure_y_off()
-                return False
-            cur = _read_axis(w, axis)
-            if cur is None:
-                time.sleep(MICRO_READ_DELAY)
-                continue
-            if cur == target:
-                if w_down:
-                    release_key(SC_W)
-                    w_down = False
-                try:
-                    print("[WALK] target görüldü → W stop + Y slow OFF")
-                except Exception:
-                    pass
-                _ensure_y_off()
-                slow_hit = True
-                break
-            if (direction == 1 and cur > target) or (direction == -1 and cur < target):
-                if w_down:
-                    release_key(SC_W)
-                    w_down = False
-                try:
-                    print("[WALK] overshoot → mikro düzeltme")
-                except Exception:
-                    pass
-                _ensure_y_off()
-                break
-            if (time.time() - t0) > timeout:
-                if w_down:
-                    release_key(SC_W)
-                    w_down = False
-                _ensure_y_off()
-                print(f"[PREC] timeout slow cur={cur} target={target}")
-                return False
-            time.sleep(0.02)
-        if w_down:
-            release_key(SC_W)
-            w_down = False
+            _ensure_y_off()
     else:
         _ensure_y_off()
 
