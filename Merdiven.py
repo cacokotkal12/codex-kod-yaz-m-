@@ -73,7 +73,7 @@ def _read_y_now():
 
 import time, re, os, json, subprocess, ctypes, pyautogui, pytesseract, pygetwindow as gw, keyboard, cv2, numpy as np, \
     random, \
-    sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser, statistics
+    sys, atexit, traceback, logging, functools, copy, math, threading, webbrowser, statistics, queue
 try:
     import pywintypes  # type: ignore
 except Exception:
@@ -380,6 +380,122 @@ _logger.setLevel(logging.DEBUG)
 _handler = RotatingFileHandler(os.path.join(LOG_DIR, "macro.log"), maxBytes=2_000_000, backupCount=5, encoding="utf-8")
 _handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(message)s"))
 _logger.addHandler(_handler)
+_GUI_LOG_QUEUE = None
+_GUI_LOG_HANDLER = None
+_GUI_LOG_FORMATTER = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
+_ORIGINAL_STDOUT = sys.stdout
+_ORIGINAL_STDERR = sys.stderr
+
+
+def _push_gui_log(msg: str):
+    q = globals().get("_GUI_LOG_QUEUE")
+    if q is None:
+        return
+    try:
+        q.put_nowait(str(msg))
+    except Exception:
+        pass
+
+
+class _GuiQueueHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+        except Exception:
+            try:
+                msg = record.getMessage()
+            except Exception:
+                msg = ""
+        _push_gui_log(msg)
+
+
+class _GUIStreamRedirect:
+    def __init__(self, orig, seviye="INFO"):
+        self.orig = orig
+        self.seviye = seviye
+        self._is_gui_redirect = True
+
+    def write(self, data):
+        try:
+            text = str(data)
+        except Exception:
+            text = ""
+        if text:
+            for satir in text.splitlines():
+                if satir.strip():
+                    try:
+                        ts = time.strftime("%H:%M:%S")
+                        _push_gui_log(f"{ts} [{self.seviye}] {satir}")
+                    except Exception:
+                        pass
+        try:
+            self.orig.write(data)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self.orig.flush()
+        except Exception:
+            pass
+
+
+def _attach_gui_log_handler():
+    global _GUI_LOG_HANDLER
+    if _GUI_LOG_HANDLER:
+        return
+    try:
+        h = _GuiQueueHandler()
+        h.setFormatter(_GUI_LOG_FORMATTER)
+        _logger.addHandler(h)
+        _GUI_LOG_HANDLER = h
+    except Exception:
+        _GUI_LOG_HANDLER = None
+
+
+def _redirect_streams_to_gui():
+    global _ORIGINAL_STDOUT, _ORIGINAL_STDERR
+    try:
+        if not getattr(sys.stdout, "_is_gui_redirect", False):
+            _ORIGINAL_STDOUT = sys.stdout
+            sys.stdout = _GUIStreamRedirect(sys.stdout, "INFO")
+    except Exception:
+        pass
+    try:
+        if not getattr(sys.stderr, "_is_gui_redirect", False):
+            _ORIGINAL_STDERR = sys.stderr
+            sys.stderr = _GUIStreamRedirect(sys.stderr, "ERROR")
+    except Exception:
+        pass
+
+
+def _enable_gui_logging(queue_obj):
+    global _GUI_LOG_QUEUE
+    _GUI_LOG_QUEUE = queue_obj
+    _attach_gui_log_handler()
+    _redirect_streams_to_gui()
+
+
+def _disable_gui_logging(queue_obj=None):
+    global _GUI_LOG_QUEUE, _GUI_LOG_HANDLER
+    if queue_obj is None or queue_obj is _GUI_LOG_QUEUE:
+        _GUI_LOG_QUEUE = None
+    try:
+        if getattr(sys.stdout, "_is_gui_redirect", False):
+            sys.stdout = _ORIGINAL_STDOUT
+    except Exception:
+        pass
+    try:
+        if getattr(sys.stderr, "_is_gui_redirect", False):
+            sys.stderr = _ORIGINAL_STDERR
+    except Exception:
+        pass
+    if _GUI_LOG_HANDLER:
+        try:
+            _logger.removeHandler(_GUI_LOG_HANDLER)
+        except Exception:
+            pass
+        _GUI_LOG_HANDLER = None
 
 
 def log(msg, lvl="info"): getattr(_logger, lvl, _logger.info)(msg)
@@ -1931,6 +2047,12 @@ def _handle_runtime_error(exc: Exception, context: str, window=None):
     except Exception:
         pass
     print(f"[ERROR] {context}: {brief}")
+    try:
+        q = globals().get("_GUI_STAGE_QUEUE")
+        if q is not None:
+            q.append(f"HATA: {brief}")
+    except Exception:
+        pass
     try:
         _notify_error_telegram_once(f"❌ Makro hata verdi ({context}): {brief}")
     except Exception:
@@ -7341,7 +7463,7 @@ def _MERDIVEN_RUN_GUI():
     import sys, json, threading
     try:
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import ttk, scrolledtext
     except Exception as e:
         print("[GUI] Tkinter yok/başlatılamadı:", e)
         return False
@@ -7356,6 +7478,8 @@ def _MERDIVEN_RUN_GUI():
             self._apply_initial_geometry()
             self.stage = tk.StringVar(value="Hazır");
             self.stage_log = []
+            self._log_satirlar = []
+            self._log_kuyruk = queue.Queue(maxsize=4000)
             self.caps_status_text = tk.StringVar(value="")
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
@@ -7462,6 +7586,10 @@ def _MERDIVEN_RUN_GUI():
                 pass
             self._hook_stage();
             try:
+                _enable_gui_logging(self._log_kuyruk)
+            except Exception:
+                pass
+            try:
                 m._GUI_UPDATE_SALE_SLOT = self._update_sale_slot
             except Exception:
                 pass
@@ -7470,6 +7598,7 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
             self._refresh_stats_vars()
+            self._baslat_log_cek()
             self._tick()
             self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -7723,6 +7852,16 @@ def _MERDIVEN_RUN_GUI():
                     m._GUI_STAGE_DETAIL = None
             except Exception:
                 m._GUI_STAGE_DETAIL = None
+            try:
+                queue_obj = getattr(self, "_stage_queue", None)
+                if queue_obj is not None and getattr(m, "_GUI_STAGE_QUEUE", None) is queue_obj:
+                    m._GUI_STAGE_QUEUE = None
+            except Exception:
+                pass
+            try:
+                _disable_gui_logging(getattr(self, "_log_kuyruk", None))
+            except Exception:
+                pass
             self.root.destroy()
 
         # ---- set_stage hook'u GUI'ye bağla ----
@@ -7730,6 +7869,10 @@ def _MERDIVEN_RUN_GUI():
             # Thread-safe: set_stage -> kuyruk, Tk güncellemesi ana thread
             import collections
             self._stage_queue = collections.deque(maxlen=200)
+            try:
+                m._GUI_STAGE_QUEUE = self._stage_queue
+            except Exception:
+                pass
             try:
                 _orig = m.set_stage
 
@@ -8129,6 +8272,12 @@ def _MERDIVEN_RUN_GUI():
             ttk.Label(f5, text="Son 30 Aşama:").pack(anchor="w", padx=6, pady=6)
             self.lb = tk.Listbox(f5, height=14);
             self.lb.pack(fill="both", expand=True, padx=8, pady=4)
+            lf_log = ttk.LabelFrame(f5, text="Detayli Log")
+            lf_log.pack(fill="both", expand=True, padx=8, pady=6)
+            self.log_text = scrolledtext.ScrolledText(lf_log, height=12, state="disabled", wrap="none")
+            self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+            ttk.Button(lf_log, text="Loglari Temizle", command=self._temizle_log).pack(anchor="e", padx=8,
+                                                                                       pady=(0, 6))
 
             # --- Hız/Anvil/PREC 598 (sekme) ---
             try:
@@ -8151,6 +8300,57 @@ def _MERDIVEN_RUN_GUI():
             if hasattr(self, "lb"):
                 self.lb.delete(0, "end")
                 for x in self.stage_log[-30:]: self.lb.insert("end", x)
+
+        def _ekle_log_satir(self, satir):
+            try:
+                s = str(satir)
+            except Exception:
+                s = ""
+            if not s:
+                return
+            self._log_satirlar.append(s)
+            if len(self._log_satirlar) > 2000:
+                self._log_satirlar = self._log_satirlar[-2000:]
+            try:
+                if hasattr(self, "log_text"):
+                    self.log_text.configure(state="normal")
+                    if len(self._log_satirlar) >= 2000:
+                        self.log_text.delete("1.0", "end")
+                        self.log_text.insert("end", "\n".join(self._log_satirlar) + "\n")
+                    else:
+                        self.log_text.insert("end", s + "\n")
+                    self.log_text.see("end")
+                    self.log_text.configure(state="disabled")
+            except Exception:
+                pass
+
+        def _baslat_log_cek(self):
+            def _drain_log():
+                try:
+                    q = getattr(self, "_log_kuyruk", None)
+                    while q is not None and not q.empty():
+                        try:
+                            satir = q.get_nowait()
+                        except Exception:
+                            break
+                        self._ekle_log_satir(satir)
+                finally:
+                    self.root.after(150, _drain_log)
+
+            _drain_log()
+
+        def _temizle_log(self):
+            try:
+                self._log_satirlar = []
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "log_text"):
+                    self.log_text.configure(state="normal")
+                    self.log_text.delete("1.0", "end")
+                    self.log_text.configure(state="disabled")
+            except Exception:
+                pass
 
         # ---- Gelişmiş alan listesi ----
         def _is_editable(self, name, val):
