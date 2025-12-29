@@ -963,6 +963,8 @@ except Exception as _e:
     print('[MikroAdim] sabit denetimi uyarı:', _e)
 
 PRE_BRAKE_DELTA = 2;
+PREC_NO_W_PULSE = True
+PREC_NO_W_PULSE_SETTLE_HITS = 2
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
@@ -4389,8 +4391,16 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     assert axis in ('x', 'y');
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
+    no_pulse = bool(globals().get('PREC_NO_W_PULSE', False))
+    no_pulse_hits = int(globals().get('PREC_NO_W_PULSE_SETTLE_HITS', settle_hits))
     t0 = time.time();
     press_key(SC_W)
+    in_band = 0
+    if no_pulse:
+        try:
+            print(f"[PREC] NO_PULSE aktif (axis={axis.upper()} target={target} delta={pre_brake_delta} hits={no_pulse_hits})")
+        except Exception:
+            pass
     try:
         while True:
             wait_if_paused();
@@ -4398,11 +4408,27 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
-            if abs(target - cur) <= pre_brake_delta: break
-            if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
+            if no_pulse:
+                in_band = in_band + 1 if abs(target - cur) <= pre_brake_delta else 0
+                if in_band >= no_pulse_hits: break
+            else:
+                if abs(target - cur) <= pre_brake_delta: break
+            if (time.time() - t0) > timeout:
+                if no_pulse:
+                    print(f"[PREC] timeout (NO_PULSE) cur={cur} target={target}")
+                else:
+                    print(f"[PREC] timeout pre-brake cur={cur} target={target}")
+                return False
             time.sleep(0.03)
     finally:
         release_key(SC_W)
+    if no_pulse:
+        cur_after = _read_axis(w, axis)
+        if cur_after is not None:
+            cur = cur_after
+        ok = abs((cur or target) - target) <= pre_brake_delta if force_exact else True
+        print(f"[PREC] Son (NO_PULSE): axis={axis} cur≈{cur} target={target} ok={ok}")
+        return ok
     cur_after_brake = _read_axis(w, axis)
     if cur_after_brake is not None:
         cur = cur_after_brake
