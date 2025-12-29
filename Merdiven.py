@@ -2163,6 +2163,7 @@ def _stop_empty_bank_notifier():
             pass
     _EMPTY_BANK_THREAD = None
     _EMPTY_BANK_LAST_SEND_TS = 0.0
+    _EMPTY_BANK_STOP_EVENT.clear()
 
 
 def _trigger_empty_bank_notifications(message: str):
@@ -3380,7 +3381,7 @@ def _wait_start_transition(win, templates, scales, timeout):
     deadline = time.time() + timeout
     has_templates = bool(templates)
     while time.time() < deadline:
-        if _EMPTY_BANK_STOP_EVENT.is_set():
+        if _abort_requested():
             break
         try:
             if is_ingame(win):
