@@ -2888,14 +2888,13 @@ def read_coordinates(window):
             left, top, _r, _b = rect
             bbox = (left + 104, top + 102, left + 160, top + 120)
             img = ImageGrab.grab(bbox);
-            gray = img.convert('L').resize((int(img.width * 1.5), int(img.height * 1.5)))
+            gray = img.convert('L').resize((int(img.width * 1.3), int(img.height * 1.3)))
             TOWN_LOCKED = False
             _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
             TOWN_LOCKED = False
             _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
             gray = ImageEnhance.Contrast(gray).enhance(3.0);
-            gray = gray.filter(ImageFilter.SHARPEN)
-            cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
+            cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1';
             text = pytesseract.image_to_string(gray, config=cfg).strip()
             parts = re.split(r'[,.\s]+', text);
             nums = [p for p in parts if p.isdigit()]
