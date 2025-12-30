@@ -6235,26 +6235,8 @@ try:
         return default
 
 
-    def _save_buy_mode(m):
-        try:
-            with open(_BUY_CFG, 'w', encoding='utf-8') as f:
-                json.dump({'BUY_MODE': m}, f, ensure_ascii=False)
-        except Exception as e:
-            print('[BUY_MODE] yazma uyarı:', e)
-
-
     BUY_MODE = _load_buy_mode(BUY_MODE)
     print(f"[BUY_MODE] başlangıç: {BUY_MODE}")
-    _OLD__set_buy_mode = globals().get('_set_buy_mode')
-
-
-    def _set_buy_mode(mode: str):
-        global BUY_MODE
-        if mode not in ('FABRIC', 'LINEN'): return
-        if BUY_MODE != mode:
-            BUY_MODE = mode;
-            _save_buy_mode(BUY_MODE);
-            print(f"[BUY_MODE] -> {BUY_MODE}")
 except Exception as e:
     print('[BUY_MODE] persist init uyarı:', e)
 FABRIC_STEPS = [((686, 290), 2, "right"), ((736, 290), 2, "right"), ((786, 290), 3, "right"), ((836, 290), 3, "right"),
