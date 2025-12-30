@@ -2876,8 +2876,10 @@ def perform_login_inputs(w):
 def read_coordinates(window):
     """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
     attempts = 0
-    while attempts < 2:
+    extra_retry = False
+    while (attempts < 1) or extra_retry:
         attempts += 1
+        extra_retry = False
         w, rect = ensure_knight_online_window("read_coordinates", existing_window=window, focus=False, want_rect=True,
                                               attempts=5, retry_delay=0.6)
         if not w or rect is None:
@@ -2886,13 +2888,13 @@ def read_coordinates(window):
             left, top, _r, _b = rect
             bbox = (left + 104, top + 102, left + 160, top + 120)
             img = ImageGrab.grab(bbox);
-            gray = img.convert('L').resize((img.width * 2, img.height * 2))
+            gray = img.convert('L').resize((int(img.width * 1.5), int(img.height * 1.5)))
             TOWN_LOCKED = False
             _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
             TOWN_LOCKED = False
             _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
             gray = ImageEnhance.Contrast(gray).enhance(3.0);
-            gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
+            gray = gray.filter(ImageFilter.SHARPEN)
             cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
             text = pytesseract.image_to_string(gray, config=cfg).strip()
             parts = re.split(r'[,.\s]+', text);
@@ -2904,7 +2906,9 @@ def read_coordinates(window):
         except Exception as exc:
             if _is_win_error_1400(exc):
                 _handle_win1400_recovery("read_coordinates", "reset_hwnd refind_window retry=1/2", attempts, 2)
-                continue
+                if attempts < 2:
+                    extra_retry = True
+                    continue
             else:
                 raise
     return None, None
