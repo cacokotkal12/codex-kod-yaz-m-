@@ -757,8 +757,8 @@ VALID_X_LEFT = {811, 812, 813};
 VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 2
-X_OKUMA_ADET = 3
-X_OKUMA_GECIKME = 0.03
+X_OKUMA_ADET = 5
+X_OKUMA_GECIKME = 0.06
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -816,10 +816,7 @@ GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
 GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
 GAME_START_FALLBACK_RELATIVE_POS = (906, 600)
 GAME_START_VERIFY_TIMEOUT = 12.0
-GAME_START_VERIFY_MIN_TIMEOUT = 22.0
-GAME_START_GRACE_PERIOD = 1.6
-GAME_START_TEMPLATE_ROI = (839, 575, 974, 623)
-TEMPLATE_EXTRA_CLICK_POS = (896, 596)
+TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 giris_enter = 0.5
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
@@ -931,10 +928,6 @@ MARKET_TEMPLATE_PATH = "market.png"
 MARKET_ROI = (14, 759, 50, 792)
 MARKET_THRESHOLD = 0.80
 MARKET_SCALES = (0.90, 1.00, 1.10)
-HUD_ICON_ROI = (10, 748, 70, 804)
-HUD_ICON_MEAN_THRESHOLD = 38.0
-COORD_STABLE_REQUIRED = 2
-COORD_STABLE_SPREAD = 5
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
@@ -963,8 +956,6 @@ except Exception as _e:
     print('[MikroAdim] sabit denetimi uyarı:', _e)
 
 PRE_BRAKE_DELTA = 2;
-PREC_NO_W_PULSE = True
-PREC_NO_W_PULSE_SETTLE_HITS = 2
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
@@ -2172,7 +2163,6 @@ def _stop_empty_bank_notifier():
             pass
     _EMPTY_BANK_THREAD = None
     _EMPTY_BANK_LAST_SEND_TS = 0.0
-    _EMPTY_BANK_STOP_EVENT.clear()
 
 
 def _trigger_empty_bank_notifications(message: str):
@@ -2883,101 +2873,6 @@ def perform_login_inputs(w):
 
 # ---- NOT: Aşağıdaki büyük bloklar (OCR, template, upgrade, hover OCR, storage, rota, relaunch+main) Parça 2'de. ----
 # ================== OCR / INV / UPG Yardımcıları ==================
-_COORD_DIGIT_TEMPLATES = None
-
-
-def _coord_digit_templates():
-    global _COORD_DIGIT_TEMPLATES
-    if _COORD_DIGIT_TEMPLATES is not None:
-        return _COORD_DIGIT_TEMPLATES
-    templates = []
-    try:
-        for ch in "0123456789":
-            canv = np.zeros((26, 18), dtype=np.uint8)
-            cv2.putText(canv, ch, (1, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.9, 255, 2, cv2.LINE_AA)
-            templates.append((ch, canv.copy()))
-    except Exception:
-        templates = []
-    _COORD_DIGIT_TEMPLATES = templates
-    return _COORD_DIGIT_TEMPLATES
-
-
-def _capture_coord_roi_gray(sol, ust):
-    x1 = sol + 104;
-    y1 = ust + 102;
-    x2 = sol + 160;
-    y2 = ust + 120
-    if mss is not None:
-        try:
-            import numpy as _np
-            with mss.mss() as sct:
-                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-                im = _np.array(sct.grab(mon))[:, :, :3]
-                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        except Exception:
-            pass
-    img = ImageGrab.grab(bbox=(x1, y1, x2, y2));
-    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
-
-
-def _fast_coord_from_gray(gray_roi):
-    templates = _coord_digit_templates()
-    if gray_roi is None or gray_roi.size == 0 or not templates:
-        return None
-    try:
-        scaled = cv2.resize(gray_roi, (gray_roi.shape[1] * 2, gray_roi.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
-        _th, bin_img = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    except Exception:
-        return None
-    contours, _hier = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    boxes = sorted([cv2.boundingRect(c) for c in contours if cv2.contourArea(c) >= 8], key=lambda b: b[0])
-    chars = []
-    for (x, y, w, h) in boxes:
-        if h < 10 or w < 4:
-            continue
-        try:
-            roi = bin_img[y:y + h, x:x + w]
-            roi = cv2.resize(roi, (templates[0][1].shape[1], templates[0][1].shape[0]))
-        except Exception:
-            continue
-        best_ch = None;
-        best_score = -1.0
-        for ch, tmpl in templates:
-            try:
-                res = cv2.matchTemplate(roi, tmpl, cv2.TM_CCOEFF_NORMED);
-                _, sc, _, _ = cv2.minMaxLoc(res)
-            except Exception:
-                sc = -1.0
-            if sc > best_score:
-                best_score = float(sc);
-                best_ch = ch
-        if best_score >= 0.45 and best_ch is not None:
-            chars.append(best_ch)
-        elif best_score >= 0.30:
-            chars.append(' ')
-    text = "".join(chars)
-    nums = re.findall(r'\d+', text)
-    if len(nums) >= 2:
-        try:
-            return int(nums[0]), int(nums[1])
-        except Exception:
-            return None
-    return None
-
-
-def _coord_values_valid(x, y):
-    try:
-        xi = int(x);
-        yi = int(y)
-    except Exception:
-        return False
-    if (xi, yi) == (0, 0):
-        return False
-    if abs(xi) > 10000 or abs(yi) > 10000:
-        return False
-    return True
-
-
 def read_coordinates(window):
     """NE İŞE YARAR: Ekrandaki X,Y koordinatlarını küçük ROI'den OCR ile okur."""
     attempts = 0
@@ -2989,26 +2884,20 @@ def read_coordinates(window):
             return None, None
         try:
             left, top, _r, _b = rect
-            gray_roi = _capture_coord_roi_gray(left, top)
-            TOWN_LOCKED = False
-            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-            TOWN_LOCKED = False
-            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-            fast_xy = _fast_coord_from_gray(gray_roi)
-            if fast_xy and _coord_values_valid(fast_xy[0], fast_xy[1]):
-                _update_progress_with_coord((int(fast_xy[0]), int(fast_xy[1])))
-                return int(fast_xy[0]), int(fast_xy[1])
-            img = Image.fromarray(gray_roi) if gray_roi is not None else None
-            if img is None:
-                continue
+            bbox = (left + 104, top + 102, left + 160, top + 120)
+            img = ImageGrab.grab(bbox);
             gray = img.convert('L').resize((img.width * 2, img.height * 2))
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
             gray = ImageEnhance.Contrast(gray).enhance(3.0);
             gray = gray.filter(ImageFilter.MedianFilter()).filter(ImageFilter.SHARPEN)
             cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,.';
             text = pytesseract.image_to_string(gray, config=cfg).strip()
             parts = re.split(r'[,.\s]+', text);
             nums = [p for p in parts if p.isdigit()]
-            if len(nums) >= 2 and _coord_values_valid(nums[0], nums[1]):
+            if len(nums) >= 2:
                 x_val, y_val = int(nums[0]), int(nums[1])
                 _update_progress_with_coord((x_val, y_val))
                 return x_val, y_val
@@ -3487,151 +3376,20 @@ def _click_game_start_fallback(win):
     print(f"[START] Fallback koordinat tıklandı @ ({ax},{ay})")
 
 
-def _start_button_roi(rect):
-    if rect is None:
-        return None
-    try:
-        rx1, ry1, rx2, ry2 = globals().get("GAME_START_TEMPLATE_ROI", GAME_START_TEMPLATE_ROI)
-    except Exception:
-        rx1, ry1, rx2, ry2 = GAME_START_TEMPLATE_ROI
-    left, top, right, bottom = rect
-    x1 = max(left, left + int(rx1));
-    y1 = max(top, top + int(ry1))
-    x2 = min(right, left + int(rx2));
-    y2 = min(bottom, top + int(ry2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2, y2)
-
-
-def _is_start_template_visible_roi(rect, templates, scales, threshold):
-    roi = _start_button_roi(rect)
-    if roi is None or not templates:
-        return False
-    try:
-        hay_gray = _grab_gray_rect(roi)
-    except Exception:
-        hay_gray = None
-    if hay_gray is None or hay_gray.size == 0:
-        return False
-    for path in templates:
-        tmpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if tmpl is None:
-            continue
-        score, _, _ = match_template_multiscale(hay_gray, tmpl, scales)
-        if score >= threshold:
-            return True
-    return False
-
-
-def _hud_marker_score(win, rect):
-    if rect is None:
-        return 0.0
-    try:
-        rx1, ry1, rx2, ry2 = globals().get("HUD_ICON_ROI", HUD_ICON_ROI)
-    except Exception:
-        rx1, ry1, rx2, ry2 = HUD_ICON_ROI
-    try:
-        roi = (int(rect[0] + rx1), int(rect[1] + ry1), int(rect[0] + rx2), int(rect[1] + ry2))
-        g = _grab_gray_rect(roi)
-        if g is None or g.size == 0:
-            return 0.0
-        return float(np.mean(g))
-    except Exception:
-        return 0.0
-
-
-def _coord_history_ok(gecmis, x, y):
-    try:
-        gereken = int(globals().get("COORD_STABLE_REQUIRED", COORD_STABLE_REQUIRED))
-        sapma = int(globals().get("COORD_STABLE_SPREAD", COORD_STABLE_SPREAD))
-    except Exception:
-        gereken = COORD_STABLE_REQUIRED;
-        sapma = COORD_STABLE_SPREAD
-    if not _coord_values_valid(x, y):
-        return False
-    try:
-        xi = int(x);
-        yi = int(y)
-    except Exception:
-        return False
-    gecmis.append((xi, yi))
-    if len(gecmis) > 5:
-        gecmis.pop(0)
-    if len(gecmis) < gereken:
-        return False
-    xs = [p[0] for p in gecmis[-gereken:]];
-    ys = [p[1] for p in gecmis[-gereken:]]
-    return (max(xs) - min(xs) <= sapma) and (max(ys) - min(ys) <= sapma)
-
-
 def _wait_start_transition(win, templates, scales, timeout):
-    try:
-        verify_timeout = max(float(timeout or 0.0),
-                             float(globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)))
-        verify_timeout = max(verify_timeout,
-                             float(globals().get("GAME_START_VERIFY_MIN_TIMEOUT", GAME_START_VERIFY_MIN_TIMEOUT)))
-    except Exception:
-        verify_timeout = max(float(timeout or 0.0), GAME_START_VERIFY_MIN_TIMEOUT)
-    grace = float(globals().get("GAME_START_GRACE_PERIOD", GAME_START_GRACE_PERIOD))
-    grace_deadline = time.time() + max(0.0, grace)
-    deadline = time.time() + verify_timeout
+    deadline = time.time() + timeout
     has_templates = bool(templates)
-    coord_gecmis = []
-    last_log = 0.0
     while time.time() < deadline:
-        if _abort_requested():
+        if _EMPTY_BANK_STOP_EVENT.is_set():
             break
-        wait_if_paused();
-        watchdog_enforce()
-        w, rect = ensure_knight_online_window("_wait_start_transition", existing_window=win, focus=False, want_rect=True,
-                                              attempts=3, retry_delay=0.5)
-        if not w or rect is None:
-            time.sleep(0.25)
-            continue
-        hp_ok = False;
-        market_ok = False;
-        market_score = 0.0
         try:
-            hp_ok = _ingame_by_hpbar_once(w)
-        except Exception:
-            hp_ok = False
-        try:
-            market_score = _market_icon_score(w)
-            market_ok = market_score >= float(MARKET_THRESHOLD)
-        except Exception:
-            market_ok = False
-        coord_ok = False;
-        coord_pair = (None, None)
-        try:
-            cx, cy = read_coordinates(w)
-            coord_pair = (cx, cy)
-            coord_ok = _coord_history_ok(coord_gecmis, cx, cy)
-        except Exception:
-            coord_ok = False
-        hud_score = _hud_marker_score(w, rect)
-        try:
-            hud_thr = float(globals().get("HUD_ICON_MEAN_THRESHOLD", HUD_ICON_MEAN_THRESHOLD))
-        except Exception:
-            hud_thr = HUD_ICON_MEAN_THRESHOLD
-        hud_ok = hud_score >= hud_thr
-        if hp_ok or market_ok or coord_ok or hud_ok:
-            reason = "HP/MARKET" if (hp_ok or market_ok) else ("COORD_OCR" if coord_ok else "HUD_ICON")
-            print(f"[START] transition OK via {reason}")
-            return True
-        if has_templates and time.time() >= grace_deadline:
-            if not _is_start_template_visible_roi(rect, templates, scales,
-                                                  globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD)):
-                print("[START] Start şablonu ROI içinde kayboldu → geçildi.")
+            if is_ingame(win):
                 return True
-        if time.time() - last_log > 0.6:
-            try:
-                print(f"[START] verify hp={hp_ok} market={market_score:.3f} coords={coord_pair} hud={hud_score:.1f}")
-            except Exception:
-                pass
-            last_log = time.time()
-        time.sleep(0.25)
-    print("[START] Geçiş teyidi alınamadı (timeout).")
+        except Exception:
+            pass
+        if has_templates and not _is_template_visible(win, templates, scales, globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD)):
+            return True
+        time.sleep(0.4)
     return False
 
 
@@ -4214,39 +3972,12 @@ def ensure_ui_closed(): press_key(SC_ESC); release_key(SC_ESC); time.sleep(0.1);
     SC_ESC); time.sleep(0.1)
 
 
-_AXIS_HISTORY = {"x": [], "y": []}
-
-
-def _axis_median(axis: str, val):
-    try:
-        hist = _AXIS_HISTORY.setdefault(axis, [])
-    except Exception:
-        hist = []
-    if val is not None:
-        try:
-            hist.append(int(val))
-            if len(hist) > 5:
-                hist.pop(0)
-        except Exception:
-            pass
-    if hist:
-        try:
-            return int(np.median(hist[-5:]))
-        except Exception:
-            try:
-                return int(hist[-1])
-            except Exception:
-                return val
-    return val
-
-
 def _read_axis(w, axis: str):
     try:
         x, y = read_coordinates(w)
     except Exception:
         x, y = None, None
-    raw = x if axis == 'x' else y
-    return _axis_median(axis, raw)
+    return x if axis == 'x' else y
 
 
 # >>> OVERSHOOT FİX: A/D YOK, SADECE W – YÖN-PARAM ve TOLERANSLI KABUL <<<
@@ -4391,16 +4122,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     assert axis in ('x', 'y');
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
-    no_pulse = bool(globals().get('PREC_NO_W_PULSE', False))
-    no_pulse_hits = int(globals().get('PREC_NO_W_PULSE_SETTLE_HITS', settle_hits))
     t0 = time.time();
     press_key(SC_W)
-    in_band = 0
-    if no_pulse:
-        try:
-            print(f"[PREC] NO_PULSE aktif (axis={axis.upper()} target={target} delta={pre_brake_delta} hits={no_pulse_hits})")
-        except Exception:
-            pass
     try:
         while True:
             wait_if_paused();
@@ -4408,27 +4131,11 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if _kb_pressed('f12'): return False
             cur = _read_axis(w, axis)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
-            if no_pulse:
-                in_band = in_band + 1 if abs(target - cur) <= pre_brake_delta else 0
-                if in_band >= no_pulse_hits: break
-            else:
-                if abs(target - cur) <= pre_brake_delta: break
-            if (time.time() - t0) > timeout:
-                if no_pulse:
-                    print(f"[PREC] timeout (NO_PULSE) cur={cur} target={target}")
-                else:
-                    print(f"[PREC] timeout pre-brake cur={cur} target={target}")
-                return False
+            if abs(target - cur) <= pre_brake_delta: break
+            if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
     finally:
         release_key(SC_W)
-    if no_pulse:
-        cur_after = _read_axis(w, axis)
-        if cur_after is not None:
-            cur = cur_after
-        ok = abs((cur or target) - target) <= pre_brake_delta if force_exact else True
-        print(f"[PREC] Son (NO_PULSE): axis={axis} cur≈{cur} target={target} ok={ok}")
-        return ok
     cur_after_brake = _read_axis(w, axis)
     if cur_after_brake is not None:
         cur = cur_after_brake
@@ -4519,7 +4226,7 @@ def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
 # <<< SPEED_AWARE_END_v2
 
 def ascend_stairs_to_top(w):
-    global NEED_STAIRS_REALIGN, REQUEST_RELAUNCH
+    global NEED_STAIRS_REALIGN
     set_stage("ASCEND_STAIRS");
     ensure_ui_closed()
     try:
@@ -4555,9 +4262,8 @@ def ascend_stairs_to_top(w):
 
     ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
     if not ok:
-        print("[STAIRS] go_w_to_y başarısız → RELAUNCH");
-        REQUEST_RELAUNCH = True
-        NEED_STAIRS_REALIGN = True
+        print("[STAIRS] go_w_to_y başarısız → town & retry");
+        send_town_command()
         return
 
     _finalize_top(_read_y_now())
@@ -6082,20 +5788,6 @@ def run_stairs_and_workflow(w):
             if _kb_pressed('f12'):
                 print("[LOOP] F12 iptal.")
                 return (False, False)
-
-            if REQUEST_RELAUNCH:
-                REQUEST_RELAUNCH = False
-                set_stage("EXIT_GAME")
-                try:
-                    exit_game_fast(w)
-                except Exception:
-                    pass
-                set_stage("RELAUNCH")
-                w = relaunch_and_login_to_ingame()
-                if not w:
-                    return (False, False)
-                NEED_STAIRS_REALIGN = True
-                continue
 
             if NEED_STAIRS_REALIGN:
                 set_stage("STAIRS_REALIGN_AFTER_RECONNECT")
