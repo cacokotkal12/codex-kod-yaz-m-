@@ -1436,6 +1436,8 @@ def _wait_for_f_with_countdown(deadline_ts: float, *, label: str = "+8 F bekleme
     """F tuşu bekleme döngüsü; watchdog'u devre dışı bırakır ve geri sayım loglar."""
     countdown_step = 60  # sn
     last_log = None
+    set_stage("PLUS8_WAIT")
+    stage_detail(label)
     watchdog_suspend(label)
     set_stage_timeout_exempt(True)
     _set_plus8_remote_wait_active(True)
@@ -4098,6 +4100,48 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     return False
 
 
+def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: int = 6) -> bool:
+    """X=768 hedefinde overshoot tespit edilince S ile mikro geri toparlama + failsafe hizalama yapar."""
+    release_key(SC_W)
+    print("[PREC] X=768 overshoot tespit edildi → mikro geri başlatılıyor.")
+    taps = 0
+    while taps < max(1, int(max_taps)):
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            return False
+        micro_tap(SC_S, MICRO_PULSE_DURATION)
+        time.sleep(MICRO_READ_DELAY)
+        nx = read_axis_fn()
+        try:
+            if nx is not None and int(nx) == 768:
+                print("[PREC] X=768 overshoot düzeldi.")
+                return True
+        except Exception:
+            pass
+        taps += 1
+    print("[PREC] X=768 overshoot mikrodüzeltme başarısız → hizalama failsafe.")
+    try:
+        town_until_valid_x(w)
+        ascend_stairs_to_top(w)
+    except Exception as e:
+        print("[PREC] X=768 failsafe hata:", e)
+    return False
+
+
+def _maybe_handle_x768_overshoot(w, cur, read_axis_fn: Callable[[], Optional[int]]):
+    try:
+        cx = int(cur)
+    except Exception:
+        return cur, True
+    if cx <= 767:
+        ok = _fix_x768_overshoot(w, read_axis_fn)
+        if not ok:
+            return cur, False
+        return read_axis_fn(), True
+    return cur, True
+
+
 def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre_brake_delta: int = PRE_BRAKE_DELTA,
                            pulse: float = MICRO_PULSE_DURATION, settle_hits: int = TARGET_STABLE_HITS,
                            force_exact: bool = True) -> bool:
@@ -4126,31 +4170,50 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
     t0 = time.time();
+    overshoot_guard = (axis == 'x' and int(target) == 768)
+    overshoot_failed = False
+
+    def _read_axis_guarded():
+        nonlocal overshoot_failed
+        val = _read_axis(w, axis)
+        if overshoot_guard:
+            val, ok = _maybe_handle_x768_overshoot(w, val, lambda: _read_axis(w, axis))
+            if not ok:
+                overshoot_failed = True
+                return None
+        return val
+
     press_key(SC_W)
     try:
         while True:
             wait_if_paused();
             watchdog_enforce()
             if _kb_pressed('f12'): return False
-            cur = _read_axis(w, axis)
+            cur = _read_axis_guarded()
+            if overshoot_failed:
+                return False
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
             if abs(target - cur) <= pre_brake_delta: break
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
             time.sleep(0.03)
     finally:
         release_key(SC_W)
-    cur_after_brake = _read_axis(w, axis)
+    cur_after_brake = _read_axis_guarded()
     if cur_after_brake is not None:
         cur = cur_after_brake
+    if overshoot_failed:
+        return False
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
     remaining_timeout = max(0.0, float(timeout) - (time.time() - t0))
     deadline = time.time() + remaining_timeout
-    matched = _micro_adjust_axis(lambda: _read_axis(w, axis), axis, target, direction, seq, settle_hits,
+    matched = _micro_adjust_axis(_read_axis_guarded, axis, target, direction, seq, settle_hits,
                                  max_duration=MICRO_ADJUST_MAX_DURATION, deadline=deadline)
-    fc = _read_axis(w, axis);
+    fc = _read_axis_guarded();
+    if overshoot_guard and overshoot_failed:
+        return False
     ok = matched or ((fc == target) if force_exact else abs((fc or target) - target) <= 1)
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
     return ok
@@ -4228,6 +4291,34 @@ def go_w_to_x(w, target_x: int, timeout: float = None) -> bool:
 
 # <<< SPEED_AWARE_END_v2
 
+
+def _workflow_precondition_gate(w):
+    """Relaunch/reconnect sonrası bank/NPC rotaları öncesi VALID_X + merdiven + 598→597 hazırlığı garantisi."""
+    global NEED_STAIRS_REALIGN, TOWN_LOCKED
+    target_y = int(globals().get('STAIRS_TOP_Y', STAIRS_TOP_Y))
+    need = bool(globals().get("NEED_STAIRS_REALIGN", NEED_STAIRS_REALIGN))
+    try:
+        cx, cy = read_coordinates(w)
+    except Exception:
+        cx, cy = None, None
+    if not need:
+        if cx is None or not _is_valid_x(cx):
+            need = True
+        else:
+            try:
+                yi = int(cy) if cy is not None else None
+            except Exception:
+                yi = None
+            if yi is None or yi < (target_y - 1) or yi > target_y:
+                need = True
+    if not need:
+        return
+    set_stage("WORKFLOW_PRECONDITION_GATE")
+    TOWN_LOCKED = False
+    town_until_valid_x(w)
+    ascend_stairs_to_top(w)
+
+
 def ascend_stairs_to_top(w):
     global NEED_STAIRS_REALIGN
     set_stage("ASCEND_STAIRS");
@@ -4288,6 +4379,7 @@ def go_to_anvil_from_top(start_x):
 
 def move_to_769_and_turn_from_top(w):
     global BANK_OPEN
+    _workflow_precondition_gate(w)
     set_stage("MOVE_TO_STORAGE_AREA");
     ensure_ui_closed();
     press_key(SC_A);
@@ -6301,6 +6393,7 @@ def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
 
 
 def go_to_npc_from_top(w):  # moda göre sayfa seçimi
+    _workflow_precondition_gate(w)
     set_stage("GO_TO_NPC");
     ensure_ui_closed()
     press_key(SC_A);
