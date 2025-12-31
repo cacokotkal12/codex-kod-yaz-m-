@@ -99,6 +99,15 @@ def _town_lock(v: bool, reason: str = ""):
 
 
 # [PATCH_TOWN_LOCK_END]
+def _set_town_hardlock_state(active: bool, reason: str = ""):
+    cur = bool(globals().get("TOWN_HARD_LOCK", False))
+    new_val = bool(active)
+    globals()["TOWN_HARD_LOCK"] = new_val
+    if cur != new_val:
+        try:
+            print(f"[TOWN] HardLock={'True' if new_val else 'False'} (reason={reason})")
+        except Exception:
+            pass
 
 _PROCESS_PRIORITY_CLASSES = {
     "ABOVE_NORMAL": 0x00008000,
@@ -236,6 +245,28 @@ def _MERDIVEN_CFG_PATH():
     return path
 
 
+def _sync_sale_refresh_from_cfg():
+    path = _MERDIVEN_CFG_PATH()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        gui = data.get("gui", {}) if isinstance(data, dict) else {}
+    except Exception:
+        gui = {}
+    if isinstance(gui, dict):
+        try:
+            if "sale_refresh_min" in gui:
+                globals()["PAZAR_YENILEME_BEKELEME_MIN"] = float(gui.get("sale_refresh_min"))
+        except Exception:
+            pass
+        try:
+            if "sale_refresh_max" in gui:
+                globals()["PAZAR_YENILEME_BEKELEME_MAX"] = float(gui.get("sale_refresh_max"))
+                globals()["PAZAR_YENILEME_BEKELEME_SURESI"] = float(gui.get("sale_refresh_max"))
+        except Exception:
+            pass
+
+
 def _accounts_default():
     return {"accounts": [], "active": ""}
 
@@ -243,6 +274,7 @@ def _accounts_default():
 _ACCOUNTS_PATH = PERSIST_PATH("accounts.json")
 _ACCOUNT_CACHE: Dict[str, Any] = _accounts_default()
 _ACTIVE_ACCOUNT_NAME = ""
+ACTIVE_ACCOUNT_LABEL = ""
 
 
 def _read_accounts_file() -> Dict[str, Any]:
@@ -304,11 +336,12 @@ def _find_account_by_name(name: str) -> Optional[Dict[str, Any]]:
 
 
 def _apply_account_credentials(acc: Dict[str, Any]) -> None:
-    global _ACTIVE_ACCOUNT_NAME
+    global _ACTIVE_ACCOUNT_NAME, ACTIVE_ACCOUNT_LABEL
     try:
         globals()["LOGIN_USERNAME"] = str(acc.get("username", "") or "")
         globals()["LOGIN_PASSWORD"] = str(acc.get("password", "") or "")
         _ACTIVE_ACCOUNT_NAME = str(acc.get("name", "") or "")
+        ACTIVE_ACCOUNT_LABEL = _ACTIVE_ACCOUNT_NAME
     except Exception:
         pass
 
@@ -332,10 +365,12 @@ def _load_accounts_on_start() -> Dict[str, Any]:
         _apply_account_credentials(acc)
     else:
         globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+        globals()["ACTIVE_ACCOUNT_LABEL"] = ""
     return data
 
 
 _load_accounts_on_start()
+_sync_sale_refresh_from_cfg()
 
 
 try:
@@ -1321,6 +1356,54 @@ def _stabil_x_oku(w, adet=None):
     return aday, son_y, xs
 
 
+def safe_recover(reason: str, stage: str, window=None):
+    stage_name = _normalize_stage_name(stage)
+    merdiven_ici = _stage_allows_town_recover(stage_name)
+    if merdiven_ici:
+        try:
+            print(f"[RECOVER] stage={stage_name} merdiven_ici → town")
+        except Exception:
+            pass
+        if globals().get("TOWN_HARD_LOCK", False):
+            _set_town_hardlock_state(False, "RECOVER_TOWN")
+        try:
+            send_town_command(force=True)
+        except Exception as e:
+            try:
+                print(f"[RECOVER] town hata: {e}")
+            except Exception:
+                pass
+        return window
+    try:
+        print(f"[RECOVER] stage={stage_name} merdiven_disi → relaunch")
+    except Exception:
+        pass
+    try:
+        send_town_command(force=True)
+    except Exception:
+        pass
+    try:
+        if window is not None:
+            exit_game_fast(window)
+        else:
+            close_all_game_instances()
+    except Exception as e:
+        try:
+            print(f"[RECOVER] exit_game_fast hata: {e}")
+        except Exception:
+            pass
+    try:
+        new_w = relaunch_and_login_to_ingame()
+        if new_w:
+            return new_w
+    except Exception as e:
+        try:
+            print(f"[RECOVER] relaunch hata: {e}")
+        except Exception:
+            pass
+    return window
+
+
 def recover_from_invalid_x(w, cur_x, cur_y, samples=None):
     global _INVALID_X_RECOVER_STATE
     state = globals().get("_INVALID_X_RECOVER_STATE")
@@ -1334,6 +1417,16 @@ def recover_from_invalid_x(w, cur_x, cur_y, samples=None):
             state["start_ts"] = now
             state["force_used"] = False
     duration = now - state.get("start_ts", now)
+    stage_now = _normalize_stage_name(globals().get("_current_stage", ""))
+    if not _stage_allows_town_recover(stage_now):
+        _reset_invalid_x_recover_state()
+        return safe_recover("INVALID_X", stage_now, w)
+    try:
+        print(f"[RECOVER] stage={stage_now} merdiven_ici → town")
+    except Exception:
+        pass
+    if globals().get("TOWN_HARD_LOCK", False):
+        _set_town_hardlock_state(False, "RECOVER_TOWN")
     actions = ["ensure_front"]
     try:
         w_front = bring_game_window_to_front()
@@ -2028,13 +2121,22 @@ def _notify_error_telegram_once(message: str) -> bool:
     now = time.time()
     if now - float(_LAST_ERROR_NOTIFY_TS or 0.0) < _ERROR_NOTIFY_COOLDOWN:
         return False
+    try:
+        hesap = str(globals().get("ACTIVE_ACCOUNT_LABEL", "") or globals().get("_ACTIVE_ACCOUNT_NAME", "") or "UNKNOWN")
+    except Exception:
+        hesap = "UNKNOWN"
+    full_message = f"{message} | HESAP={hesap}"
     ok = False
     try:
-        ok = send_telegram_message(message)
+        ok = send_telegram_message(full_message)
     except Exception as exc:
         print(f"[TELEGRAM] Hata bildirimi gönderilemedi: {exc}")
     if ok:
         _LAST_ERROR_NOTIFY_TS = now
+        try:
+            print(f"[TELEGRAM] Error notify sent | HESAP={hesap}")
+        except Exception:
+            pass
     return ok
 
 
@@ -2524,6 +2626,13 @@ def _notify_win1400(func_name: str, action: str):
 
 
 def _handle_win1400_recovery(func_name: str, action: str, attempt: int, total: int):
+    stage_now = _normalize_stage_name(globals().get("_current_stage", ""))
+    if stage_now == "EXIT_GAME":
+        try:
+            print("[WINDOW] 1400 ignored (stage=EXIT_GAME)")
+        except Exception:
+            pass
+        return
     _invalidate_window_cache()
     _maybe_stage_detail(f"[WIN1400] {func_name}: pencere geçersiz → yeniden aranıyor ({attempt}/{total})")
     _notify_win1400(func_name, action)
@@ -4151,6 +4260,19 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
         print("[PREC] X=768 failsafe hata:", e)
     return False
 
+def _normalize_stage_name(stage: str) -> str:
+    try:
+        return str(stage or "").strip().upper()
+    except Exception:
+        return ""
+
+
+def _stage_allows_town_recover(stage: str) -> bool:
+    st = _normalize_stage_name(stage)
+    if st in ("TOWN_ALIGN_FOR_VALID_X", "ASCEND_STAIRS", "PREC_MOVE_Y_598"):
+        return True
+    return st.startswith("STAIRS_") or st.startswith("TOWN_ALIGN_")
+
 def _fix_y598_overshoot(w, read_axis_fn: Callable[[], Optional[int]], start_val=None) -> bool:
     release_key(SC_W)
     set_stage("PREC_MOVE_Y_598_OVERSHOOT_FIX")
@@ -4220,11 +4342,12 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                            pulse: float = MICRO_PULSE_DURATION, settle_hits: int = TARGET_STABLE_HITS,
                            force_exact: bool = True) -> bool:
     # [YAMA] PREC_MOVE_Y_598 başında kilit + çift tık (GUI ile yönetilir)
+    hardlock_guard = False
     try:
         if str(axis).lower() == 'y' and int(target) == 598:
+            hardlock_guard = True
             if bool(globals().get('PREC_Y598_TOWN_HARDLOCK', True)):
-                globals()['TOWN_HARD_LOCK'] = True
-                _town_log_once('[TOWN] HardLock AÇIK (PREC_MOVE_Y_598)')
+                _set_town_hardlock_state(True, "PREC_MOVE_Y_598")
             set_stage(f"PREC_MOVE_{axis.upper()}_{target}")
             if bool(globals().get('PREC_Y598_DBLCLICK', True)):
                 try:
@@ -4282,18 +4405,23 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 overshoot_hits = 0
         return val
 
+    def _finish_prec_move(val: bool) -> bool:
+        if hardlock_guard:
+            _set_town_hardlock_state(False, "PREC_MOVE_DONE")
+        return val
+
     press_key(SC_W)
     try:
         while True:
             wait_if_paused();
             watchdog_enforce()
-            if _kb_pressed('f12'): return False
+            if _kb_pressed('f12'): return _finish_prec_move(False)
             cur = _read_axis_guarded()
             if overshoot_failed:
-                return False
+                return _finish_prec_move(False)
             if cur is None: time.sleep(MICRO_READ_DELAY); continue
             if abs(target - cur) <= pre_brake_delta: break
-            if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return False
+            if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return _finish_prec_move(False)
             time.sleep(0.03)
     finally:
         release_key(SC_W)
@@ -4301,7 +4429,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     if cur_after_brake is not None:
         cur = cur_after_brake
     if overshoot_failed:
-        return False
+        return _finish_prec_move(False)
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
@@ -4312,10 +4440,10 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                                  max_duration=MICRO_ADJUST_MAX_DURATION, deadline=deadline)
     fc = _read_axis_guarded();
     if overshoot_guard and overshoot_failed:
-        return False
+        return _finish_prec_move(False)
     ok = matched or ((fc == target) if force_exact else abs((fc or target) - target) <= 1)
     print(f"[PREC] Son: axis={axis} cur≈{fc} target={target} ok={ok}");
-    return ok
+    return _finish_prec_move(ok)
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
@@ -4534,6 +4662,9 @@ def move_to_769_and_turn_from_top(w):
 def send_town_command(*a, force=False, wait_override=None, **kw):
     # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
     global TOWN_LOCKED, BANK_OPEN
+    stage_now = _normalize_stage_name(globals().get("_current_stage", ""))
+    if _stage_allows_town_recover(stage_now) and globals().get('TOWN_HARD_LOCK', False):
+        _set_town_hardlock_state(False, "RECOVER_STAGE_TOWN")
     # [YAMA] HardLock aktifse town tamamen kapalı
     if globals().get('TOWN_HARD_LOCK', False):
         _town_log_once('[TOWN] HardLock aktif — komut iptal.')
@@ -6418,6 +6549,8 @@ def post_598_to_597():
                 print("[598→597] %ds değişim yok, güvenlik gereği bırakıldı." % STUCK_TIMEOUT);
                 return
         print("[598→597] Tamamlandı: Y=597")
+        if globals().get("TOWN_HARD_LOCK", False):
+            _set_town_hardlock_state(False, "PREC_MOVE_DONE")
     except Exception as e:
         print("[598→597] Hata:", e)
 
@@ -8124,6 +8257,7 @@ def _MERDIVEN_RUN_GUI():
             if str(data.get("active", "")).strip().lower() == name.lower():
                 data["active"] = ""
                 globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+                globals()["ACTIVE_ACCOUNT_LABEL"] = ""
                 globals()["LOGIN_USERNAME"] = self.v["username"].get()
                 globals()["LOGIN_PASSWORD"] = self.v["password"].get()
                 self.v["active_account"].set("")
@@ -8996,6 +9130,7 @@ def _MERDIVEN_RUN_GUI():
                 if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
                 if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
                 globals()["_ACTIVE_ACCOUNT_NAME"] = ""
+                globals()["ACTIVE_ACCOUNT_LABEL"] = ""
             try:
                 m.LOGIN_TYPE_DELAY = float(self.v["login_type_delay"].get())
             except Exception:
