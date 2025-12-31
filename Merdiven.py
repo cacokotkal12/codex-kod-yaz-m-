@@ -814,7 +814,9 @@ GAME_START_MATCH_THRESHOLD = 0.70;
 GAME_START_FIND_TIMEOUT = 8.0;
 GAME_START_SCALES = (0.85, 0.9, 1.0, 1.1, 1.2)
 GAME_START_EXTRA_SCALES = (0.78, 1.22, 1.35)
-GAME_START_FALLBACK_RELATIVE_POS = (906, 600)
+GAME_START_ROI = (839, 575, 974, 623)
+GAME_START_FIXED_CLICK_POS = (896, 596)
+GAME_START_FALLBACK_RELATIVE_POS = (896, 596)
 GAME_START_VERIFY_TIMEOUT = 12.0
 TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 giris_enter = 0.5
@@ -868,7 +870,6 @@ PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-TELEGRAM_REMOTE_START8_PIN = ""
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 PLUS8_CYCLE_BANK_START = 0
@@ -960,6 +961,14 @@ MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.010;
 TARGET_STABLE_HITS = 10
 MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
+# ---- Y=598 Overshoot ----
+Y598_OVERSHOOT_ENABLE = True
+Y598_OVERSHOOT_DELTA = 1
+Y598_OVERSHOOT_CONFIRM_HITS = 2
+Y598_FIX_MAX_STEPS = 80
+Y598_FIX_PULSE_MIN = 0.035
+Y598_FIX_PULSE_MAX = 0.090
+Y598_FIX_READ_DELAY = 0.030
 # ---- Yürüme / Dönüş ----
 ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
@@ -970,6 +979,9 @@ TURN_RIGHT_SEC = 1.41
 # ---- Town ----
 TOWN_CLICK_POS = (775, 775);
 TOWN_WAIT = 2.5
+TOWN_WAIT_FIRST = 2.5
+TOWN_WAIT_RETRY_FAST = 1.2
+TOWN_RETRY_X_OKUMA_ADET = 2
 # ---- Splash/Login yardımcı tık ----
 SPLASH_CLICK_POS = (700, 550)
 # ---- Tooltip OCR
@@ -2025,16 +2037,6 @@ def _notify_error_telegram_once(message: str) -> bool:
         _LAST_ERROR_NOTIFY_TS = now
     return ok
 
-def _telegram_pin_ok(cmd_text: str) -> bool:
-    pin = str(globals().get("TELEGRAM_REMOTE_START8_PIN", "") or "").strip()
-    if not pin:
-        return True
-    try:
-        parts = str(cmd_text or "").strip().split()
-    except Exception:
-        parts = []
-    return any(p.strip() == pin for p in parts[1:]) if len(parts) >= 2 else False
-
 
 def _telegram_command_listener_loop():
     global _TELEGRAM_UPDATE_OFFSET
@@ -2082,12 +2084,9 @@ def _telegram_command_listener_loop():
             if not text:
                 continue
             low = text.lower()
-            if low.startswith("/start8") or low == "f":
+            if low == "/1774":
                 if not _PLUS8_REMOTE_WAIT_ACTIVE:
                     send_telegram_message("Şu an +8 başlatılamaz.")
-                    continue
-                if not _telegram_pin_ok(text):
-                    send_telegram_message("PIN geçersiz.")
                     continue
                 _set_remote_start8_trigger()
                 send_telegram_message("Komut alındı, +8 başlatılıyor.")
@@ -3248,7 +3247,8 @@ def match_template_multiscale(hay_gray, tmpl_gray, scales):
     return best
 
 
-def wait_and_click_template(win, template_path, threshold=0.8, timeout=5.0, scales=(1.0,)):
+def wait_and_click_template(win, template_path, threshold=0.8, timeout=5.0, scales=(1.0,), roi=None,
+                            fixed_click_pos=None):
     pp = resource_path(template_path) if os.path.exists(resource_path(template_path)) else template_path
     if not os.path.exists(pp): print(f"[Uyarı] Template yok: {template_path}"); return False
     tmpl = cv2.imread(pp, cv2.IMREAD_GRAYSCALE)
@@ -3259,17 +3259,38 @@ def wait_and_click_template(win, template_path, threshold=0.8, timeout=5.0, scal
         wait_if_paused();
         watchdog_enforce()
         if _kb_pressed('f12'): return False
-        gray = grab_window_gray(win);
+        if roi is not None:
+            try:
+                x1, y1, x2, y2 = [int(v) for v in roi]
+                img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+                gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+            except Exception as _e:
+                print(f"[FIND] ROI grab hata: {_e}")
+                gray = None
+        else:
+            gray = grab_window_gray(win);
         score, center, _ = match_template_multiscale(gray, tmpl, scales)
-        if time.time() - last > 0.4: print(
-            f"[FIND] {os.path.basename(template_path)} score={score:.2f} center={center}"); last = time.time()
+        if time.time() - last > 0.4:
+            tag = "ROI " if roi is not None else ""
+            print(f"[FIND] {os.path.basename(template_path)} {tag}score={score:.2f} center={center}");
+            last = time.time()
         if score >= threshold and center is not None:
-            ax = win.left + center[0];
-            ay = win.top + center[1]
+            if fixed_click_pos is not None:
+                ax, ay = fixed_click_pos
+            elif roi is not None:
+                ax = roi[0] + center[0];
+                ay = roi[1] + center[1]
+            else:
+                ax = win.left + center[0];
+                ay = win.top + center[1]
             mouse_move(ax, ay);
             mouse_click("left");
-            mouse_move(*TEMPLATE_EXTRA_CLICK_POS);
-            mouse_click("left");
+            if fixed_click_pos is not None:
+                mouse_move(ax, ay);
+                mouse_click("left");
+            else:
+                mouse_move(*TEMPLATE_EXTRA_CLICK_POS);
+                mouse_click("left");
             time.sleep(0.1)
             print(f"[CLICK] {os.path.basename(template_path)} tıklandı. score={score:.2f} @ ({ax},{ay})");
             return True
@@ -3369,14 +3390,14 @@ def _is_template_visible(win, templates, scales, threshold):
 
 def _click_game_start_fallback(win):
     try:
-        rx, ry = globals().get("GAME_START_FALLBACK_RELATIVE_POS", GAME_START_FALLBACK_RELATIVE_POS)
+        fx, fy = globals().get("GAME_START_FIXED_CLICK_POS", GAME_START_FIXED_CLICK_POS)
     except Exception:
-        rx, ry = GAME_START_FALLBACK_RELATIVE_POS
-    ax = int(win.left + rx)
-    ay = int(win.top + ry)
+        fx, fy = GAME_START_FIXED_CLICK_POS
+    ax = int(fx)
+    ay = int(fy)
     mouse_move(ax, ay);
     mouse_click("left");
-    mouse_move(*TEMPLATE_EXTRA_CLICK_POS);
+    mouse_move(ax, ay);
     mouse_click("left");
     print(f"[START] Fallback koordinat tıklandı @ ({ax},{ay})")
 
@@ -3411,7 +3432,9 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
         else:
             for path in templates:
                 ok = wait_and_click_template(w, path, threshold=GAME_START_MATCH_THRESHOLD,
-                                             timeout=GAME_START_FIND_TIMEOUT, scales=scales)
+                                             timeout=GAME_START_FIND_TIMEOUT, scales=scales,
+                                             roi=globals().get("GAME_START_ROI", GAME_START_ROI),
+                                             fixed_click_pos=globals().get("GAME_START_FIXED_CLICK_POS", GAME_START_FIXED_CLICK_POS))
                 if ok:
                     if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
                         return True
@@ -4128,6 +4151,57 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
         print("[PREC] X=768 failsafe hata:", e)
     return False
 
+def _fix_y598_overshoot(w, read_axis_fn: Callable[[], Optional[int]], start_val=None) -> bool:
+    release_key(SC_W)
+    set_stage("PREC_MOVE_Y_598_OVERSHOOT_FIX")
+    try:
+        max_steps = int(globals().get("Y598_FIX_MAX_STEPS", 80))
+    except Exception:
+        max_steps = 80
+    try:
+        p_min = float(globals().get("Y598_FIX_PULSE_MIN", 0.035))
+    except Exception:
+        p_min = 0.035
+    try:
+        p_max = float(globals().get("Y598_FIX_PULSE_MAX", p_min))
+    except Exception:
+        p_max = p_min
+    if p_max < p_min: p_min, p_max = p_max, p_min
+    try:
+        r_delay = float(globals().get("Y598_FIX_READ_DELAY", 0.03))
+    except Exception:
+        r_delay = 0.03
+    steps = 0
+    start_val = start_val if start_val is not None else read_axis_fn()
+    while steps < max(1, max_steps):
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            return False
+        micro_tap(SC_S, random.uniform(p_min, p_max))
+        time.sleep(max(0.0, r_delay))
+        cy = read_axis_fn()
+        try:
+            if cy is not None and int(cy) == 598:
+                print(f"[PREC] Y598 overshoot düzeltildi: cur={start_val} → 598")
+                return True
+        except Exception:
+            pass
+        steps += 1
+    print("[PREC] Y598 overshoot düzeltmesi başarısız → failsafe town denenecek.")
+    try:
+        orig_lock = bool(globals().get("TOWN_HARD_LOCK", False))
+    except Exception:
+        orig_lock = False
+    try:
+        globals()["TOWN_HARD_LOCK"] = False
+        send_town_command(force=True)
+    except Exception as e:
+        print("[PREC] Y598 overshoot failsafe town hata:", e)
+    finally:
+        globals()["TOWN_HARD_LOCK"] = orig_lock
+    return False
+
 
 def _maybe_handle_x768_overshoot(w, cur, read_axis_fn: Callable[[], Optional[int]]):
     try:
@@ -4171,7 +4245,9 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     ensure_ui_closed();
     t0 = time.time();
     overshoot_guard = (axis == 'x' and int(target) == 768)
+    y598_guard = (axis == 'y' and int(target) == 598 and bool(globals().get("Y598_OVERSHOOT_ENABLE", True)))
     overshoot_failed = False
+    overshoot_hits = 0
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
@@ -4181,6 +4257,29 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if not ok:
                 overshoot_failed = True
                 return None
+        if y598_guard:
+            try:
+                delta = int(globals().get("Y598_OVERSHOOT_DELTA", 1))
+            except Exception:
+                delta = 1
+            try:
+                confirm = int(globals().get("Y598_OVERSHOOT_CONFIRM_HITS", 2))
+            except Exception:
+                confirm = 2
+            try:
+                if val is not None and int(val) >= int(target) + delta:
+                    nonlocal overshoot_hits
+                    overshoot_hits += 1
+                    if overshoot_hits >= max(1, confirm):
+                        ok = _fix_y598_overshoot(w, lambda: _read_axis(w, axis), start_val=val)
+                        if not ok:
+                            overshoot_failed = True
+                            return None
+                        return int(target)
+                else:
+                    overshoot_hits = 0
+            except Exception:
+                overshoot_hits = 0
         return val
 
     press_key(SC_W)
@@ -4226,7 +4325,8 @@ def town_until_valid_x(w):
     while True:
         wait_if_paused();
         watchdog_enforce()
-        x, _y, _samples = _stabil_x_oku(w)
+        adet = None if attempts == 0 else globals().get("TOWN_RETRY_X_OKUMA_ADET", None)
+        x, _y, _samples = _stabil_x_oku(w, adet=adet)
         try:
             xi = int(x)
         except Exception:
@@ -4234,15 +4334,36 @@ def town_until_valid_x(w):
         if xi is not None and _is_valid_x(xi):
             print(f"[ALIGN] X={xi} strict geçerli.");
             return xi
-        print(f"[ALIGN] X={x} strict geçersiz → town.");
+        print(f"[ALIGN] X={x} strict geçersiz → town ({'retry_fast' if attempts > 0 else 'first'})");
         ensure_ui_closed();
-        send_town_command();
+        if attempts == 0:
+            try:
+                tw = float(globals().get("TOWN_WAIT_FIRST", TOWN_WAIT))
+            except Exception:
+                tw = TOWN_WAIT
+            slow_sleep = random.uniform(0.8, 1.2)
+            print(f"[TOWN] retry_slow_reason=first_attempt wait={tw:.2f} sleep={slow_sleep:.2f}")
+            send_town_command(wait_override=tw);
+            attempts += 1;
+            set_stage("TOWN_ALIGN_FOR_VALID_X");
+            try:
+                time.sleep(slow_sleep)
+            except Exception:
+                time.sleep(0.9)
+            continue
+        try:
+            tw = float(globals().get("TOWN_WAIT_RETRY_FAST", 1.2))
+        except Exception:
+            tw = 1.2
+        fast_sleep = 0.5
+        print(f"[TOWN] retry_slow_reason=retry_fast wait={tw:.2f} sleep={fast_sleep:.2f}")
+        send_town_command(wait_override=tw);
         attempts += 1;
         set_stage("TOWN_ALIGN_FOR_VALID_X");
         try:
-            time.sleep(random.uniform(0.8, 1.2))
+            time.sleep(fast_sleep)
         except Exception:
-            time.sleep(0.9)
+            time.sleep(0.5)
         if attempts >= fail_attempts or (time.time() - t0) >= fail_timeout:
             print(f"[ALIGN] Fail-safe tetikledi (deneme={attempts}, süre={time.time() - t0:.1f}s) → çıkış.")
             set_stage("EXIT_GAME")
@@ -4410,7 +4531,7 @@ def move_to_769_and_turn_from_top(w):
     return True
 
 
-def send_town_command(*a, force=False, **kw):
+def send_town_command(*a, force=False, wait_override=None, **kw):
     # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
     global TOWN_LOCKED, BANK_OPEN
     # [YAMA] HardLock aktifse town tamamen kapalı
@@ -4437,7 +4558,11 @@ def send_town_command(*a, force=False, **kw):
             pass
     mouse_move(*TOWN_CLICK_POS);
     mouse_click('left');
-    time.sleep(TOWN_WAIT)
+    try:
+        tw = float(wait_override) if wait_override is not None else float(TOWN_WAIT)
+    except Exception:
+        tw = TOWN_WAIT
+    time.sleep(tw)
     BANK_OPEN = False
     return True
 
@@ -6605,8 +6730,14 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("GAME_START_EXTRA_SCALES", "Launcher Start ekstra ölçekleri", "Ölçek Listeleri", "list_float",
                 _cfg_default("GAME_START_EXTRA_SCALES", (0.78, 1.22, 1.35)),
                 "Eşleşme kaçtığında denenecek ek ölçekler.", apply=lambda v: list(_ensure_float_list(v))),
+    ConfigField("GAME_START_ROI", "Launcher Start ROI (x1,y1,x2,y2)", "Koordinat Grupları", "int_quad",
+                _cfg_default("GAME_START_ROI", (839, 575, 974, 623)),
+                "Start butonu aranacak alan.", apply=_ensure_int_quad),
+    ConfigField("GAME_START_FIXED_CLICK_POS", "Launcher Start sabit tik (x,y)", "Koordinat Grupları", "int_pair",
+                _cfg_default("GAME_START_FIXED_CLICK_POS", (896, 596)),
+                "Start bulunduğunda tiklanacak sabit nokta.", apply=_ensure_int_pair),
     ConfigField("GAME_START_FALLBACK_RELATIVE_POS", "Launcher Start göreli tık (x,y)", "Koordinat Grupları", "int_pair",
-                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (906, 600)),
+                _cfg_default("GAME_START_FALLBACK_RELATIVE_POS", (896, 596)),
                 "Launcher penceresine göre Start fallback tıklaması.", apply=_ensure_int_pair),
     ConfigField("TEMPLATE_EXTRA_CLICK_POS", "Ek tık (x,y)", "Koordinat Grupları", "int_pair",
                 _cfg_default("TEMPLATE_EXTRA_CLICK_POS", (906, 600)),
