@@ -751,14 +751,14 @@ STAGE_TIMEOUT_LIMIT = 300.0
 F_WAIT_TIMEOUT_SECONDS = 30.0
 # ---- Banka +8 otomatik başlatma ----
 AUTO_BANK_PLUS8 = True  # True: 30 sn sonra otomatik +8 döngüsüne gir
-AUTO_BANK_PLUS8_DELAY = 30.0  # saniye; istersen değeri değiştir
+AUTO_BANK_PLUS8_DELAY = 1800  # saniye; istersen değeri değiştir
 # ---- Merdiven Başlangıç Koord. ----
 VALID_X_LEFT = {811, 812, 813};
 VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
-X_TOLERANS = 2
-X_OKUMA_ADET = 5
-X_OKUMA_GECIKME = 0.06
+X_TOLERANS = 1
+X_OKUMA_ADET = 2
+X_OKUMA_GECIKME = 0.03
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -968,7 +968,7 @@ Y598_OVERSHOOT_CONFIRM_HITS = 2
 Y598_FIX_MAX_STEPS = 80
 Y598_FIX_PULSE_MIN = 0.035
 Y598_FIX_PULSE_MAX = 0.090
-Y598_FIX_READ_DELAY = 0.030
+Y598_FIX_READ_DELAY = 0.020
 # ---- Yürüme / Dönüş ----
 ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
@@ -2856,7 +2856,7 @@ def perform_login_inputs(w):
     # Eğer TAB ile odak geçmiyorsa şifre alanını tıkla:
     mouse_move(*LOGIN_PASSWORD_CLICK_POS);
     mouse_click("left");
-    time.sleep(0.05)
+    time.sleep(0.1)
     password_method = _login_input_text(LOGIN_PASSWORD, "password", target_window=w);
     time.sleep(0.1)
     press_key(SC_ENTER);
