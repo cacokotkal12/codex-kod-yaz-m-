@@ -1000,7 +1000,7 @@ MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (s
 Y598_OVERSHOOT_ENABLE = True
 Y598_OVERSHOOT_DELTA = 1
 Y598_OVERSHOOT_CONFIRM_HITS = 2
-Y598_FIX_MAX_STEPS = 80
+Y598_FIX_MAX_STEPS = 400
 Y598_FIX_PULSE_MIN = 0.035
 Y598_FIX_PULSE_MAX = 0.090
 Y598_FIX_READ_DELAY = 0.020
@@ -4232,32 +4232,116 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     return False
 
 
-def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: int = 6) -> bool:
-    """X=768 hedefinde overshoot tespit edilince S ile mikro geri toparlama + failsafe hizalama yapar."""
-    release_key(SC_W)
-    print("[PREC] X=768 overshoot tespit edildi → mikro geri başlatılıyor.")
-    taps = 0
-    while taps < max(1, int(max_taps)):
+def _overshoot_micro_realign(axis, target, read_fn, band_tol, max_steps=400, pulse_min=None, pulse_max=None,
+                             stable_hits=2, read_delay=MICRO_READ_DELAY):
+    try:
+        p_min = float(pulse_min if pulse_min is not None else globals().get("Y598_FIX_PULSE_MIN", 0.035))
+    except Exception:
+        p_min = 0.035
+    try:
+        p_max = float(pulse_max if pulse_max is not None else globals().get("Y598_FIX_PULSE_MAX", p_min))
+    except Exception:
+        p_max = p_min
+    if p_max < p_min: p_min, p_max = p_max, p_min
+    try:
+        tol = max(0, int(band_tol))
+    except Exception:
+        tol = 0
+    try:
+        max_try = max(1, int(max_steps))
+    except Exception:
+        max_try = 400
+    try:
+        stable_target = max(1, int(stable_hits))
+    except Exception:
+        stable_target = 2
+    try:
+        rd = float(read_delay)
+    except Exception:
+        rd = MICRO_READ_DELAY
+    start_cur = read_fn()
+    try:
+        start_log_cur = int(start_cur) if start_cur is not None else start_cur
+    except Exception:
+        start_log_cur = start_cur
+    print(f"[PREC][OVERSHOOT] axis={str(axis).upper()} target={target} cur={start_log_cur} → {max_try}-step micro S düzeltme başlıyor")
+    steps = 0
+    stable = 0
+    last_val = start_cur
+    while steps < max_try:
         wait_if_paused();
         watchdog_enforce()
         if _kb_pressed('f12'):
-            return False
-        micro_tap(SC_S, MICRO_PULSE_DURATION)
-        time.sleep(MICRO_READ_DELAY)
-        nx = read_axis_fn()
+            return False, last_val
+        micro_tap(SC_S, random.uniform(p_min, p_max))
+        time.sleep(max(0.0, rd))
+        cur = read_fn()
+        if cur is not None:
+            last_val = cur
         try:
-            if nx is not None and int(nx) == 768:
-                print("[PREC] X=768 overshoot düzeldi.")
-                return True
+            ci = int(cur)
         except Exception:
-            pass
-        taps += 1
-    print("[PREC] X=768 overshoot mikrodüzeltme başarısız → hizalama failsafe.")
+            ci = None
+        in_band = False
+        if ci is not None:
+            try:
+                in_band = abs(ci - int(target)) <= tol
+            except Exception:
+                in_band = False
+        if in_band:
+            stable += 1
+            if stable >= stable_target:
+                print(f"[PREC][OVERSHOOT] düzeldi cur={ci} (stable_hits={stable})")
+                return True, ci
+        else:
+            stable = 0
+        steps += 1
+        if steps % 25 == 0:
+            print(f"[PREC][OVERSHOOT] step={steps}/{max_try} cur={cur} target={target}")
+    print(f"[PREC][OVERSHOOT] {max_try} adımda düzelmedi → relaunch")
+    return False, last_val
+
+
+def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: int = 6) -> bool:
+    """X=768 hedefinde overshoot tespit edilince S ile mikro geri toparlama + failsafe hizalama yapar."""
+    release_key(SC_W)
     try:
-        town_until_valid_x(w)
-        ascend_stairs_to_top(w)
+        band = abs(int(globals().get("X_TOLERANCE", X_TOLERANCE)))
+    except Exception:
+        band = 0
+    try:
+        steps = max(int(globals().get("Y598_FIX_MAX_STEPS", 400)), int(max_taps) if max_taps is not None else 0)
+    except Exception:
+        steps = 400
+    try:
+        p_min = float(globals().get("Y598_FIX_PULSE_MIN", 0.035))
+    except Exception:
+        p_min = 0.035
+    try:
+        p_max = float(globals().get("Y598_FIX_PULSE_MAX", p_min))
+    except Exception:
+        p_max = p_min
+    try:
+        st_hits = int(globals().get("Y598_OVERSHOOT_CONFIRM_HITS", 2))
+    except Exception:
+        st_hits = 2
+    try:
+        r_delay = float(globals().get("Y598_FIX_READ_DELAY", MICRO_READ_DELAY))
+    except Exception:
+        r_delay = MICRO_READ_DELAY
+    ok, _val = _overshoot_micro_realign('x', 768, read_axis_fn, band, max_steps=steps, pulse_min=p_min,
+                                        pulse_max=p_max, stable_hits=st_hits, read_delay=r_delay)
+    if ok:
+        return True
+    set_stage("PREC_MOVE_X_768_OVERSHOOT_RELAUNCH")
+    try:
+        exit_game_fast(w)
     except Exception as e:
-        print("[PREC] X=768 failsafe hata:", e)
+        print("[PREC][OVERSHOOT] exit_game_fast hata:", e)
+    try:
+        relaunch_and_login_to_ingame()
+    except Exception as e:
+        print("[PREC][OVERSHOOT] relaunch hata:", e)
     return False
 
 def _normalize_stage_name(stage: str) -> str:
@@ -4277,9 +4361,9 @@ def _fix_y598_overshoot(w, read_axis_fn: Callable[[], Optional[int]], start_val=
     release_key(SC_W)
     set_stage("PREC_MOVE_Y_598_OVERSHOOT_FIX")
     try:
-        max_steps = int(globals().get("Y598_FIX_MAX_STEPS", 80))
+        max_steps = int(globals().get("Y598_FIX_MAX_STEPS", 400))
     except Exception:
-        max_steps = 80
+        max_steps = 400
     try:
         p_min = float(globals().get("Y598_FIX_PULSE_MIN", 0.035))
     except Exception:
@@ -4293,35 +4377,25 @@ def _fix_y598_overshoot(w, read_axis_fn: Callable[[], Optional[int]], start_val=
         r_delay = float(globals().get("Y598_FIX_READ_DELAY", 0.03))
     except Exception:
         r_delay = 0.03
-    steps = 0
-    start_val = start_val if start_val is not None else read_axis_fn()
-    while steps < max(1, max_steps):
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'):
-            return False
-        micro_tap(SC_S, random.uniform(p_min, p_max))
-        time.sleep(max(0.0, r_delay))
-        cy = read_axis_fn()
+    ok, _cur = _overshoot_micro_realign('y', 598, read_axis_fn, 1, max_steps=max_steps, pulse_min=p_min,
+                                        pulse_max=p_max, stable_hits=int(globals().get("Y598_OVERSHOOT_CONFIRM_HITS", 2)),
+                                        read_delay=r_delay)
+    if ok:
         try:
-            if cy is not None and int(cy) == 598:
-                print(f"[PREC] Y598 overshoot düzeltildi: cur={start_val} → 598")
-                return True
+            _start = int(start_val) if start_val is not None else start_val
         except Exception:
-            pass
-        steps += 1
-    print("[PREC] Y598 overshoot düzeltmesi başarısız → failsafe town denenecek.")
+            _start = start_val
+        print(f"[PREC] Y598 overshoot düzeltildi: cur={_start} → 598")
+        return True
+    set_stage("PREC_MOVE_Y_598_OVERSHOOT_RELAUNCH")
     try:
-        orig_lock = bool(globals().get("TOWN_HARD_LOCK", False))
-    except Exception:
-        orig_lock = False
-    try:
-        globals()["TOWN_HARD_LOCK"] = False
-        send_town_command(force=True)
+        exit_game_fast(w)
     except Exception as e:
-        print("[PREC] Y598 overshoot failsafe town hata:", e)
-    finally:
-        globals()["TOWN_HARD_LOCK"] = orig_lock
+        print("[PREC][OVERSHOOT] exit_game_fast hata:", e)
+    try:
+        relaunch_and_login_to_ingame()
+    except Exception as e:
+        print("[PREC][OVERSHOOT] relaunch hata:", e)
     return False
 
 
@@ -4367,6 +4441,34 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
     t0 = time.time();
+    try:
+        base_cur = _read_axis(w, axis)
+    except Exception:
+        base_cur = None
+    try:
+        expected_dir = +1 if (base_cur is None or int(target) > int(base_cur)) else -1
+    except Exception:
+        expected_dir = +1
+    try:
+        overshoot_steps = int(globals().get("Y598_FIX_MAX_STEPS", 400))
+    except Exception:
+        overshoot_steps = 400
+    try:
+        overshoot_p_min = float(globals().get("Y598_FIX_PULSE_MIN", 0.035))
+    except Exception:
+        overshoot_p_min = 0.035
+    try:
+        overshoot_p_max = float(globals().get("Y598_FIX_PULSE_MAX", overshoot_p_min))
+    except Exception:
+        overshoot_p_max = overshoot_p_min
+    try:
+        overshoot_hits_req = int(globals().get("Y598_OVERSHOOT_CONFIRM_HITS", 2))
+    except Exception:
+        overshoot_hits_req = 2
+    try:
+        overshoot_read_delay = float(globals().get("Y598_FIX_READ_DELAY", MICRO_READ_DELAY))
+    except Exception:
+        overshoot_read_delay = MICRO_READ_DELAY
     overshoot_guard = (axis == 'x' and int(target) == 768)
     y598_guard = (axis == 'y' and int(target) == 598 and bool(globals().get("Y598_OVERSHOOT_ENABLE", True)))
     overshoot_failed = False
@@ -4419,8 +4521,46 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             cur = _read_axis_guarded()
             if overshoot_failed:
                 return _finish_prec_move(False)
-            if cur is None: time.sleep(MICRO_READ_DELAY); continue
-            if abs(target - cur) <= pre_brake_delta: break
+            if cur is None:
+                time.sleep(MICRO_READ_DELAY);
+                continue
+            try:
+                cur_int = int(cur)
+            except Exception:
+                cur_int = None
+            overshoot_detected = False
+            if cur_int is not None:
+                if expected_dir > 0 and cur_int > (target + pre_brake_delta):
+                    overshoot_detected = True
+                elif expected_dir < 0 and cur_int < (target - pre_brake_delta):
+                    overshoot_detected = True
+            if overshoot_detected:
+                release_key(SC_W)
+                ok, final_val = _overshoot_micro_realign(axis, target, lambda: _read_axis(w, axis),
+                                                         max(pre_brake_delta, 0), max_steps=overshoot_steps,
+                                                         pulse_min=overshoot_p_min, pulse_max=overshoot_p_max,
+                                                         stable_hits=overshoot_hits_req, read_delay=overshoot_read_delay)
+                if not ok:
+                    set_stage(f"PREC_MOVE_{axis.upper()}_{target}_OVERSHOOT_RELAUNCH")
+                    try:
+                        exit_game_fast(w)
+                    except Exception as _e:
+                        print("[PREC][OVERSHOOT] exit_game_fast hata:", _e)
+                    try:
+                        relaunch_and_login_to_ingame()
+                    except Exception as _e:
+                        print("[PREC][OVERSHOOT] relaunch hata:", _e)
+                    return _finish_prec_move(False)
+                try:
+                    cur = int(final_val) if final_val is not None else cur
+                    cur_int = int(cur)
+                except Exception:
+                    cur_int = None
+                if cur_int is not None and abs(target - cur_int) <= pre_brake_delta:
+                    break
+                press_key(SC_W)
+                continue
+            if cur_int is not None and abs(target - cur_int) <= pre_brake_delta: break
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return _finish_prec_move(False)
             time.sleep(0.03)
     finally:
