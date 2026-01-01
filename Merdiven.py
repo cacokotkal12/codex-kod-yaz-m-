@@ -1021,6 +1021,7 @@ POST_LOGIN_INVALID_COORD_FORCE_TOWN = True
 POST_START_EXTRA_KEY_ENABLED = True
 POST_START_EXTRA_KEY = "ENTER"
 POST_START_EXTRA_KEY_DELAY = 0.10
+POST_START_EXTRA_KEY_COUNT = 2
 # ---- Splash/Login yardımcı tık ----
 SPLASH_CLICK_POS = (700, 550)
 # ---- Tooltip OCR
@@ -3594,7 +3595,14 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
                             time.sleep(max(0.0, float(globals().get("POST_START_EXTRA_KEY_DELAY", 0.10))))
                         except Exception:
                             time.sleep(0.10)
-                        _press_named_key_once(globals().get("POST_START_EXTRA_KEY", "ENTER"))
+                        try:
+                            _extra_key_count = int(globals().get("POST_START_EXTRA_KEY_COUNT", 1))
+                        except Exception:
+                            _extra_key_count = 1
+                        if _extra_key_count < 1:
+                            _extra_key_count = 1
+                        for _ in range(_extra_key_count):
+                            _press_named_key_once(globals().get("POST_START_EXTRA_KEY", "ENTER"))
                     if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
                         return True
                     print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
@@ -7082,6 +7090,9 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("POST_START_EXTRA_KEY_DELAY", "Oyun start ekstra tus bekleme (sn)", "Sunucu / Login", "float",
                 _cfg_default("POST_START_EXTRA_KEY_DELAY", 0.10),
                 "oyun_start sonrası ekstra tuş öncesi kısa bekleme."),
+    ConfigField("POST_START_EXTRA_KEY_COUNT", "Oyun start ekstra tus adet", "Sunucu / Login", "int",
+                _cfg_default("POST_START_EXTRA_KEY_COUNT", 2),
+                "oyun_start sonrası ekstra tuşun kaç kere basılacağı."),
     ConfigField("SERVER_OPEN_POS", "Sunucu listesi (x,y)", "Sunucu / Login", "int_pair",
                 _cfg_default("SERVER_OPEN_POS", (455, 231)),
                 "Sunucu seçim açılır listesinin konumu.", apply=_ensure_int_pair),
@@ -10255,6 +10266,7 @@ try:
         "POST_START_EXTRA_KEY_ENABLED": True,
         "POST_START_EXTRA_KEY": "ENTER",
         "POST_START_EXTRA_KEY_DELAY": 0.10,
+        "POST_START_EXTRA_KEY_COUNT": 2,
     }
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS, list) and FABRIC_STEPS:
