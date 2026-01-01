@@ -1013,9 +1013,9 @@ TURN_LEFT_SEC = 1.41;
 TURN_RIGHT_SEC = 1.41
 # ---- Town ----
 TOWN_CLICK_POS = (775, 775);
-TOWN_WAIT = 2.5
-TOWN_WAIT_FIRST = 2.5
-TOWN_WAIT_RETRY_FAST = 1.2
+TOWN_POST_WAIT_SECONDS = 1.3
+TOWN_ALIGN_FAIL_ATTEMPTS = 30
+TOWN_ALIGN_FAIL_TIMEOUT = 60.0
 TOWN_RETRY_X_OKUMA_ADET = 2
 # ---- Splash/Login yardımcı tık ----
 SPLASH_CLICK_POS = (700, 550)
@@ -4587,8 +4587,14 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
 def town_until_valid_x(w):
     set_stage("TOWN_ALIGN_FOR_VALID_X");
     attempts = 0
-    fail_attempts = 20
-    fail_timeout = 45.0
+    try:
+        fail_attempts = int(globals().get("TOWN_ALIGN_FAIL_ATTEMPTS", 30))
+    except Exception:
+        fail_attempts = 30
+    try:
+        fail_timeout = float(globals().get("TOWN_ALIGN_FAIL_TIMEOUT", 60.0))
+    except Exception:
+        fail_timeout = 60.0
     t0 = time.time()
     while True:
         wait_if_paused();
@@ -4602,36 +4608,11 @@ def town_until_valid_x(w):
         if xi is not None and _is_valid_x(xi):
             print(f"[ALIGN] X={xi} strict geçerli.");
             return xi
-        print(f"[ALIGN] X={x} strict geçersiz → town ({'retry_fast' if attempts > 0 else 'first'})");
+        print(f"[ALIGN] X={x} strict geçersiz → town (deneme={attempts + 1})");
         ensure_ui_closed();
-        if attempts == 0:
-            try:
-                tw = float(globals().get("TOWN_WAIT_FIRST", TOWN_WAIT))
-            except Exception:
-                tw = TOWN_WAIT
-            slow_sleep = random.uniform(0.8, 1.2)
-            print(f"[TOWN] retry_slow_reason=first_attempt wait={tw:.2f} sleep={slow_sleep:.2f}")
-            send_town_command(wait_override=tw);
-            attempts += 1;
-            set_stage("TOWN_ALIGN_FOR_VALID_X");
-            try:
-                time.sleep(slow_sleep)
-            except Exception:
-                time.sleep(0.9)
-            continue
-        try:
-            tw = float(globals().get("TOWN_WAIT_RETRY_FAST", 1.2))
-        except Exception:
-            tw = 1.2
-        fast_sleep = 0.5
-        print(f"[TOWN] retry_slow_reason=retry_fast wait={tw:.2f} sleep={fast_sleep:.2f}")
-        send_town_command(wait_override=tw);
+        send_town_command();
         attempts += 1;
         set_stage("TOWN_ALIGN_FOR_VALID_X");
-        try:
-            time.sleep(fast_sleep)
-        except Exception:
-            time.sleep(0.5)
         if attempts >= fail_attempts or (time.time() - t0) >= fail_timeout:
             print(f"[ALIGN] Fail-safe tetikledi (deneme={attempts}, süre={time.time() - t0:.1f}s) → çıkış.")
             set_stage("EXIT_GAME")
@@ -4830,9 +4811,9 @@ def send_town_command(*a, force=False, wait_override=None, **kw):
     mouse_move(*TOWN_CLICK_POS);
     mouse_click('left');
     try:
-        tw = float(wait_override) if wait_override is not None else float(TOWN_WAIT)
+        tw = float(globals().get("TOWN_POST_WAIT_SECONDS", 1.3))
     except Exception:
-        tw = TOWN_WAIT
+        tw = 1.3
     time.sleep(tw)
     BANK_OPEN = False
     return True
@@ -7650,7 +7631,9 @@ _TR = {
     'TOWN_LOCKED': 'town kilidi',
     'TOWN_HARD_LOCK': 'town hard kilit',
     'TOWN_MIN_INTERVAL_SEC': 'town min aralık (sn)',
-    'TOWN_WAIT': 'town bekleme (sn)',
+    'TOWN_POST_WAIT_SECONDS': 'town bekleme (sn)',
+    'TOWN_ALIGN_FAIL_ATTEMPTS': 'town align deneme limiti',
+    'TOWN_ALIGN_FAIL_TIMEOUT': 'town align zaman limiti (sn)',
     'WINDOW_TITLE_KEYWORD': 'pencere başlık anahtar',
     'WINDOW_APPEAR_TIMEOUT': 'pencere görünme zaman aşımı (sn)',
     'GAME_START_TEMPLATE_PATH': "launch 'Start' şablonu", 'GAME_START_TEMPLATE_PATHS': "launch 'Start' şablonları",
@@ -7863,7 +7846,9 @@ _ADV_CATEGORY_RULES = (
     ("Town", dict(
         names=(
             'TOWN_CLICK_POS',
-            'TOWN_WAIT',
+            'TOWN_POST_WAIT_SECONDS',
+            'TOWN_ALIGN_FAIL_ATTEMPTS',
+            'TOWN_ALIGN_FAIL_TIMEOUT',
             'TOWN_MIN_INTERVAL_SEC',
             'TOWN_LOCKED',
             'TOWN_HARD_LOCK',
@@ -10184,6 +10169,9 @@ try:
 
         # --- Güvenlik/Town ---
         "TOWN_MIN_INTERVAL_SEC": 1.2,
+        "TOWN_POST_WAIT_SECONDS": 1.3,
+        "TOWN_ALIGN_FAIL_ATTEMPTS": 30,
+        "TOWN_ALIGN_FAIL_TIMEOUT": 60.0,
     }
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS, list) and FABRIC_STEPS:
@@ -10545,6 +10533,12 @@ def _y_build_and_attach_gui(root):
     lf_t.pack(fill="x", padx=4, pady=4)
     tmin = _y_make_entry(lf_t, "TOWN_MIN_INTERVAL_SEC",
                          data.get("TOWN_MIN_INTERVAL_SEC", gdef.get("TOWN_MIN_INTERVAL_SEC")))
+    tpost = _y_make_entry(lf_t, "Town Sonrasi Bekleme (sn)",
+                          data.get("TOWN_POST_WAIT_SECONDS", gdef.get("TOWN_POST_WAIT_SECONDS")))
+    talign_attempts = _y_make_entry(lf_t, "Town Align Fail Attempts",
+                                    data.get("TOWN_ALIGN_FAIL_ATTEMPTS", gdef.get("TOWN_ALIGN_FAIL_ATTEMPTS")))
+    talign_timeout = _y_make_entry(lf_t, "Town Align Fail Timeout (sn)",
+                                   data.get("TOWN_ALIGN_FAIL_TIMEOUT", gdef.get("TOWN_ALIGN_FAIL_TIMEOUT")))
 
     # --- Kaydet / Uygula butonları ---
     btns = ttk.Frame(outer);
@@ -10631,6 +10625,9 @@ def _y_build_and_attach_gui(root):
                 "NEXT_PLUS7_CHECK_AT": _y_to_int(n7at.get(), 1),
 
                 "TOWN_MIN_INTERVAL_SEC": _y_to_float(tmin.get(), 1.2),
+                "TOWN_POST_WAIT_SECONDS": _y_to_float(tpost.get(), 1.3),
+                "TOWN_ALIGN_FAIL_ATTEMPTS": _y_to_int(talign_attempts.get(), 30),
+                "TOWN_ALIGN_FAIL_TIMEOUT": _y_to_float(talign_timeout.get(), 60.0),
             })
 
             fsteps = []
