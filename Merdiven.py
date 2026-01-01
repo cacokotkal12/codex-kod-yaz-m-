@@ -1017,6 +1017,10 @@ TOWN_POST_WAIT_SECONDS = 1.3
 TOWN_ALIGN_FAIL_ATTEMPTS = 30
 TOWN_ALIGN_FAIL_TIMEOUT = 60.0
 TOWN_RETRY_X_OKUMA_ADET = 2
+POST_LOGIN_INVALID_COORD_FORCE_TOWN = True
+POST_START_EXTRA_KEY_ENABLED = True
+POST_START_EXTRA_KEY = "ENTER"
+POST_START_EXTRA_KEY_DELAY = 0.10
 # ---- Splash/Login yardımcı tık ----
 SPLASH_CLICK_POS = (700, 550)
 # ---- Tooltip OCR
@@ -1959,6 +1963,46 @@ def release_key(sc):
     ii_.ki = KeyBdInput(0, sc, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0, ctypes.pointer(extra))
     SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(1), ii_)), ctypes.sizeof(Input));
     time.sleep(tus_hizi)
+
+
+def _press_named_key_once(name):
+    try:
+        key = str(name or "").strip().upper()
+    except Exception:
+        key = ""
+    if not key:
+        return False
+    _map = {
+        "ENTER": SC_ENTER,
+        "SPACE": 0x39,
+        "ESC": SC_ESC,
+        "ESCAPE": SC_ESC,
+        "F1": 0x3B,
+        "F2": 0x3C,
+        "F3": 0x3D,
+        "F4": 0x3E,
+        "F5": 0x3F,
+        "F6": 0x40,
+        "F7": 0x41,
+        "F8": 0x42,
+        "F9": 0x43,
+        "F10": 0x44,
+        "F11": 0x57,
+        "F12": 0x58,
+    }
+    sc = _map.get(key)
+    if sc is None:
+        try:
+            codes = keyboard.key_to_scan_codes(key.lower())
+            if codes:
+                sc = codes[0]
+        except Exception:
+            sc = None
+    if sc is None:
+        return False
+    press_key(sc);
+    release_key(sc);
+    return True
 
 
 def _release_movement_keys():
@@ -3545,6 +3589,12 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
                                              roi=globals().get("GAME_START_ROI", GAME_START_ROI),
                                              fixed_click_pos=globals().get("GAME_START_FIXED_CLICK_POS", GAME_START_FIXED_CLICK_POS))
                 if ok:
+                    if bool(globals().get("POST_START_EXTRA_KEY_ENABLED", True)):
+                        try:
+                            time.sleep(max(0.0, float(globals().get("POST_START_EXTRA_KEY_DELAY", 0.10))))
+                        except Exception:
+                            time.sleep(0.10)
+                        _press_named_key_once(globals().get("POST_START_EXTRA_KEY", "ENTER"))
                     if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
                         return True
                     print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
@@ -4608,10 +4658,17 @@ def town_until_valid_x(w):
         if xi is not None and _is_valid_x(xi):
             print(f"[ALIGN] X={xi} strict geçerli.");
             return xi
-        print(f"[ALIGN] X={x} strict geçersiz → town (deneme={attempts + 1})");
         ensure_ui_closed();
-        send_town_command();
-        attempts += 1;
+        if bool(globals().get("POST_LOGIN_INVALID_COORD_FORCE_TOWN", True)):
+            town_sent = send_town_command(force=True, reason="POST_LOGIN_INVALID_COORD");
+        else:
+            town_sent = send_town_command();
+        if town_sent:
+            attempts += 1;
+            print(f"[ALIGN] X={x} strict geçersiz → town (deneme={attempts})");
+        else:
+            print(f"[ALIGN] X={x} strict geçersiz → town gönderilemedi/skip");
+            time.sleep(0.12)
         set_stage("TOWN_ALIGN_FOR_VALID_X");
         if attempts >= fail_attempts or (time.time() - t0) >= fail_timeout:
             print(f"[ALIGN] Fail-safe tetikledi (deneme={attempts}, süre={time.time() - t0:.1f}s) → çıkış.")
@@ -7016,6 +7073,15 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("LOGIN_TYPE_DELAY", "Login yazma hızı (sn/karakter)", "Sunucu / Login", "float",
                 _cfg_default("LOGIN_TYPE_DELAY", 0.03),
                 "Kullanıcı adı ve şifre yazılırken karakter başına bekleme süresi."),
+    ConfigField("POST_START_EXTRA_KEY_ENABLED", "Oyun start sonrası ekstra tus", "Sunucu / Login", "bool",
+                _cfg_default("POST_START_EXTRA_KEY_ENABLED", True),
+                "oyun_start tıklandıktan sonra ekstra tuş basılsın."),
+    ConfigField("POST_START_EXTRA_KEY", "Oyun start ekstra tus secimi", "Sunucu / Login", "str",
+                _cfg_default("POST_START_EXTRA_KEY", "ENTER"),
+                "oyun_start sonrası basılacak tuş (ENTER varsayılan)."),
+    ConfigField("POST_START_EXTRA_KEY_DELAY", "Oyun start ekstra tus bekleme (sn)", "Sunucu / Login", "float",
+                _cfg_default("POST_START_EXTRA_KEY_DELAY", 0.10),
+                "oyun_start sonrası ekstra tuş öncesi kısa bekleme."),
     ConfigField("SERVER_OPEN_POS", "Sunucu listesi (x,y)", "Sunucu / Login", "int_pair",
                 _cfg_default("SERVER_OPEN_POS", (455, 231)),
                 "Sunucu seçim açılır listesinin konumu.", apply=_ensure_int_pair),
@@ -7028,6 +7094,9 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("TOWN_CLICK_POS", "Town tık (x,y)", "HP & Town", "int_pair",
                 _cfg_default("TOWN_CLICK_POS", (775, 775)),
                 "Town komutunun tıklama noktası.", apply=_ensure_int_pair),
+    ConfigField("POST_LOGIN_INVALID_COORD_FORCE_TOWN", "Login sonrasi gecersiz X force town", "HP & Town", "bool",
+                _cfg_default("POST_LOGIN_INVALID_COORD_FORCE_TOWN", True),
+                "TOWN_ALIGN_FOR_VALID_X aşamasında hatalı X okunursa force town gönder."),
     ConfigField("SPLASH_CLICK_POS", "Splash tık (x,y)", "HP & Town", "int_pair",
                 _cfg_default("SPLASH_CLICK_POS", (700, 550)),
                 "Splash ekranını geçmek için tıklanan koordinat.", apply=_ensure_int_pair),
@@ -9454,13 +9523,23 @@ if not _TOWN_WRAPPED:
         def _wrapped(*args, **kwargs):
             global TOWN_LOCK, _TOWN_REQ_TS, _TOWN_REQ_COUNT, TOWN_MIN_INTERVAL_SEC
             now = time.time()
+            try:
+                cur_stage = _normalize_stage_name(globals().get("_current_stage", ""))
+            except Exception:
+                cur_stage = ""
+            try:
+                force_reason = str(kwargs.get("reason", "") or "").upper()
+            except Exception:
+                force_reason = ""
+            bypass_guard = bool(kwargs.get("force") and cur_stage == "TOWN_ALIGN_FOR_VALID_X" and
+                               force_reason == "POST_LOGIN_INVALID_COORD" and
+                               bool(globals().get("POST_LOGIN_INVALID_COORD_FORCE_TOWN", True)))
             # Debounce
-            if now - float(_TOWN_REQ_TS) < float(TOWN_MIN_INTERVAL_SEC):
+            if not bypass_guard and now - float(_TOWN_REQ_TS) < float(TOWN_MIN_INTERVAL_SEC):
                 _town_log_once('[TOWN] Debounce — son deneme çok yakın, skip.')
                 return False
             # Kilit açıkken gelen istekleri izle
-            if 'TOWN_LOCK' in globals() and TOWN_LOCK:
-                # burst sayacı
+            if not bypass_guard and 'TOWN_LOCK' in globals() and TOWN_LOCK:
                 _TOWN_REQ_COUNT = (_TOWN_REQ_COUNT + 1) if (now - _TOWN_REQ_TS) < 3.0 else 1
                 _TOWN_REQ_TS = now
                 if _TOWN_REQ_COUNT >= 8:
@@ -10172,6 +10251,10 @@ try:
         "TOWN_POST_WAIT_SECONDS": 1.3,
         "TOWN_ALIGN_FAIL_ATTEMPTS": 30,
         "TOWN_ALIGN_FAIL_TIMEOUT": 60.0,
+        "POST_LOGIN_INVALID_COORD_FORCE_TOWN": True,
+        "POST_START_EXTRA_KEY_ENABLED": True,
+        "POST_START_EXTRA_KEY": "ENTER",
+        "POST_START_EXTRA_KEY_DELAY": 0.10,
     }
     # Çalışan kodda varsa mevcut FABRIC/LINEN_STEPS değerlerini al ve defaults'u güncelle
     if "FABRIC_STEPS" in globals() and isinstance(FABRIC_STEPS, list) and FABRIC_STEPS:
