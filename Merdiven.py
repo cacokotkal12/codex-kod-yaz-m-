@@ -971,8 +971,8 @@ X_TOL_READ_DELAY = 0.015  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
-PRESS_MIN = 0.035  # S/W mikro basış minimum (sn)
-PRESS_MAX = 0.090  # S/W mikro basış maksimum (sn)
+PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
+PRESS_MAX = 0.1  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
