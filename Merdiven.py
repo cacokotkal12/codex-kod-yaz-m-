@@ -6178,7 +6178,15 @@ def run_stairs_and_workflow(w):
                     _reset_invalid_x_recover_state()
                 else:
                     print(f"[CHECK] X={stab_x} geçersiz → recovery.")
-                    w = recover_from_invalid_x(w, x, y, [(sx, None) for sx in stab_samples])
+                    NEED_STAIRS_REALIGN = True
+                    set_stage("TOWN_ALIGN_FOR_VALID_X")
+                    TOWN_LOCKED = False
+                    try:
+                        print("[RECOVER] WORKFLOW_LOOP invalid X → town_until_valid_x")
+                    except Exception:
+                        pass
+                    town_until_valid_x(w)
+                    _reset_invalid_x_recover_state()
                     continue
             else:
                 _reset_invalid_x_recover_state()
