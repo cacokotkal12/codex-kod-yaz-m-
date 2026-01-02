@@ -6791,6 +6791,10 @@ FABRIC_STEPS = [((686, 290), 2, "right"), ((736, 290), 2, "right"), ((786, 290),
 LINEN_STEPS = [((687, 237), 2, "right"), ((737, 237), 2, "right"), ((787, 237), 3, "right"), ((837, 237), 3, "right"),
                ((887, 237), 4, "right")]  # 2. sayfa
 BUY_TURNS = 2  # döngü sayısı (2 tur = 28 adet)
+npc_tur_modu_enabled = bool(globals().get("npc_tur_modu_enabled", True))
+npc_tek_urun_mode = str(globals().get("npc_tek_urun_mode", "LINEN"))
+npc_tur_plani_text = str(globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT))
+BUY_PLAN_STATE = globals().get("BUY_PLAN_STATE", _buy_plan_default_state(npc_tur_plani_text))
 if "NPC_MENU_PAGE2_POS" not in globals(): NPC_MENU_PAGE2_POS = (919, 540)  # güvenli varsayılan
 
 
@@ -6799,6 +6803,140 @@ def _set_buy_mode(mode: str):
     if mode in ("FABRIC", "LINEN") and BUY_MODE != mode:
         BUY_MODE = mode;
         print(f"[BUY_MODE] -> {BUY_MODE}")  # mod bildirimi
+
+
+def _parse_buy_plan_text(plan_text):
+    def _build_list(text_raw):
+        plan_list = []
+        valid = True
+        for chunk in str(text_raw).split(";"):
+            if not str(chunk).strip():
+                continue
+            parts = chunk.split(":")
+            if len(parts) != 2:
+                valid = False
+                break
+            mode = parts[0].strip().upper()
+            try:
+                cnt = int(float(str(parts[1]).strip()))
+            except Exception:
+                valid = False
+                break
+            if mode not in ("LINEN", "FABRIC") or cnt < 1:
+                valid = False
+                break
+            plan_list.append((mode, cnt))
+        if not plan_list:
+            valid = False
+        return plan_list if valid else None
+
+    raw = str(plan_text or "").strip()
+    if not raw:
+        raw = _BUY_PLAN_DEFAULT_TEXT
+    plan = _build_list(raw)
+    if plan is None:
+        try:
+            print("[BUYPLAN] invalid plan -> fallback default")
+        except Exception:
+            pass
+        raw = _BUY_PLAN_DEFAULT_TEXT
+        plan = _build_list(raw)
+    if not plan:
+        plan = [("LINEN", 2), ("FABRIC", 2)]
+    return plan, raw
+
+
+def _ensure_buy_plan_state(plan, plan_text, state=None):
+    if not plan:
+        plan = [("LINEN", 2), ("FABRIC", 2)]
+    if not isinstance(state, dict):
+        state = {}
+    idx = 0
+    rem = plan[0][1]
+    try:
+        idx = int(state.get("plan_index", 0))
+        rem = int(state.get("remaining_turns", rem))
+    except Exception:
+        idx = 0;
+        rem = plan[0][1]
+    idx = idx % len(plan)
+    if rem <= 0:
+        rem = plan[idx][1]
+    if state.get("plan_string_last") != plan_text:
+        return {"plan_string_last": plan_text, "plan_index": 0, "remaining_turns": plan[0][1]}
+    state.update({"plan_string_last": plan_text, "plan_index": idx, "remaining_turns": rem})
+    return state
+
+
+def _persist_buy_plan_state_to_cfg():
+    try:
+        cfg = load_config()
+        purchase = cfg.get("purchase", {})
+        if not isinstance(purchase, dict):
+            purchase = {}
+        purchase.update({
+            "npc_tur_modu_enabled": bool(globals().get("npc_tur_modu_enabled", True)),
+            "npc_tek_urun_mode": str(globals().get("npc_tek_urun_mode", "LINEN")).upper(),
+            "npc_tur_plani_text": str(globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT)),
+            "buy_plan_state": dict(globals().get("BUY_PLAN_STATE", {})),
+        })
+        cfg["purchase"] = purchase
+        save_config_atomic(cfg)
+    except Exception as e:
+        try:
+            print("[BUYPLAN] persist hata:", e)
+        except Exception:
+            pass
+
+
+def _update_gui_plan_status(state=None):
+    try:
+        var = globals().get("_GUI_PLAN_STATUS_VAR")
+        if var is None:
+            return
+        st = state if isinstance(state, dict) else globals().get("BUY_PLAN_STATE", {})
+        plan_source_text = globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT)
+        if isinstance(st, dict) and st.get("plan_string_last"):
+            plan_source_text = st.get("plan_string_last")
+        plan, _ = _parse_buy_plan_text(plan_source_text)
+        if not plan:
+            return
+        idx = 0
+        rem = plan[0][1]
+        try:
+            idx = int(st.get("plan_index", 0)) % len(plan)
+            rem = int(st.get("remaining_turns", rem))
+        except Exception:
+            idx = 0;
+            rem = plan[0][1]
+        if rem <= 0:
+            rem = plan[idx][1]
+        var.set(f"Sıradaki: {plan[idx][0]} | Kalan: {rem}")
+    except Exception:
+        pass
+
+
+def buyplan_get_mode_and_advance_state_after_success(success=False):
+    global BUY_PLAN_STATE, npc_tur_plani_text
+    plan, used_text = _parse_buy_plan_text(globals().get("npc_tur_plani_text", npc_tur_plani_text))
+    npc_tur_plani_text = used_text
+    state = _ensure_buy_plan_state(plan, used_text, globals().get("BUY_PLAN_STATE"))
+    BUY_PLAN_STATE = state
+    idx = int(BUY_PLAN_STATE.get("plan_index", 0)) % len(plan)
+    if BUY_PLAN_STATE.get("remaining_turns", 0) <= 0:
+        BUY_PLAN_STATE["remaining_turns"] = plan[idx][1]
+    mode = plan[idx][0]
+    if success:
+        rem = int(BUY_PLAN_STATE.get("remaining_turns", plan[idx][1])) - 1
+        if rem <= 0:
+            idx = (idx + 1) % len(plan)
+            rem = plan[idx][1]
+        BUY_PLAN_STATE.update({"plan_index": idx, "remaining_turns": rem, "plan_string_last": used_text})
+        _persist_buy_plan_state_to_cfg()
+    else:
+        BUY_PLAN_STATE.update({"plan_string_last": used_text})
+    _update_gui_plan_status(BUY_PLAN_STATE)
+    return mode
 
 
 def _check_hotkeys_for_buy_mode():
@@ -6848,6 +6986,18 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     _workflow_precondition_gate(w)
     set_stage("GO_TO_NPC");
     ensure_ui_closed()
+    tur_modu = bool(globals().get("npc_tur_modu_enabled", True))
+    try:
+        if tur_modu:
+            mode_now = buyplan_get_mode_and_advance_state_after_success(success=False)
+        else:
+            mode_now = str(globals().get("npc_tek_urun_mode", BUY_MODE)).upper()
+    except Exception:
+        mode_now = BUY_MODE
+    try:
+        _set_buy_mode(mode_now)
+    except Exception:
+        globals()["BUY_MODE"] = mode_now
     press_key(SC_A);
     time.sleep(TURN_LEFT_SEC);
     release_key(SC_A)
@@ -6877,7 +7027,7 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
             w2 = relaunch_and_login_to_ingame();
             return (False, w2 if w2 else w)
         return (False, w)
-    if BUY_MODE == "LINEN":
+    if mode_now == "LINEN":
         mouse_move(*NPC_MENU_PAGE2_POS);
         mouse_click("left");
         time.sleep(0.15)  # LINEN → 2. sayfa
@@ -6886,6 +7036,11 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     onay_ok, w_after = confirm_npc_shop_or_relogin(w)
     if not onay_ok: return (False, w_after if w_after is not None else w)
     purchased = buy_items_from_npc();
+    if tur_modu and purchased:
+        try:
+            buyplan_get_mode_and_advance_state_after_success(success=True)
+        except Exception:
+            pass
     return (purchased, w)
 
 def buy_items_from_npc():
@@ -7342,6 +7497,21 @@ from functools import wraps
 
 _BASE_CONFIG_DEFAULTS = json.loads(
     r'''{"timeouts": {"move_timeout": 20.0, "ocr_timeout": 3.0, "npc_buy_timeout": 12.0}, "ocr": {"tess_config": "--psm7 -c tessedit_char_whitelist=0123456789", "rois": [[10, 10, 120, 40], [10, 40, 120, 70]]}, "logging": {"runs_csv": "runs.csv", "log_dir": "logs"}, "special_deltas": {}}''')
+_BUY_PLAN_DEFAULT_TEXT = "LINEN:2;FABRIC:2"
+
+
+def _buy_plan_default_state(plan_text=None):
+    txt = str(plan_text or _BUY_PLAN_DEFAULT_TEXT)
+    return {"plan_string_last": txt, "plan_index": 0, "remaining_turns": 2}
+
+
+def _purchase_defaults():
+    return {
+        "npc_tur_modu_enabled": True,
+        "npc_tek_urun_mode": "LINEN",
+        "npc_tur_plani_text": _BUY_PLAN_DEFAULT_TEXT,
+        "buy_plan_state": _buy_plan_default_state(),
+    }
 
 
 # --- Config yükle/kaydet ---
@@ -7351,9 +7521,14 @@ def load_config(path=None, defaults=None):
     if defaults is None:
         defaults = _schema_defaults(_BASE_CONFIG_DEFAULTS)
     try:
+        defaults.setdefault("meta", {"version": 1})
+        defaults.setdefault("purchase", _purchase_defaults())
+    except Exception:
+        pass
+    try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if not os.path.exists(path):
-            with open(path, 'w', encoding='utf-8') as f: json.dump(defaults, f, indent=2, ensure_ascii=False)
+            save_config_atomic(defaults, path)
             return defaults
         with open(path, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
@@ -7376,12 +7551,32 @@ def save_config(cfg, path=None):
     if path is None:
         path = _MERDIVEN_CFG_PATH()
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
-        return True
+        return save_config_atomic(cfg, path)
     except Exception as e:
         print('[PATCH][config] save error:', e)
+        return False
+
+
+def save_config_atomic(cfg, path=None):
+    if path is None:
+        path = _MERDIVEN_CFG_PATH()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        print('[PATCH][config] atomic save error:', e)
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except Exception:
+            pass
         return False
 
 
@@ -8157,6 +8352,135 @@ except NameError:
 
 
 # --- /fallback ---
+_GUI_LAST_INSTANCE = None
+_GUI_PLAN_STATUS_VAR = None
+
+
+def collect_config_from_ui(gui=None):
+    g = gui or globals().get("_GUI_LAST_INSTANCE")
+    if g is None:
+        return load_config()
+    gui_data = {}
+    for k, var in g.v.items():
+        if k in getattr(g, "_stats_keys", ()):
+            continue
+        try:
+            gui_data[k] = var.get()
+        except Exception:
+            pass
+    adv_data = {}
+    for name, var in getattr(g, "adv_rows", []):
+        try:
+            adv_data[name] = var.get()
+        except Exception:
+            pass
+    cfg = {"meta": {"version": 1}, "gui": gui_data, "advanced": adv_data}
+    plan_text = str(gui_data.get("npc_tur_plani_text", globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT)))
+    plan, plan_text = _parse_buy_plan_text(plan_text)
+    state = globals().get("BUY_PLAN_STATE", {})
+    if state.get("plan_string_last") != plan_text:
+        state = {"plan_string_last": plan_text, "plan_index": 0, "remaining_turns": plan[0][1]}
+    state = _ensure_buy_plan_state(plan, plan_text, state)
+    purchase = {
+        "npc_tur_modu_enabled": bool(gui_data.get("npc_tur_modu_enabled", globals().get("npc_tur_modu_enabled", True))),
+        "npc_tek_urun_mode": str(gui_data.get("npc_tek_urun_mode", globals().get("npc_tek_urun_mode", "LINEN"))).upper(),
+        "npc_tur_plani_text": plan_text,
+        "buy_plan_state": state,
+    }
+    cfg["purchase"] = purchase
+    globals()["BUY_PLAN_STATE"] = state
+    globals()["npc_tur_plani_text"] = plan_text
+    globals()["npc_tur_modu_enabled"] = purchase["npc_tur_modu_enabled"]
+    globals()["npc_tek_urun_mode"] = purchase["npc_tek_urun_mode"]
+    return cfg
+
+
+def apply_config_to_ui(cfg, gui=None):
+    g = gui or globals().get("_GUI_LAST_INSTANCE")
+    if g is None:
+        return False
+    gui_data = (cfg.get("gui", {}) or {})
+    purchase = (cfg.get("purchase", {}) or {})
+    adv_cfg = (cfg.get("advanced", {}) or {})
+    for k, val in purchase.items():
+        if k in g.v:
+            gui_data[k] = val
+    for k, val in gui_data.items():
+        if k in getattr(g, "_stats_keys", ()):
+            continue
+        var = g.v.get(k)
+        if not var:
+            continue
+        try:
+            import tkinter as tk
+            if isinstance(var, tk.IntVar):
+                var.set(int(val))
+            elif isinstance(var, tk.DoubleVar):
+                var.set(float(val))
+            elif isinstance(var, tk.BooleanVar):
+                if isinstance(val, str):
+                    var.set(val.lower() in ("1", "true", "yes", "on"))
+                else:
+                    var.set(bool(val))
+            else:
+                var.set(str(val))
+        except Exception:
+            pass
+    for name, var in getattr(g, "adv_rows", []):
+        if name in adv_cfg:
+            try:
+                var.set(str(adv_cfg.get(name)))
+            except Exception:
+                pass
+    _update_gui_plan_status(globals().get("BUY_PLAN_STATE"))
+    return True
+
+
+def apply_config_to_runtime(cfg, gui=None):
+    purchase = (cfg.get("purchase", {}) or {})
+    plan_text = str(purchase.get("npc_tur_plani_text", globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT)))
+    plan, plan_text = _parse_buy_plan_text(plan_text)
+    state = _ensure_buy_plan_state(plan, plan_text, purchase.get("buy_plan_state", globals().get("BUY_PLAN_STATE")))
+    globals()["npc_tur_modu_enabled"] = bool(purchase.get("npc_tur_modu_enabled", globals().get("npc_tur_modu_enabled", True)))
+    globals()["npc_tek_urun_mode"] = str(purchase.get("npc_tek_urun_mode", globals().get("npc_tek_urun_mode", "LINEN"))).upper()
+    globals()["npc_tur_plani_text"] = plan_text
+    globals()["BUY_PLAN_STATE"] = state
+    _update_gui_plan_status(state)
+    adv_cfg = (cfg.get("advanced", {}) or {})
+    for name, raw in adv_cfg.items():
+        try:
+            import ast
+            try:
+                val = ast.literal_eval(raw)
+            except Exception:
+                val = raw
+            setattr(sys.modules[__name__], name, val)
+        except Exception:
+            pass
+    if gui is not None:
+        try:
+            gui.apply_core()
+        except Exception:
+            pass
+        return True
+    gui_data = (cfg.get("gui", {}) or {})
+    try:
+        _set_buy_mode(str(gui_data.get("buy_mode", BUY_MODE)).upper())
+    except Exception:
+        globals()["BUY_MODE"] = str(gui_data.get("buy_mode", BUY_MODE)).upper()
+    assignments = [
+        ("buy_turns", "BUY_TURNS", int),
+        ("scroll_low", "SCROLL_ALIM_ADET", int),
+        ("scroll_mid", "SCROLL_MID_ALIM_ADET", int),
+        ("basma_hakki", "BASMA_HAKKI", int),
+    ]
+    for src, dst, cast in assignments:
+        if src in gui_data:
+            try:
+                globals()[dst] = cast(gui_data.get(src))
+            except Exception:
+                globals()[dst] = gui_data.get(src)
+    return True
 
 def _tr_name(n):
     t = _TR.get(n);
@@ -8185,6 +8509,7 @@ def _MERDIVEN_RUN_GUI():
             self._log_satirlar = []
             self._log_kuyruk = queue.Queue(maxsize=4000)
             self.caps_status_text = tk.StringVar(value="")
+            self.plan_status_var = tk.StringVar(value="")
             # ---- GUI değişkenleri (üstte dursun, ayarlanabilir) ----
             self.v = {
                 "username": tk.StringVar(value=getattr(m, "LOGIN_USERNAME", "")),
@@ -8199,6 +8524,9 @@ def _MERDIVEN_RUN_GUI():
                 "plus8_wait_interval": tk.DoubleVar(value=float(getattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 10.0))),
                 "buy_mode": tk.StringVar(value=getattr(m, "BUY_MODE", "LINEN")),
                 "buy_turns": tk.IntVar(value=int(getattr(m, "BUY_TURNS", 2))),
+                "npc_tur_modu_enabled": tk.BooleanVar(value=bool(getattr(m, "npc_tur_modu_enabled", True))),
+                "npc_tek_urun_mode": tk.StringVar(value=str(getattr(m, "npc_tek_urun_mode", "LINEN"))),
+                "npc_tur_plani_text": tk.StringVar(value=str(getattr(m, "npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT))),
                 "scroll_low": tk.IntVar(value=int(getattr(m, "SCROLL_ALIM_ADET", 0))),
                 "scroll_mid": tk.IntVar(value=int(getattr(m, "SCROLL_MID_ALIM_ADET", 0))),
                 "basma_hakki": tk.IntVar(value=int(getattr(m, "BASMA_HAKKI", 31))),
@@ -8275,6 +8603,8 @@ def _MERDIVEN_RUN_GUI():
             self.v["brake_safe"] = tk.IntVar(value=int(dm.get("SAFE", 1)))
             self.sale_slot_var = tk.StringVar(value=str(getattr(m, "ITEM_SALE_LAST_SLOT_COUNT", "-")))
             self.adv_rows = []
+            globals()["_GUI_LAST_INSTANCE"] = self
+            globals()["_GUI_PLAN_STATUS_VAR"] = self.plan_status_var
             self._build();
             self._load_json();
             try:
@@ -8311,15 +8641,10 @@ def _MERDIVEN_RUN_GUI():
             print("[GUI]", s)
 
         def _safe_load_cfg(self):
-            import json
             try:
-                with open(self._cfg(), "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        return data
+                return load_config()
             except Exception:
-                pass
-            return {}
+                return {}
 
         def _apply_initial_geometry(self):
             gui_cfg = self._cached_gui_cfg if isinstance(self._cached_gui_cfg, dict) else {}
@@ -8760,17 +9085,32 @@ def _MERDIVEN_RUN_GUI():
                                                                                                sticky="w")
             ttk.Radiobutton(f2, text="FABRIC", value="FABRIC", variable=self.v["buy_mode"]).grid(row=0, column=2,
                                                                                                  sticky="w")
-            ttk.Label(f2, text=_tr_name("BUY_TURNS")).grid(row=1, column=0, sticky="e");
-            ttk.Entry(f2, textvariable=self.v["buy_turns"], width=8).grid(row=1, column=1, sticky="w")
-            ttk.Label(f2, text=_tr_name("SCROLL_ALIM_ADET")).grid(row=2, column=0, sticky="e");
-            ttk.Entry(f2, textvariable=self.v["scroll_low"], width=8).grid(row=2, column=1, sticky="w")
-            ttk.Label(f2, text=_tr_name("SCROLL_MID_ALIM_ADET")).grid(row=3, column=0, sticky="e");
-            ttk.Entry(f2, textvariable=self.v["scroll_mid"], width=8).grid(row=3, column=1, sticky="w")
-            ttk.Label(f2, text=_tr_name("BASMA_HAKKI")).grid(row=4, column=0, sticky="e");
-            ttk.Entry(f2, textvariable=self.v["basma_hakki"], width=8).grid(row=4, column=1, sticky="w")
+            ttk.Checkbutton(f2, text="NPC Tur Modu (Planlı Alım)", variable=self.v["npc_tur_modu_enabled"],
+                            onvalue=True, offvalue=False, command=self._refresh_plan_status_label).grid(row=1, column=0,
+                                                                                                         columnspan=3,
+                                                                                                         sticky="w")
+            ttk.Label(f2, text="Tek Ürün Modu:").grid(row=2, column=0, sticky="e")
+            cmb_tek = ttk.Combobox(f2, textvariable=self.v["npc_tek_urun_mode"], values=["LINEN", "FABRIC"],
+                                   state="readonly", width=10)
+            cmb_tek.grid(row=2, column=1, sticky="w")
+            cmb_tek.bind("<<ComboboxSelected>>", lambda e: self._refresh_plan_status_label())
+            ttk.Label(f2, text="Tur Planı (LINEN:2;FABRIC:2):").grid(row=3, column=0, sticky="e")
+            ent_plan = ttk.Entry(f2, textvariable=self.v["npc_tur_plani_text"], width=24)
+            ent_plan.grid(row=3, column=1, columnspan=2, sticky="w")
+            ent_plan.bind("<KeyRelease>", lambda e: self._refresh_plan_status_label())
+            ttk.Label(f2, textvariable=self.plan_status_var, foreground="blue").grid(row=4, column=0, columnspan=3,
+                                                                                    sticky="w", padx=2)
+            ttk.Label(f2, text=_tr_name("BUY_TURNS")).grid(row=5, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["buy_turns"], width=8).grid(row=5, column=1, sticky="w")
+            ttk.Label(f2, text=_tr_name("SCROLL_ALIM_ADET")).grid(row=6, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["scroll_low"], width=8).grid(row=6, column=1, sticky="w")
+            ttk.Label(f2, text=_tr_name("SCROLL_MID_ALIM_ADET")).grid(row=7, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["scroll_mid"], width=8).grid(row=7, column=1, sticky="w")
+            ttk.Label(f2, text=_tr_name("BASMA_HAKKI")).grid(row=8, column=0, sticky="e");
+            ttk.Entry(f2, textvariable=self.v["basma_hakki"], width=8).grid(row=8, column=1, sticky="w")
 
             lf_plus8_msg = ttk.LabelFrame(f2, text="+8 Bekleme Telegram")
-            lf_plus8_msg.grid(row=5, column=0, columnspan=3, sticky="we", pady=6)
+            lf_plus8_msg.grid(row=9, column=0, columnspan=3, sticky="we", pady=6)
             ttk.Label(lf_plus8_msg, text="+8 item basma mesajı:").grid(row=0, column=0, sticky="e", padx=4, pady=2)
             ttk.Entry(lf_plus8_msg, textvariable=self.v["plus8_wait_message"], width=42).grid(row=0, column=1,
                                                                                                 sticky="w", padx=4,
@@ -9057,6 +9397,18 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
 
+        def _refresh_plan_status_label(self, *_):
+            try:
+                cur_txt = self.v["npc_tur_plani_text"].get()
+                plan, cur_txt = _parse_buy_plan_text(cur_txt)
+                preview_state = _ensure_buy_plan_state(plan, cur_txt, globals().get("BUY_PLAN_STATE"))
+                _update_gui_plan_status(preview_state)
+            except Exception:
+                try:
+                    _update_gui_plan_status(globals().get("BUY_PLAN_STATE"))
+                except Exception:
+                    pass
+
         # ---- Gelişmiş alan listesi ----
         def _is_editable(self, name, val):
             if name.startswith("_"):
@@ -9264,68 +9616,23 @@ def _MERDIVEN_RUN_GUI():
             return _MERDIVEN_CFG_PATH()
 
         def _load_json(self):
-            import json, os
-            # JSON varsa GUI alanlarını ondan doldur; yoksa modül varsayılanları zaten set edildi.
             try:
-                j = copy.deepcopy(self._cached_config)
+                cfg = copy.deepcopy(self._cached_config) if isinstance(self._cached_config, dict) else load_config()
             except Exception:
-                j = None
-            if not isinstance(j, dict) or not j:
-                try:
-                    with open(self._cfg(), "r", encoding="utf-8") as f:
-                        j = json.load(f)
-                except:
-                    j = {}
-            gui_data = (j.get("gui", {}) or {})
-            for k, val in gui_data.items():
-                if k in ("account_name", "account_id", "account_password", "active_account"):
-                    continue  # hassas alanları config'ten doldurma
-                if hasattr(self, "_stats_keys") and k in self._stats_keys:
-                    continue
-                if k in self.v:
-                    try:
-                        import tkinter as tk
-                        if isinstance(self.v[k], tk.IntVar):
-                            self.v[k].set(int(val))
-                        elif isinstance(self.v[k], tk.DoubleVar):
-                            self.v[k].set(float(val))
-                        elif isinstance(self.v[k], tk.BooleanVar):
-                            if isinstance(val, str):
-                                self.v[k].set(val.lower() in ("1", "true", "yes", "on"))
-                            else:
-                                self.v[k].set(bool(val))
-                        else:
-                            self.v[k].set(str(val))
-                    except:
-                        pass
-            if "sale_refresh_wait" in gui_data:
-                try:
-                    legacy = float(gui_data.get("sale_refresh_wait", 0))
-                    if "sale_refresh_min" in self.v:
-                        self.v["sale_refresh_min"].set(legacy)
-                    if "sale_refresh_max" in self.v:
-                        self.v["sale_refresh_max"].set(legacy)
-                except Exception:
-                    pass
-            # Krallık tıklama eski alanlarından geri uyumluluk
+                cfg = load_config()
             try:
-                if "krallik_click_x" in gui_data and "krallik_click_y" in gui_data:
-                    self.v["krallik_click1_x"].set(int(gui_data.get("krallik_click_x", 0)))
-                    self.v["krallik_click1_y"].set(int(gui_data.get("krallik_click_y", 0)))
+                self._build_adv()
             except Exception:
                 pass
-            # advanced → modüle uygula
-            for name, raw in (j.get("advanced", {}) or {}).items():
-                try:
-                    import ast
-                    try:
-                        val = ast.literal_eval(raw)
-                    except:
-                        val = raw
-                    setattr(m, name, val)
-                except:
-                    pass
-            self._build_adv()
+            try:
+                apply_config_to_ui(cfg, gui=self)
+            except Exception:
+                pass
+            try:
+                apply_config_to_runtime(cfg, gui=self)
+            except Exception:
+                pass
+            self._refresh_plan_status_label()
 
         def save_mode_selection(self):
             self.save()
@@ -9399,6 +9706,19 @@ def _MERDIVEN_RUN_GUI():
                 setattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", float(self.v["plus8_wait_interval"].get()))
             except Exception:
                 setattr(m, "PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 0.0)
+            globals()["npc_tur_modu_enabled"] = bool(self.v["npc_tur_modu_enabled"].get())
+            globals()["npc_tek_urun_mode"] = str(self.v["npc_tek_urun_mode"].get()).upper()
+            globals()["npc_tur_plani_text"] = str(self.v["npc_tur_plani_text"].get())
+            try:
+                plan_now, txt_now = _parse_buy_plan_text(globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT))
+                globals()["npc_tur_plani_text"] = txt_now
+                st_now = globals().get("BUY_PLAN_STATE", {})
+                if st_now.get("plan_string_last") != txt_now:
+                    st_now = {"plan_string_last": txt_now, "plan_index": 0, "remaining_turns": plan_now[0][1]}
+                globals()["BUY_PLAN_STATE"] = _ensure_buy_plan_state(plan_now, txt_now, st_now)
+                _update_gui_plan_status(globals().get("BUY_PLAN_STATE"))
+            except Exception:
+                pass
             # buy mode + adetler
             mode = self.v["buy_mode"].get().upper()
             try:
@@ -9433,40 +9753,12 @@ def _MERDIVEN_RUN_GUI():
                 pass
 
         def save(self):
-            import json, os
             path = self._cfg()
-            data = {"gui": {}, "advanced": {}}
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {"gui": {}, "advanced": {}}
-                if "gui" not in data or not isinstance(data.get("gui"), dict): data["gui"] = {}
-                if "advanced" not in data or not isinstance(data.get("advanced"), dict): data["advanced"] = {}
-            except Exception:
-                data = {"gui": {}, "advanced": {}}
-            for k, var in self.v.items():
-                if k in getattr(self, "_stats_keys", ()):  # anlık sayaçları config'e yazma
-                    continue
-                if k in ("account_name", "account_id", "account_password", "active_account"):
-                    continue
-                try:
-                    data["gui"][k] = var.get()
-                except Exception:
-                    pass
-            adv = data.get("advanced")
-            if not isinstance(adv, dict): adv = {}
-            data["advanced"] = adv
-            for name, var in self.adv_rows:
-                try:
-                    adv[name] = var.get()
-                except Exception:
-                    pass
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
+            cfg = collect_config_from_ui(self)
+            save_config_atomic(cfg, path)
+            self._cached_config = cfg
             self._msg(f"Ayarlar kaydedildi: {path}")
-            self.apply_core()
+            apply_config_to_runtime(cfg, gui=self)
 
         def _tick(self):
             self._update_caps_status()
@@ -9488,6 +9780,10 @@ def _MERDIVEN_RUN_GUI():
 def _MERDIVEN_GUI_ENTRY(auto_open=True):
     import sys
     if "--nogui" in sys.argv or not auto_open:
+        try:
+            apply_config_to_runtime(load_config())
+        except Exception:
+            pass
         try:
             main()
         except NameError:
