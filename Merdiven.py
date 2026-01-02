@@ -6793,8 +6793,18 @@ LINEN_STEPS = [((687, 237), 2, "right"), ((737, 237), 2, "right"), ((787, 237), 
 BUY_TURNS = 2  # döngü sayısı (2 tur = 28 adet)
 npc_tur_modu_enabled = bool(globals().get("npc_tur_modu_enabled", True))
 npc_tek_urun_mode = str(globals().get("npc_tek_urun_mode", "LINEN"))
-npc_tur_plani_text = str(globals().get("npc_tur_plani_text", _BUY_PLAN_DEFAULT_TEXT))
-BUY_PLAN_STATE = globals().get("BUY_PLAN_STATE", _buy_plan_default_state(npc_tur_plani_text))
+npc_tur_plani_text = str(globals().get("npc_tur_plani_text", globals().get("_BUY_PLAN_DEFAULT_TEXT", "LINEN:2;FABRIC:2")))
+BUY_PLAN_STATE = globals().get(
+    "BUY_PLAN_STATE",
+    globals().get(
+        "_buy_plan_default_state",
+        lambda plan_text=None: {
+            "plan_string_last": str(plan_text or globals().get("_BUY_PLAN_DEFAULT_TEXT", "LINEN:2;FABRIC:2")),
+            "plan_index": 0,
+            "remaining_turns": 2,
+        },
+    )(npc_tur_plani_text),
+)
 if "NPC_MENU_PAGE2_POS" not in globals(): NPC_MENU_PAGE2_POS = (919, 540)  # güvenli varsayılan
 
 
