@@ -7525,6 +7525,26 @@ def _purchase_defaults():
 
 
 # --- Config yükle/kaydet ---
+def _config_log(msg: str):
+    try:
+        _logger.info(msg)
+    except Exception:
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+
+def _backup_corrupt_config(path: str, raw: str):
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        backup = f"{path}.corrupt_{ts}"
+        with open(backup, "w", encoding="utf-8") as f:
+            f.write(raw)
+    except Exception:
+        pass
+
+
 def load_config(path=None, defaults=None):
     if path is None:
         path = _MERDIVEN_CFG_PATH()
@@ -7541,7 +7561,14 @@ def load_config(path=None, defaults=None):
             save_config_atomic(defaults, path)
             return defaults
         with open(path, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
+            raw = f.read()
+        try:
+            cfg = json.loads(raw)
+        except Exception:
+            _backup_corrupt_config(path, raw)
+            save_config_atomic(defaults, path)
+            _config_log(f"[CONFIG] loaded path={path} (bozuk dosya yedeklendi)")
+            return defaults
 
         def _merge(a, b):
             for k, v in b.items():
@@ -7551,6 +7578,7 @@ def load_config(path=None, defaults=None):
                     _merge(a[k], v)
 
         _merge(cfg, defaults)
+        _config_log(f"[CONFIG] loaded path={path}")
         return cfg
     except Exception as e:
         print('[PATCH][config] load error:', e)
@@ -7580,6 +7608,10 @@ def save_config_atomic(cfg, path=None):
             json.dump(_serialize_config(cfg), f, indent=2, ensure_ascii=False)
             f.flush(); os.fsync(f.fileno())
         os.replace(tmp, path)
+        try:
+            _config_log(f"[CONFIG] saved path={path} bytes={os.path.getsize(path)}")
+        except Exception:
+            pass
         return True
     except Exception as e:
         print('[PATCH][config] atomic save error:', e)
@@ -8366,6 +8398,11 @@ _GUI_LAST_INSTANCE = None
 _GUI_PLAN_STATUS_VAR = None
 
 
+def collect_all_ui_values(gui=None):
+    cfg = collect_config_from_ui(gui)
+    return cfg.get("gui", {}) if isinstance(cfg, dict) else {}
+
+
 def collect_config_from_ui(gui=None):
     g = gui or globals().get("_GUI_LAST_INSTANCE")
     if g is None:
@@ -8491,6 +8528,49 @@ def apply_config_to_runtime(cfg, gui=None):
             except Exception:
                 globals()[dst] = gui_data.get(src)
     return True
+
+
+def apply_cfg_to_ui(cfg, gui=None):
+    return apply_config_to_ui(cfg, gui=gui)
+
+
+def load_everything(path=None, defaults=None):
+    cfg = load_config(path=path, defaults=defaults)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return cfg
+
+
+def save_everything(reason="manual_save", gui=None):
+    g = gui or globals().get("_GUI_LAST_INSTANCE")
+    cfg = collect_config_from_ui(g)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    meta = cfg.get("meta")
+    if not isinstance(meta, dict):
+        meta = {"version": 1}
+    if "version" not in meta:
+        meta["version"] = 1
+    meta["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    meta["last_reason"] = str(reason)
+    cfg["meta"] = meta
+    path = _MERDIVEN_CFG_PATH()
+    ok = save_config_atomic(cfg, path)
+    if ok:
+        try:
+            _config_log(f"[CONFIG] saved path={path} bytes={os.path.getsize(path)} reason={reason}")
+        except Exception:
+            pass
+    try:
+        if g is not None:
+            g._cached_config = cfg
+    except Exception:
+        pass
+    try:
+        apply_config_to_runtime(cfg, gui=g)
+    except Exception:
+        pass
+    return ok
 
 def _tr_name(n):
     t = _TR.get(n);
@@ -8652,7 +8732,7 @@ def _MERDIVEN_RUN_GUI():
 
         def _safe_load_cfg(self):
             try:
-                return load_config()
+                return load_everything()
             except Exception:
                 return {}
 
@@ -9478,15 +9558,24 @@ def _MERDIVEN_RUN_GUI():
                 frame = ttk.LabelFrame(self.adv_container, text=title)
                 frame.pack(fill="x", padx=6, pady=4, anchor="n")
                 frame.columnconfigure(1, weight=1)
+                if not hasattr(self, "_adv_var_map"):
+                    self._adv_var_map = {}
+                adv_cfg = (self._cached_config.get("advanced", {}) if isinstance(self._cached_config, dict) else {})
 
                 for row, (name, val) in enumerate(entries):
                     ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+                    prev_var = getattr(self, "_adv_var_map", {}).get(name)
+                    if prev_var is not None:
+                        var = prev_var
+                    elif isinstance(val, bool):
+                        var = tk.StringVar(value=str(adv_cfg.get(name, val)))
+                    else:
+                        var = tk.StringVar(value=str(adv_cfg.get(name, val)))
+                    self._adv_var_map[name] = var
                     if isinstance(val, bool):
-                        var = tk.StringVar(value=str(val))
                         widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
                                               state="readonly")
                     else:
-                        var = tk.StringVar(value=str(val))
                         widget = ttk.Entry(frame, textvariable=var, width=28)
                     widget.grid(row=row, column=1, sticky="we", padx=3)
                     ttk.Button(frame, text="Uygula",
@@ -9520,38 +9609,11 @@ def _MERDIVEN_RUN_GUI():
                 self._msg(f"{name} ayarlanamadı: {e}")
 
         def _apply_all_adv(self):
-            import json, os
-            path = self._cfg()
-            # Şema garantisi
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if not isinstance(data, dict): data = {}
-            except Exception:
-                data = {}
-            if 'gui' not in data or not isinstance(data.get('gui'), dict): data['gui'] = {}
-            if 'advanced' not in data or not isinstance(data.get('advanced'), dict): data['advanced'] = {}
-            adv = data['advanced']
-            # Değerleri topla
-            for name, var in getattr(self, 'adv_rows', []):
-                try:
-                    adv[name] = var.get()
-                except Exception:
-                    pass
-            # Atomik kaydet
-            tmp = path + '.tmp'
-            try:
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
-                self._msg(f'Ayarlar kaydedildi: {path}')
+                save_everything(reason="apply_all_adv", gui=self)
+                self._msg(f'Ayarlar kaydedildi: {self._cfg()}')
             except Exception as e:
                 self._msg(f'[GUI] Kaydetme hatası: {e}')
-                try:
-                    if os.path.exists(tmp): os.remove(tmp)
-                except:
-                    pass
-            # Uygula
             try:
                 self.apply_core()
                 self._msg('Tüm gelişmiş ayarlar uygulandı.')
@@ -9627,9 +9689,9 @@ def _MERDIVEN_RUN_GUI():
 
         def _load_json(self):
             try:
-                cfg = copy.deepcopy(self._cached_config) if isinstance(self._cached_config, dict) else load_config()
+                cfg = copy.deepcopy(self._cached_config) if isinstance(self._cached_config, dict) else load_everything()
             except Exception:
-                cfg = load_config()
+                cfg = load_everything()
             try:
                 self._build_adv()
             except Exception:
@@ -9645,7 +9707,7 @@ def _MERDIVEN_RUN_GUI():
             self._refresh_plan_status_label()
 
         def save_mode_selection(self):
-            self.save()
+            self.save(reason="mode_selection")
 
         def apply_core(self):
             # login
@@ -9736,10 +9798,6 @@ def _MERDIVEN_RUN_GUI():
                     m._set_buy_mode(mode)
                 else:
                     setattr(m, "BUY_MODE", mode)
-                # kalıcı dosya
-                p = PERSIST_PATH('config_buy_mode.json')
-                with open(p, "w", encoding="utf-8") as f:
-                    json.dump({"BUY_MODE": mode}, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
             for name, key in [("BUY_TURNS", "buy_turns"), ("SCROLL_ALIM_ADET", "scroll_low"),
@@ -9762,13 +9820,8 @@ def _MERDIVEN_RUN_GUI():
             except Exception:
                 pass
 
-        def save(self):
-            path = self._cfg()
-            cfg = collect_config_from_ui(self)
-            save_config_atomic(cfg, path)
-            self._cached_config = cfg
-            self._msg(f"Ayarlar kaydedildi: {path}")
-            apply_config_to_runtime(cfg, gui=self)
+        def save(self, reason="manual_save"):
+            return save_everything(reason=reason, gui=self)
 
         def _tick(self):
             self._update_caps_status()
@@ -9791,7 +9844,7 @@ def _MERDIVEN_GUI_ENTRY(auto_open=True):
     import sys
     if "--nogui" in sys.argv or not auto_open:
         try:
-            apply_config_to_runtime(load_config())
+            apply_config_to_runtime(load_everything())
         except Exception:
             pass
         try:
