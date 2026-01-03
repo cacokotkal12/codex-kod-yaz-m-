@@ -793,7 +793,7 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 1
 X_OKUMA_ADET = 2
-X_OKUMA_GECIKME = 0.02
+X_OKUMA_GECIKME = 0.05
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -993,7 +993,7 @@ except Exception as _e:
 
 PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
-MICRO_READ_DELAY = 0.010;
+MICRO_READ_DELAY = 0.02;
 TARGET_STABLE_HITS = 10
 MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
 # ---- Y=598 Overshoot ----
