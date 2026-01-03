@@ -793,7 +793,7 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 1
 X_OKUMA_ADET = 2
-X_OKUMA_GECIKME = 0.01
+X_OKUMA_GECIKME = 0.02
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -967,7 +967,7 @@ MARKET_SCALES = (0.90, 1.00, 1.10)
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-X_TOL_READ_DELAY = 0.015  # X okuma aralığı (sn)
+X_TOL_READ_DELAY = 0.010  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
@@ -7244,7 +7244,7 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("LOGIN_PASSWORD_CLICK_POS", (579, 378)),
                 "Launcher şifre alanı koordinatı.", apply=_ensure_int_pair),
     ConfigField("LOGIN_TYPE_DELAY", "Login yazma hızı (sn/karakter)", "Sunucu / Login", "float",
-                _cfg_default("LOGIN_TYPE_DELAY", 0.03),
+                _cfg_default("LOGIN_TYPE_DELAY", 0.04),
                 "Kullanıcı adı ve şifre yazılırken karakter başına bekleme süresi."),
     ConfigField("POST_START_EXTRA_KEY_ENABLED", "Oyun start sonrası ekstra tus", "Sunucu / Login", "bool",
                 _cfg_default("POST_START_EXTRA_KEY_ENABLED", True),
@@ -7325,10 +7325,10 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("auto_market_refresh_interval_hours", 3.0),
                 "Otomatik pazar yenileme sıklığı (saat cinsinden)."),
     ConfigField("ITEM_SALE_EXIT_DELAY_MIN", "Banka çıkış bekleme min", "Item Satış", "float",
-                _cfg_default("ITEM_SALE_EXIT_DELAY_MIN", 0.0),
+                _cfg_default("ITEM_SALE_EXIT_DELAY_MIN", 25.0),
                 "Banka eşiği yakalandığında çıkış öncesi minimum bekleme."),
     ConfigField("ITEM_SALE_EXIT_DELAY_MAX", "Banka çıkış bekleme maks", "Item Satış", "float",
-                _cfg_default("ITEM_SALE_EXIT_DELAY_MAX", 0.0),
+                _cfg_default("ITEM_SALE_EXIT_DELAY_MAX", 35.0),
                 "Banka eşiği yakalandığında çıkış öncesi maksimum bekleme."),
     ConfigField("ITEM_SALE_SLOT_SCAN_INTERVAL", "Slot tarama süresi", "Item Satış", "float",
                 _cfg_default("ITEM_SALE_SLOT_SCAN_INTERVAL", 10.0),
@@ -7353,10 +7353,10 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("TELEGRAM_CHAT_ID", ""),
                 "Telegram sohbet ID'si."),
     ConfigField("KRALLIK_CLICK_POS_1", "Krallık tıklama 1 (x,y)", "Item Satış", "int_pair",
-                _cfg_default("KRALLIK_CLICK_POS_1", (0, 0)),
+                _cfg_default("KRALLIK_CLICK_POS_1", (459, 644)),
                 "İlk krallık yazısı tıklama koordinatı.", apply=_ensure_int_pair),
     ConfigField("KRALLIK_CLICK_POS_2", "Krallık tıklama 2 (x,y)", "Item Satış", "int_pair",
-                _cfg_default("KRALLIK_CLICK_POS_2", (0, 0)),
+                _cfg_default("KRALLIK_CLICK_POS_2", (750, 280)),
                 "İkinci krallık yazısı tıklama koordinatı.", apply=_ensure_int_pair),
     ConfigField("KRALLIK_TIKLAMA_ARALIGI", "Krallık tıklama aralığı", "Item Satış", "float",
                 _cfg_default("KRALLIK_TIKLAMA_ARALIGI", 0.0),
@@ -9974,8 +9974,8 @@ except Exception as _e:
 UPG_USE_FAST_MOUSE = True
 UPG_MOUSE_HIZI = 0.05
 UPG_TUS_HIZI = 0.05
-ANVIL_CONFIRM_WAIT_MS = 50
-ROI_STALE_MS = 250
+ANVIL_CONFIRM_WAIT_MS = 40
+ROI_STALE_MS = 80
 
 try:
     _YAMA_FAST_ANVIL_OK
@@ -10425,7 +10425,7 @@ def NPC_POSTBUY_D_WHILE_W():
 # [YAMA] Hover Guard varsayılanları (Confirm sonrası fareyi park et)
 ANVIL_HOVER_GUARD = bool(globals().get('ANVIL_HOVER_GUARD', True))  # Aç/Kapa
 ANVIL_MOUSE_PARK_POS = tuple(globals().get('ANVIL_MOUSE_PARK_POS', (5, 5)))  # Park X,Y
-ANVIL_HOVER_CLEAR_SEC = float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.035))  # Bekleme (sn)
+ANVIL_HOVER_CLEAR_SEC = float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.020))  # Bekleme (sn)
 
 
 # [YAMA] Confirm sonrası fareyi kısa süre park ederek tooltip/animasyonu kes
