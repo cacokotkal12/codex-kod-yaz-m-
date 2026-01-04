@@ -8479,13 +8479,6 @@ def apply_config_to_ui(cfg, gui=None):
                 var.set(str(adv_cfg.get(name)))
             except Exception:
                 pass
-    try:
-        if hasattr(g, "_adv_pending"):
-            g._adv_pending.clear()
-        if hasattr(g, "_apply_adv_filter"):
-            g._apply_adv_filter()
-    except Exception:
-        pass
     _update_gui_plan_status(globals().get("BUY_PLAN_STATE"))
     return True
 
@@ -8700,13 +8693,6 @@ def _MERDIVEN_RUN_GUI():
             self.v["brake_safe"] = tk.IntVar(value=int(dm.get("SAFE", 1)))
             self.sale_slot_var = tk.StringVar(value=str(getattr(m, "ITEM_SALE_LAST_SLOT_COUNT", "-")))
             self.adv_rows = []
-            self._adv_var_map = {}
-            self._adv_pending = {}
-            self.adv_filter_var = tk.StringVar(value="")
-            self._adv_filter_job = None
-            self._adv_filter_delay_ms = 200
-            self._adv_data = []
-            self._adv_visible = []
             globals()["_GUI_LAST_INSTANCE"] = self
             globals()["_GUI_PLAN_STATUS_VAR"] = self.plan_status_var
             self._build();
@@ -9079,7 +9065,6 @@ def _MERDIVEN_RUN_GUI():
         # ---- UI kur ----
         def _build(self):
             nb = ttk.Notebook(self.root);
-            self.nb = nb
             nb.pack(fill="both", expand=True, padx=6, pady=6)
             # GENEL
             f1 = ttk.Frame(nb);
@@ -9397,61 +9382,21 @@ def _MERDIVEN_RUN_GUI():
             f4 = ttk.Frame(nb);
             nb.add(f4, text="Gelişmiş")
             top = ttk.Frame(f4);
-            top.pack(fill="x", padx=6, pady=4)
-            ttk.Label(top, text="Ara:").pack(side="left")
-            ent_adv_filter = ttk.Entry(top, textvariable=self.adv_filter_var, width=28)
-            ent_adv_filter.pack(side="left", padx=6)
-            ent_adv_filter.bind("<KeyRelease>", self._on_adv_filter_change)
+            top.pack(fill="x", padx=4, pady=4)
+            ttk.Label(top, text="Filtre:").pack(side="left")
+            self.filter = tk.StringVar();
+            ttk.Entry(top, textvariable=self.filter, width=24).pack(side="left", padx=6)
             ttk.Button(top, text="Yenile", command=self._build_adv).pack(side="left")
-            self.adv_filter_result = ttk.Label(top, text="", foreground="blue")
-            self.adv_filter_result.pack(side="left", padx=6)
-
-            adv_body = ttk.Frame(f4)
-            adv_body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-            adv_body.columnconfigure(0, weight=3)
-            adv_body.columnconfigure(1, weight=2)
-            adv_body.rowconfigure(0, weight=1)
-
-            tree_frame = ttk.Frame(adv_body)
-            tree_frame.grid(row=0, column=0, sticky="nsew")
-            columns = ("ayar", "deger", "kategori", "anahtar", "tip")
-            self.adv_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
-            self.adv_tree.heading("ayar", text="Ayar Adı")
-            self.adv_tree.heading("deger", text="Değer")
-            self.adv_tree.heading("kategori", text="Kategori")
-            self.adv_tree.heading("anahtar", text="Anahtar")
-            self.adv_tree.heading("tip", text="Tip")
-            self.adv_tree.column("ayar", width=200, anchor="w")
-            self.adv_tree.column("deger", width=160, anchor="w")
-            self.adv_tree.column("kategori", width=120, anchor="w")
-            self.adv_tree.column("anahtar", width=140, anchor="w")
-            self.adv_tree.column("tip", width=80, anchor="w")
-            vs_adv = ttk.Scrollbar(tree_frame, orient="vertical", command=self.adv_tree.yview)
-            self.adv_tree.configure(yscrollcommand=vs_adv.set)
-            self.adv_tree.pack(side="left", fill="both", expand=True)
-            vs_adv.pack(side="right", fill="y")
-            self.adv_tree.tag_configure("modified", background="#fef3c7")
-            self.adv_tree.bind("<<TreeviewSelect>>", self._on_adv_select)
-            self.adv_tree.bind("<Double-1>", self._on_adv_double_click)
-
-            desc_frame = ttk.LabelFrame(adv_body, text="Ayar Aciklamasi")
-            desc_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-            desc_frame.columnconfigure(0, weight=1)
-            self.adv_desc = scrolledtext.ScrolledText(desc_frame, wrap="word", height=12, state="disabled")
-            self.adv_desc.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-
-            self.adv_loading_label = ttk.Label(f4, text="", foreground="blue")
-            self.adv_loading_label.pack(anchor="w", padx=8)
-
-            adv_btns = ttk.Frame(f4)
-            adv_btns.pack(fill="x", padx=6, pady=6)
-            ttk.Button(adv_btns, text="Seçileni Uygula", command=self._apply_selected_adv).pack(side="left")
-            ttk.Button(adv_btns, text="Tüm Değişiklikleri Uygula", command=self._apply_all_adv).pack(side="left",
-                                                                                                     padx=6)
-            ttk.Button(adv_btns, text="Varsayılana Döndür", command=self._reset_selected_adv).pack(side="left")
-            ttk.Button(adv_btns, text="Kapat", command=self._close_adv_tab).pack(side="right")
-            self.adv_status_label = ttk.Label(adv_btns, text="", foreground="blue")
-            self.adv_status_label.pack(side="left", padx=8)
+            ttk.Button(top, text="Tümünü Uygula", command=self._apply_all_adv).pack(side="left", padx=6)
+            c = tk.Canvas(f4, highlightthickness=0);
+            vs = ttk.Scrollbar(f4, orient="vertical", command=c.yview);
+            c.configure(yscrollcommand=vs.set)
+            frm = ttk.Frame(c);
+            self._frm_id = c.create_window((0, 0), window=frm, anchor="nw")
+            c.bind("<Configure>", lambda e: c.itemconfigure(self._frm_id, width=e.width))
+            c.pack(side="left", fill="both", expand=True);
+            vs.pack(side="right", fill="y");
+            self.adv_container = frm
 
             # DURUM
             f5 = ttk.Frame(nb);
@@ -9492,33 +9437,23 @@ def _MERDIVEN_RUN_GUI():
                 for x in self.stage_log[-30:]: self.lb.insert("end", x)
 
         def _ekle_log_satir(self, satir):
-            self._ekle_log_satir_batch([satir])
-
-        def _ekle_log_satir_batch(self, satirlar):
-            satir_list = []
-            for satir in satirlar:
-                try:
-                    s = str(satir)
-                except Exception:
-                    s = ""
-                if not s:
-                    continue
-                satir_list.append(s)
-            if not satir_list:
+            try:
+                s = str(satir)
+            except Exception:
+                s = ""
+            if not s:
                 return
-            self._log_satirlar.extend(satir_list)
-            truncated = False
+            self._log_satirlar.append(s)
             if len(self._log_satirlar) > 2000:
                 self._log_satirlar = self._log_satirlar[-2000:]
-                truncated = True
             try:
                 if hasattr(self, "log_text"):
                     self.log_text.configure(state="normal")
-                    if truncated:
+                    if len(self._log_satirlar) >= 2000:
                         self.log_text.delete("1.0", "end")
-                        self.log_text.insert("end", "\n".join(self._log_satirlar) + ("\n" if self._log_satirlar else ""))
+                        self.log_text.insert("end", "\n".join(self._log_satirlar) + "\n")
                     else:
-                        self.log_text.insert("end", "\n".join(satir_list) + "\n")
+                        self.log_text.insert("end", s + "\n")
                     self.log_text.see("end")
                     self.log_text.configure(state="disabled")
             except Exception:
@@ -9526,18 +9461,16 @@ def _MERDIVEN_RUN_GUI():
 
         def _baslat_log_cek(self):
             def _drain_log():
-                satirlar = []
                 try:
                     q = getattr(self, "_log_kuyruk", None)
                     while q is not None and not q.empty():
                         try:
-                            satirlar.append(q.get_nowait())
+                            satir = q.get_nowait()
                         except Exception:
                             break
-                    if satirlar:
-                        self._ekle_log_satir_batch(satirlar)
+                        self._ekle_log_satir(satir)
                 finally:
-                    self.root.after(400, _drain_log)
+                    self.root.after(150, _drain_log)
 
             _drain_log()
 
@@ -9594,397 +9527,73 @@ def _MERDIVEN_RUN_GUI():
             return items
 
         def _build_adv(self):
-            try:
-                self._cancel_adv_edit()
-            except Exception:
-                pass
+            for w in self.adv_container.winfo_children(): w.destroy()
             self.adv_rows = []
-            data = []
-            idx = {}
-            adv_cfg = (self._cached_config.get("advanced", {}) if isinstance(self._cached_config, dict) else {})
+            F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
+            grouped = {}
             for name, val in self._adv_items():
-                label = _tr_name(name)
-                cat = _adv_group_of(name)
-                cur_val = adv_cfg.get(name, val)
-                prev_var = getattr(self, "_adv_var_map", {}).get(name)
-                if prev_var is not None:
-                    var = prev_var
+                if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
+                    continue
+                grouped.setdefault(_adv_group_of(name), []).append((name, val))
+
+            if not grouped:
+                ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
+                self.adv_container.update_idletasks()
+                try:
+                    self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
+                except Exception:
+                    pass
+                return
+
+            def _grp_key(grp_name: str):
+                try:
+                    return (_ADV_GROUP_ORDER.index(grp_name), grp_name)
+                except ValueError:
+                    return (len(_ADV_GROUP_ORDER), grp_name)
+
+            for grp_name in sorted(grouped.keys(), key=_grp_key):
+                entries = grouped[grp_name]
+                entries.sort(key=lambda item: _tr_name(item[0]).upper())
+                title = grp_name or 'Genel'
+                frame = ttk.LabelFrame(self.adv_container, text=title)
+                frame.pack(fill="x", padx=6, pady=4, anchor="n")
+                frame.columnconfigure(1, weight=1)
+                if not hasattr(self, "_adv_var_map"):
+                    self._adv_var_map = {}
+                adv_cfg = (self._cached_config.get("advanced", {}) if isinstance(self._cached_config, dict) else {})
+
+                for row, (name, val) in enumerate(entries):
+                    ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
+                    prev_var = getattr(self, "_adv_var_map", {}).get(name)
+                    if prev_var is not None:
+                        var = prev_var
+                    elif isinstance(val, bool):
+                        var = tk.StringVar(value=str(adv_cfg.get(name, val)))
+                    else:
+                        var = tk.StringVar(value=str(adv_cfg.get(name, val)))
+                    self._adv_var_map[name] = var
+                    if isinstance(val, bool):
+                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
+                                              state="readonly")
+                    else:
+                        widget = ttk.Entry(frame, textvariable=var, width=28)
+                    widget.grid(row=row, column=1, sticky="we", padx=3)
+                    ttk.Button(frame, text="Uygula",
+                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
+                               ).grid(row=row, column=2, sticky="w", padx=2)
                     try:
-                        var.set(str(cur_val))
+                        info_btn = ttk.Button(frame, width=2, text="i")
+                        info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
+                        _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
                     except Exception:
                         pass
-                else:
-                    var = tk.StringVar(value=str(cur_val))
-                self._adv_var_map[name] = var
-                item = {
-                    "key": name,
-                    "label": label,
-                    "category": cat,
-                    "type": self._guess_adv_type(val),
-                    "value_var": var,
-                    "default": val,
-                    "desc": _TR_HELP.get(name, ""),
-                    "base_value": cur_val,
-                    "min": None,
-                    "max": None,
-                    "choices": None,
-                }
-                data.append(item)
-                idx[name] = item
-                self.adv_rows.append((name, var))
-            self._adv_data = data
-            self._adv_index = idx
-            self._apply_adv_filter(initial=True)
+                    self.adv_rows.append((name, var))
 
-        def _update_adv_filter_result(self, count: int):
+            self.adv_container.update_idletasks()
             try:
-                self.adv_filter_result.config(text=f"{count} sonuç")
-            except Exception:
+                self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
+            except:
                 pass
-
-        def _apply_adv_filter(self, initial: bool = False):
-            self._adv_visible = []
-            try:
-                if self._adv_filter_job:
-                    try:
-                        self.root.after_cancel(self._adv_filter_job)
-                    except Exception:
-                        pass
-                self._adv_filter_job = None
-            except Exception:
-                pass
-            query = self.adv_filter_var.get().strip().casefold() if hasattr(self, "adv_filter_var") else ""
-            filtered = []
-            for item in getattr(self, "_adv_data", []):
-                text_fields = [item.get("label", ""), item.get("key", ""), item.get("category", "")]
-                if query:
-                    hit = False
-                    for fld in text_fields:
-                        try:
-                            if query in str(fld).casefold():
-                                hit = True
-                                break
-                        except Exception:
-                            continue
-                    if not hit:
-                        continue
-                filtered.append(item)
-            self._adv_visible = filtered
-            try:
-                for ch in self.adv_tree.get_children():
-                    self.adv_tree.delete(ch)
-            except Exception:
-                pass
-            if not filtered:
-                try:
-                    self.adv_loading_label.config(text="Sonuç bulunamadı.")
-                except Exception:
-                    pass
-                self._update_adv_filter_result(0)
-                self._update_adv_desc("")
-                return
-            self._adv_chunk_index = 0
-            try:
-                self.adv_loading_label.config(text="Yükleniyor...")
-            except Exception:
-                pass
-            self._update_adv_filter_result(len(filtered))
-            self._insert_adv_chunk()
-
-        def _on_adv_filter_change(self, *_):
-            try:
-                if self._adv_filter_job:
-                    self.root.after_cancel(self._adv_filter_job)
-            except Exception:
-                pass
-            try:
-                self._adv_filter_job = self.root.after(self._adv_filter_delay_ms, self._apply_adv_filter)
-            except Exception:
-                self._apply_adv_filter()
-
-        def _insert_adv_chunk(self):
-            batch_size = 50
-            start = getattr(self, "_adv_chunk_index", 0)
-            items = getattr(self, "_adv_visible", [])
-            if start >= len(items):
-                try:
-                    self.adv_loading_label.config(text=f"{len(items)} sonuç")
-                except Exception:
-                    pass
-                return
-            chunk = items[start:start + batch_size]
-            for item in chunk:
-                key = item.get("key")
-                val_txt = item.get("value_var").get() if item.get("value_var") else ""
-                tags = []
-                if key in getattr(self, "_adv_pending", {}):
-                    tags.append("modified")
-                try:
-                    self.adv_tree.insert("", "end", iid=key,
-                                         values=(item.get("label"), val_txt, item.get("category"), key, item.get("type")),
-                                         tags=tags)
-                except Exception:
-                    pass
-            self._adv_chunk_index = start + len(chunk)
-            if self._adv_chunk_index >= len(items):
-                try:
-                    self.adv_loading_label.config(text=f"{len(items)} sonuç")
-                except Exception:
-                    pass
-                return
-            try:
-                self.root.after(50, self._insert_adv_chunk)
-            except Exception:
-                self._insert_adv_chunk()
-
-        def _current_adv_key(self):
-            try:
-                sel = self.adv_tree.selection()
-            except Exception:
-                return None
-            if not sel:
-                return None
-            return sel[0]
-
-        def _on_adv_select(self, *_):
-            key = self._current_adv_key()
-            desc = ""
-            try:
-                if key and key in getattr(self, "_adv_index", {}):
-                    desc = self._adv_index[key].get("desc", "")
-            except Exception:
-                desc = ""
-            self._update_adv_desc(desc)
-
-        def _update_adv_desc(self, text: str):
-            try:
-                self.adv_desc.configure(state="normal")
-                self.adv_desc.delete("1.0", "end")
-                if text:
-                    self.adv_desc.insert("end", str(text))
-                self.adv_desc.configure(state="disabled")
-            except Exception:
-                pass
-
-        def _on_adv_double_click(self, event):
-            item = self.adv_tree.identify_row(event.y)
-            col = self.adv_tree.identify_column(event.x)
-            if not item or col != "#2":
-                return
-            self._start_adv_edit(item, column=col)
-
-        def _start_adv_edit(self, item, column="#2"):
-            data = getattr(self, "_adv_index", {}).get(item)
-            if not data:
-                return
-            try:
-                self._cancel_adv_edit()
-            except Exception:
-                pass
-            bbox = self.adv_tree.bbox(item, column)
-            if not bbox:
-                return
-            x, y, w, h = bbox
-            typ = data.get("type")
-            choices = None
-            if typ == "bool":
-                choices = ["True", "False"]
-            elif typ == "choice":
-                choices = data.get("choices")
-            cur_val = data.get("value_var").get() if data.get("value_var") else ""
-            if choices:
-                editor = ttk.Combobox(self.adv_tree, values=[str(c) for c in choices], state="readonly")
-                editor.set(str(cur_val))
-            else:
-                editor = ttk.Entry(self.adv_tree)
-                editor.insert(0, str(cur_val))
-            editor.place(x=x, y=y, width=w, height=h)
-            editor.focus_set()
-            editor.bind("<Return>", self._commit_adv_edit)
-            editor.bind("<KP_Enter>", self._commit_adv_edit)
-            editor.bind("<Escape>", lambda e: self._cancel_adv_edit())
-            self._adv_editor = editor
-            self._adv_edit_item = item
-            self._adv_edit_column = column
-
-        def _commit_adv_edit(self, event=None):
-            item = getattr(self, "_adv_edit_item", None)
-            editor = getattr(self, "_adv_editor", None)
-            if not item or editor is None:
-                return
-            data = getattr(self, "_adv_index", {}).get(item)
-            if not data:
-                self._cancel_adv_edit()
-                return
-            raw = editor.get()
-            try:
-                new_val = self._parse_adv_value(data, raw)
-            except Exception as e:
-                self._status_adv(f"Değer hatalı: {e}")
-                return
-            try:
-                data.get("value_var").set(str(new_val))
-            except Exception:
-                try:
-                    data.get("value_var").set(str(raw))
-                except Exception:
-                    pass
-            try:
-                if "base_value" in data and new_val == data.get("base_value"):
-                    self._adv_pending.pop(item, None)
-                else:
-                    self._adv_pending[item] = new_val
-            except Exception:
-                self._adv_pending[item] = new_val
-            self._update_adv_row_state(item)
-            self._cancel_adv_edit()
-            self._status_adv(f"{item} değiştirildi.")
-
-        def _cancel_adv_edit(self, event=None):
-            editor = getattr(self, "_adv_editor", None)
-            if editor is not None:
-                try:
-                    editor.destroy()
-                except Exception:
-                    pass
-            self._adv_editor = None
-            self._adv_edit_item = None
-            self._adv_edit_column = None
-
-        def _parse_adv_value(self, data, raw):
-            typ = data.get("type")
-            text = str(raw).strip()
-            if typ == "int":
-                v = int(text)
-                if data.get("min") is not None and v < data.get("min"):
-                    raise ValueError(f"min {data.get('min')}")
-                if data.get("max") is not None and v > data.get("max"):
-                    raise ValueError(f"max {data.get('max')}")
-                return v
-            if typ == "float":
-                v = float(text)
-                if data.get("min") is not None and v < data.get("min"):
-                    raise ValueError(f"min {data.get('min')}")
-                if data.get("max") is not None and v > data.get("max"):
-                    raise ValueError(f"max {data.get('max')}")
-                return v
-            if typ == "bool":
-                low = text.lower()
-                if low in ("1", "true", "yes", "on"):
-                    return True
-                if low in ("0", "false", "no", "off"):
-                    return False
-                raise ValueError("bool bekleniyor")
-            if typ == "choice":
-                choices = [str(c) for c in (data.get("choices") or [])]
-                if choices and text not in choices:
-                    raise ValueError("geçersiz seçim")
-                return text
-            return text
-
-        def _guess_adv_type(self, val):
-            import numbers
-            try:
-                if isinstance(val, bool):
-                    return "bool"
-                if isinstance(val, int) and not isinstance(val, bool):
-                    return "int"
-                if isinstance(val, numbers.Real) and not isinstance(val, bool):
-                    return "float"
-            except Exception:
-                pass
-            return "str"
-
-        def _update_adv_row_state(self, key):
-            data = getattr(self, "_adv_index", {}).get(key)
-            if not data:
-                return
-            values = (data.get("label"), data.get("value_var").get() if data.get("value_var") else "",
-                      data.get("category"), data.get("key"), data.get("type"))
-            try:
-                self.adv_tree.item(key, values=values)
-            except Exception:
-                pass
-            tags = []
-            if key in getattr(self, "_adv_pending", {}):
-                tags.append("modified")
-            try:
-                self.adv_tree.item(key, tags=tags)
-            except Exception:
-                pass
-
-        def _apply_selected_adv(self):
-            key = self._current_adv_key()
-            if not key:
-                self._status_adv("Satır seçilmedi.")
-                return
-            data = getattr(self, "_adv_index", {}).get(key)
-            if not data:
-                return
-            raw_val = data.get("value_var").get() if data.get("value_var") else ""
-            try:
-                parsed = self._parse_adv_value(data, raw_val)
-            except Exception as e:
-                self._status_adv(f"Değer hatalı: {e}")
-                return
-            self._set_adv_value_runtime(key, parsed)
-            self._update_cached_adv_value(key, parsed)
-            data["base_value"] = parsed
-            if key in getattr(self, "_adv_pending", {}):
-                self._adv_pending.pop(key, None)
-            self._update_adv_row_state(key)
-            self._status_adv(f"{key} uygulandı.")
-            self.save()
-
-        def _reset_selected_adv(self):
-            key = self._current_adv_key()
-            if not key:
-                self._status_adv("Satır seçilmedi.")
-                return
-            data = getattr(self, "_adv_index", {}).get(key)
-            if not data:
-                return
-            try:
-                data.get("value_var").set(str(data.get("default")))
-            except Exception:
-                pass
-            self._adv_pending[key] = data.get("default")
-            self._update_adv_row_state(key)
-            self._status_adv(f"{key} varsayılan değere alındı.")
-
-        def _close_adv_tab(self):
-            try:
-                if hasattr(self, "nb"):
-                    self.nb.select(0)
-            except Exception:
-                try:
-                    self.root.focus_set()
-                except Exception:
-                    pass
-
-        def _status_adv(self, msg: str):
-            try:
-                self.adv_status_label.config(text=str(msg))
-            except Exception:
-                pass
-
-        def _set_adv_value_runtime(self, name, val):
-            try:
-                setattr(m, name, val)
-            except Exception:
-                try:
-                    setattr(sys.modules[__name__], name, val)
-                except Exception:
-                    pass
-
-        def _update_cached_adv_value(self, key, val):
-            if not isinstance(self._cached_config, dict):
-                self._cached_config = {}
-            adv_cfg = self._cached_config.get("advanced")
-            if not isinstance(adv_cfg, dict):
-                adv_cfg = {}
-                self._cached_config["advanced"] = adv_cfg
-            adv_cfg[key] = val
 
         def _apply_one_adv(self, name, val_raw):
             import ast
@@ -10000,24 +9609,6 @@ def _MERDIVEN_RUN_GUI():
                 self._msg(f"{name} ayarlanamadı: {e}")
 
         def _apply_all_adv(self):
-            try:
-                for key, data in getattr(self, "_adv_index", {}).items():
-                    raw_val = data.get("value_var").get() if data.get("value_var") else ""
-                    try:
-                        parsed = self._parse_adv_value(data, raw_val)
-                    except Exception:
-                        continue
-                    if key in getattr(self, "_adv_pending", {}):
-                        self._set_adv_value_runtime(key, parsed)
-                        self._update_cached_adv_value(key, parsed)
-                        data["base_value"] = parsed
-                if hasattr(self, "_adv_pending"):
-                    self._adv_pending.clear()
-                for key in getattr(self, "_adv_index", {}):
-                    self._update_adv_row_state(key)
-                self._status_adv("Tüm değişiklikler uygulandı.")
-            except Exception as e:
-                self._msg(f'[GUI] apply_all_adv hata: {e}')
             try:
                 save_everything(reason="apply_all_adv", gui=self)
                 self._msg(f'Ayarlar kaydedildi: {self._cfg()}')
