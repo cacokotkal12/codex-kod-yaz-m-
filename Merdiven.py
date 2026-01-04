@@ -793,7 +793,7 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 1
 X_OKUMA_ADET = 2
-X_OKUMA_GECIKME = 0.05
+X_OKUMA_GECIKME = 0.03
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -967,7 +967,7 @@ MARKET_SCALES = (0.90, 1.00, 1.10)
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-X_TOL_READ_DELAY = 0.010  # X okuma aralığı (sn)
+X_TOL_READ_DELAY = 0.05  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
@@ -7298,7 +7298,7 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("PLUS8_WAIT_MESSAGE", ""),
                 "+8 bekleme modundayken Telegram'a gönderilecek mesaj."),
     ConfigField("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", "+8 item basma mesaj gönderme süresi (dk)", "Satın Alma", "float",
-                _cfg_default("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 10.0),
+                _cfg_default("PLUS8_WAIT_MESSAGE_INTERVAL_MIN", 3.0),
                 "+8 bekleme modundayken kaç dakikada bir mesaj atılacağı."),
     ConfigField("SCROLL_LOW_TEMPLATE_PATHS", "Low scroll şablonları", "Şablon Listeleri", "list_str",
                 _cfg_default("SCROLL_LOW_TEMPLATE_PATHS", ["scroll_low.png", "scroll_low2.png"]),
@@ -9975,7 +9975,7 @@ UPG_USE_FAST_MOUSE = True
 UPG_MOUSE_HIZI = 0.05
 UPG_TUS_HIZI = 0.05
 ANVIL_CONFIRM_WAIT_MS = 40
-ROI_STALE_MS = 80
+ROI_STALE_MS = 50
 
 try:
     _YAMA_FAST_ANVIL_OK
@@ -10490,7 +10490,7 @@ def yama_save_extra_cfg():
         cfg.update({
             'ANVIL_HOVER_GUARD': bool(globals().get('ANVIL_HOVER_GUARD', True)),
             'ANVIL_MOUSE_PARK_POS': list(globals().get('ANVIL_MOUSE_PARK_POS', (5, 5))),
-            'ANVIL_HOVER_CLEAR_SEC': float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.035)),
+            'ANVIL_HOVER_CLEAR_SEC': float(globals().get('ANVIL_HOVER_CLEAR_SEC', 0.02)),
             'ROI_STALE_MS': int(globals().get('ROI_STALE_MS', 120)),
         })
         os.makedirs(os.path.dirname(p), exist_ok=True)
