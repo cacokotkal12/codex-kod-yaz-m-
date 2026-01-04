@@ -855,7 +855,7 @@ GAME_START_FALLBACK_RELATIVE_POS = (896, 596)
 GAME_START_VERIFY_TIMEOUT = 12.0
 TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 giris_enter = 0.5
-server_sonrasi_enter = 1.0
+server_sonrasi_enter = 2.0
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
 LAUNCHER_START_CLICK_POS = (974, 726)
@@ -904,8 +904,8 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8009866329:AAFyeuZvrwe5klEii66bW10X-_2Uh4BElvk")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1520623463")
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 PLUS8_CYCLE_BANK_START = 0
@@ -6043,7 +6043,7 @@ def relaunch_and_login_to_ingame():
             print(f"[RELAUNCH] Server seçildi: {server_xy}")
             set_stage("RELAUNCH_POST_SELECT");
             try:
-                enter_delay = float(globals().get("server_sonrasi_enter", 1.0))
+                enter_delay = float(globals().get("server_sonrasi_enter", 2.0))
             except Exception:
                 enter_delay = 1.0
             time.sleep(enter_delay)
@@ -6539,7 +6539,7 @@ def main():
                     print(f"[SERVER] Seçilen server: {server_xy}")
                     set_stage("SERVER_POST_SELECT");
                     try:
-                        enter_delay = float(globals().get("server_sonrasi_enter", 1.0))
+                        enter_delay = float(globals().get("server_sonrasi_enter", 2.0))
                     except Exception:
                         enter_delay = 1.0
                     time.sleep(enter_delay)
