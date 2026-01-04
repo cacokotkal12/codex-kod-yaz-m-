@@ -855,6 +855,7 @@ GAME_START_FALLBACK_RELATIVE_POS = (896, 596)
 GAME_START_VERIFY_TIMEOUT = 12.0
 TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 giris_enter = 0.5
+server_sonrasi_enter = 1.0
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
 LAUNCHER_START_CLICK_POS = (974, 726)
@@ -6041,7 +6042,18 @@ def relaunch_and_login_to_ingame():
             for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
             print(f"[RELAUNCH] Server seçildi: {server_xy}")
             set_stage("RELAUNCH_POST_SELECT");
-            time.sleep(1.5)
+            try:
+                enter_delay = float(globals().get("server_sonrasi_enter", 1.0))
+            except Exception:
+                enter_delay = 1.0
+            time.sleep(enter_delay)
+            try:
+                safe_press_enter_if_not_ingame(w);
+            except Exception:
+                pass
+            remaining_wait = 1.5 - enter_delay
+            if remaining_wait > 0:
+                time.sleep(remaining_wait)
             ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
             if not ok:
                 print("[RELAUNCH] oyun_start.png yok. Kapat→yeniden.")
@@ -6526,7 +6538,18 @@ def main():
                     for _ in range(2): mouse_move(*server_xy); mouse_click("left"); time.sleep(0.15)
                     print(f"[SERVER] Seçilen server: {server_xy}")
                     set_stage("SERVER_POST_SELECT");
-                    time.sleep(1.5)
+                    try:
+                        enter_delay = float(globals().get("server_sonrasi_enter", 1.0))
+                    except Exception:
+                        enter_delay = 1.0
+                    time.sleep(enter_delay)
+                    try:
+                        safe_press_enter_if_not_ingame(w);
+                    except Exception:
+                        pass
+                    remaining_wait = 1.5 - enter_delay
+                    if remaining_wait > 0:
+                        time.sleep(remaining_wait)
                     ok = try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0)
                     if not ok: print("[START] oyun_start.png yok → restart."); raise WatchdogTimeout(
                         "oyun_start.png tıklanamadı.")
@@ -9385,18 +9408,42 @@ def _MERDIVEN_RUN_GUI():
             top.pack(fill="x", padx=4, pady=4)
             ttk.Label(top, text="Filtre:").pack(side="left")
             self.filter = tk.StringVar();
+            self._adv_filter_after = None
+            def _on_adv_filter(*_):
+                if self._adv_filter_after:
+                    try:
+                        self.root.after_cancel(self._adv_filter_after)
+                    except Exception:
+                        pass
+                self._adv_filter_after = self.root.after(200, self._build_adv)
+            self.filter.trace_add("write", _on_adv_filter)
             ttk.Entry(top, textvariable=self.filter, width=24).pack(side="left", padx=6)
             ttk.Button(top, text="Yenile", command=self._build_adv).pack(side="left")
-            ttk.Button(top, text="Tümünü Uygula", command=self._apply_all_adv).pack(side="left", padx=6)
-            c = tk.Canvas(f4, highlightthickness=0);
-            vs = ttk.Scrollbar(f4, orient="vertical", command=c.yview);
+            adv_main = ttk.Frame(f4)
+            adv_main.pack(fill="both", expand=True)
+            left_adv = ttk.Frame(adv_main)
+            left_adv.pack(side="left", fill="both", expand=True)
+            c = tk.Canvas(left_adv, highlightthickness=0);
+            vs = ttk.Scrollbar(left_adv, orient="vertical", command=c.yview);
             c.configure(yscrollcommand=vs.set)
             frm = ttk.Frame(c);
             self._frm_id = c.create_window((0, 0), window=frm, anchor="nw")
             c.bind("<Configure>", lambda e: c.itemconfigure(self._frm_id, width=e.width))
             c.pack(side="left", fill="both", expand=True);
             vs.pack(side="right", fill="y");
+            self.adv_canvas = c
             self.adv_container = frm
+            self._adv_build_token = 0
+            right_adv = ttk.LabelFrame(adv_main, text="Ayar Aciklamasi")
+            right_adv.pack(side="right", fill="y", padx=6, pady=4)
+            self.adv_desc = tk.StringVar(value="Ayar aciklamasi burada gosterilir.")
+            ttk.Label(right_adv, textvariable=self.adv_desc, wraplength=240, justify="left").pack(fill="both",
+                                                                                                   expand=True,
+                                                                                                   padx=6, pady=6)
+            adv_actions = ttk.Frame(f4)
+            adv_actions.pack(fill="x", padx=6, pady=6)
+            ttk.Button(adv_actions, text="Secileni Uygula", command=self._apply_selected_adv).pack(side="left")
+            ttk.Button(adv_actions, text="Tumunu Uygula", command=self._apply_all_adv).pack(side="left", padx=6)
 
             # DURUM
             f5 = ttk.Frame(nb);
@@ -9444,12 +9491,12 @@ def _MERDIVEN_RUN_GUI():
             if not s:
                 return
             self._log_satirlar.append(s)
-            if len(self._log_satirlar) > 2000:
-                self._log_satirlar = self._log_satirlar[-2000:]
+            if len(self._log_satirlar) > 1000:
+                self._log_satirlar = self._log_satirlar[-1000:]
             try:
                 if hasattr(self, "log_text"):
                     self.log_text.configure(state="normal")
-                    if len(self._log_satirlar) >= 2000:
+                    if len(self._log_satirlar) >= 1000:
                         self.log_text.delete("1.0", "end")
                         self.log_text.insert("end", "\n".join(self._log_satirlar) + "\n")
                     else:
@@ -9463,14 +9510,21 @@ def _MERDIVEN_RUN_GUI():
             def _drain_log():
                 try:
                     q = getattr(self, "_log_kuyruk", None)
+                    if not hasattr(self, "_log_buffer"):
+                        self._log_buffer = []
                     while q is not None and not q.empty():
                         try:
                             satir = q.get_nowait()
                         except Exception:
                             break
-                        self._ekle_log_satir(satir)
+                        self._log_buffer.append(satir)
+                    if getattr(self, "_log_buffer", None):
+                        pending = list(self._log_buffer)
+                        self._log_buffer.clear()
+                        for satir in pending:
+                            self._ekle_log_satir(satir)
                 finally:
-                    self.root.after(150, _drain_log)
+                    self.root.after(550, _drain_log)
 
             _drain_log()
 
@@ -9527,22 +9581,35 @@ def _MERDIVEN_RUN_GUI():
             return items
 
         def _build_adv(self):
+            self._adv_build_token = getattr(self, "_adv_build_token", 0) + 1
+            token = self._adv_build_token
             for w in self.adv_container.winfo_children(): w.destroy()
+            self._adv_open_group = None
+            self._current_adv_selection = None
             self.adv_rows = []
+            self.adv_desc.set("Ayar aciklamasi burada gosterilir.")
             F = (self.filter.get().strip().upper() if hasattr(self, "filter") else "")
             grouped = {}
+            if not hasattr(self, "_adv_var_map"):
+                self._adv_var_map = {}
+            adv_cfg = (self._cached_config.get("advanced", {}) if isinstance(self._cached_config, dict) else {})
             for name, val in self._adv_items():
                 if F and (F not in name.upper()) and (F not in (_TR.get(name, "").upper())):
                     continue
-                grouped.setdefault(_adv_group_of(name), []).append((name, val))
+                prev_var = self._adv_var_map.get(name)
+                if prev_var is not None:
+                    var = prev_var
+                elif isinstance(val, bool):
+                    var = tk.StringVar(value=str(adv_cfg.get(name, val)))
+                else:
+                    var = tk.StringVar(value=str(adv_cfg.get(name, val)))
+                self._adv_var_map[name] = var
+                self.adv_rows.append((name, var))
+                grouped.setdefault(_adv_group_of(name), []).append((name, val, var))
 
             if not grouped:
-                ttk.Label(self.adv_container, text="Sonuç bulunamadı.").pack(anchor="w", padx=8, pady=6)
-                self.adv_container.update_idletasks()
-                try:
-                    self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
-                except Exception:
-                    pass
+                ttk.Label(self.adv_container, text="Sonuc bulunamadi.").pack(anchor="w", padx=8, pady=6)
+                self._update_adv_scroll()
                 return
 
             def _grp_key(grp_name: str):
@@ -9551,49 +9618,119 @@ def _MERDIVEN_RUN_GUI():
                 except ValueError:
                     return (len(_ADV_GROUP_ORDER), grp_name)
 
+            self._adv_group_data = {}
+            first_group = None
             for grp_name in sorted(grouped.keys(), key=_grp_key):
                 entries = grouped[grp_name]
                 entries.sort(key=lambda item: _tr_name(item[0]).upper())
-                title = grp_name or 'Genel'
-                frame = ttk.LabelFrame(self.adv_container, text=title)
-                frame.pack(fill="x", padx=6, pady=4, anchor="n")
-                frame.columnconfigure(1, weight=1)
-                if not hasattr(self, "_adv_var_map"):
-                    self._adv_var_map = {}
-                adv_cfg = (self._cached_config.get("advanced", {}) if isinstance(self._cached_config, dict) else {})
+                if first_group is None:
+                    first_group = grp_name
+                outer = ttk.Frame(self.adv_container)
+                outer.pack(fill="x", padx=6, pady=4, anchor="n")
+                header = ttk.Frame(outer)
+                header.pack(fill="x")
+                btn = ttk.Button(header, width=10, text="Ac/Kapat",
+                                 command=lambda g=grp_name: self._toggle_adv_group(g, token))
+                btn.pack(side="left", padx=2, pady=2)
+                ttk.Label(header, text=grp_name or 'Genel', font=("Segoe UI", 9, "bold")).pack(side="left", padx=4)
+                self._adv_group_data[grp_name] = {
+                    "outer": outer,
+                    "entries": entries,
+                    "container": None,
+                    "open": False,
+                    "build_index": 0,
+                    "btn": btn,
+                    "token": token,
+                }
+            if first_group is not None:
+                self._toggle_adv_group(first_group, token, initial=True)
+            self._update_adv_scroll()
 
-                for row, (name, val) in enumerate(entries):
-                    ttk.Label(frame, text=_tr_name(name)).grid(row=row, column=0, sticky="w", padx=2, pady=1)
-                    prev_var = getattr(self, "_adv_var_map", {}).get(name)
-                    if prev_var is not None:
-                        var = prev_var
-                    elif isinstance(val, bool):
-                        var = tk.StringVar(value=str(adv_cfg.get(name, val)))
-                    else:
-                        var = tk.StringVar(value=str(adv_cfg.get(name, val)))
-                    self._adv_var_map[name] = var
-                    if isinstance(val, bool):
-                        widget = ttk.Combobox(frame, values=["True", "False"], textvariable=var, width=8,
-                                              state="readonly")
-                    else:
-                        widget = ttk.Entry(frame, textvariable=var, width=28)
-                    widget.grid(row=row, column=1, sticky="we", padx=3)
-                    ttk.Button(frame, text="Uygula",
-                               command=lambda n=name, vr=var: self._apply_one_adv(n, vr.get())
-                               ).grid(row=row, column=2, sticky="w", padx=2)
-                    try:
-                        info_btn = ttk.Button(frame, width=2, text="i")
-                        info_btn.grid(row=row, column=3, padx=2, pady=1, sticky="w")
-                        _Tooltip(info_btn, _TR_HELP.get(name, "Açıklama yok"))
-                    except Exception:
-                        pass
-                    self.adv_rows.append((name, var))
-
-            self.adv_container.update_idletasks()
+        def _update_adv_scroll(self):
             try:
+                self.adv_container.update_idletasks()
                 self.adv_container.master.configure(scrollregion=self.adv_container.master.bbox("all"))
-            except:
+            except Exception:
                 pass
+
+        def _close_adv_group(self, grp_name):
+            data = getattr(self, "_adv_group_data", {}).get(grp_name)
+            if not data:
+                return
+            container = data.get("container")
+            if container is not None:
+                try:
+                    container.destroy()
+                except Exception:
+                    pass
+            data["container"] = None
+            data["open"] = False
+            data["build_index"] = 0
+
+        def _build_adv_group_chunk(self, grp_name, token):
+            data = getattr(self, "_adv_group_data", {}).get(grp_name)
+            if not data or data.get("token") != token or not data.get("open"):
+                return
+            container = data.get("container")
+            if container is None:
+                return
+            start = int(data.get("build_index", 0))
+            entries = data.get("entries", ())
+            chunk = entries[start:start + 50]
+            if not chunk:
+                return
+            for idx, (name, val, var) in enumerate(chunk, start=start):
+                ttk.Label(container, text=_tr_name(name)).grid(row=idx, column=0, sticky="w", padx=2, pady=1)
+                if isinstance(val, bool):
+                    widget = ttk.Combobox(container, values=["True", "False"], textvariable=var, width=8,
+                                          state="readonly")
+                else:
+                    widget = ttk.Entry(container, textvariable=var, width=28)
+                widget.grid(row=idx, column=1, sticky="we", padx=3)
+                widget.bind("<FocusIn>", lambda e, n=name, v=var: self._select_adv(n, v))
+                widget.bind("<Button-1>", lambda e, n=name, v=var: self._select_adv(n, v))
+            data["build_index"] = start + len(chunk)
+            self._update_adv_scroll()
+            if data["build_index"] < len(entries):
+                self.root.after(1, lambda g=grp_name, t=token: self._build_adv_group_chunk(g, t))
+
+        def _toggle_adv_group(self, grp_name, token, initial=False):
+            data = getattr(self, "_adv_group_data", {}).get(grp_name)
+            if not data or data.get("token") != token:
+                return
+            if data.get("open"):
+                self._close_adv_group(grp_name)
+                if not initial:
+                    self._adv_open_group = None
+                self._update_adv_scroll()
+                return
+            if self._adv_open_group and self._adv_open_group in getattr(self, "_adv_group_data", {}):
+                self._close_adv_group(self._adv_open_group)
+            self._adv_open_group = grp_name
+            data["open"] = True
+            container = ttk.Frame(data["outer"])
+            container.pack(fill="x", padx=4, pady=2)
+            container.columnconfigure(1, weight=1)
+            data["container"] = container
+            data["build_index"] = 0
+            self._build_adv_group_chunk(grp_name, token)
+            self._update_adv_scroll()
+
+        def _select_adv(self, name, var):
+            self._current_adv_selection = (name, var)
+            try:
+                desc = _TR_HELP.get(name, "Aciklama yok")
+            except Exception:
+                desc = "Aciklama yok"
+            self.adv_desc.set(desc or "Aciklama yok")
+
+        def _apply_selected_adv(self):
+            sel = getattr(self, "_current_adv_selection", None)
+            if not sel:
+                self._msg("Secili ayar yok.")
+                return
+            name, var = sel
+            self._apply_one_adv(name, var.get())
 
         def _apply_one_adv(self, name, val_raw):
             import ast
