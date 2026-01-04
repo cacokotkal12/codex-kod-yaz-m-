@@ -24,6 +24,9 @@ CHECK_INTERVAL = 0.5
 # === [PATCH] TOWN/GUI tek-sefer log helper ===
 _TOWN_ONCE_KEYS = set()
 
+# [YAVAŞ YÜRÜME DURUMU]
+yavas_mod_acik = False
+
 
 def _town_log_once(*args, sep=' ', end='\n'):
     # NE İŞE YARAR: Aynı mesajı sadece BİR KEZ yazar.
@@ -1893,6 +1896,7 @@ SC_W = 0x11;
 SC_A = 0x1E;
 SC_S = 0x1F;
 SC_D = 0x20;
+SC_Y = 0x15;
 SC_I = 0x17;
 SC_C = 0x2E;
 SC_H = 0x23;
@@ -1967,6 +1971,29 @@ def release_key(sc):
     time.sleep(tus_hizi)
 
 
+def _yavas_mod_durum(hedef_acik: bool):
+    """Y tuşu toggle (yavaş yürüyüş modu) için durum takipçisi."""
+    global yavas_mod_acik
+    try:
+        hedef = bool(hedef_acik)
+    except Exception:
+        hedef = False
+    if hedef and not yavas_mod_acik:
+        try:
+            press_key(SC_Y);
+            release_key(SC_Y);
+            yavas_mod_acik = True
+        except Exception:
+            pass
+    elif (not hedef) and yavas_mod_acik:
+        try:
+            press_key(SC_Y);
+            release_key(SC_Y);
+            yavas_mod_acik = False
+        except Exception:
+            pass
+
+
 def _press_named_key_once(name):
     try:
         key = str(name or "").strip().upper()
@@ -2013,6 +2040,7 @@ def _release_movement_keys():
             release_key(sc)
         except Exception:
             pass
+    _yavas_mod_durum(False)
 
 
 def _rand(n): return 0 if n == 0 else np.random.randint(-n, n + 1)
@@ -2846,6 +2874,7 @@ def bring_launcher_window_to_front():
 # =============== OYUNU KAPAT (PID ile) ===============
 def exit_game_fast(win=None):
     global BANK_OPEN
+    _yavas_mod_durum(False)
     killed = False;
     pid_val = None
     try:
@@ -2886,6 +2915,7 @@ def exit_game_fast(win=None):
 
 def close_all_game_instances():
     global TOWN_LOCKED
+    _yavas_mod_durum(False)
     # Oyunun tüm pencerelerini ve süreçlerini kapat
     wins = gw.getWindowsWithTitle(WINDOW_TITLE_KEYWORD)
     for w in wins:
@@ -4572,6 +4602,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
         return val
 
     press_key(SC_W)
+    hedef_bulundu = False
     try:
         while True:
             wait_if_paused();
@@ -4616,19 +4647,31 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 except Exception:
                     cur_int = None
                 if cur_int is not None and abs(target - cur_int) <= pre_brake_delta:
-                    break
+                    _yavas_mod_durum(True)
+                    if cur_int == target:
+                        hedef_bulundu = True
+                        break
+                    continue
                 press_key(SC_W)
                 continue
-            if cur_int is not None and abs(target - cur_int) <= pre_brake_delta: break
+            if cur_int is not None and abs(target - cur_int) <= pre_brake_delta:
+                _yavas_mod_durum(True)
+                if cur_int == target:
+                    hedef_bulundu = True
+                    break
+                continue
             if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return _finish_prec_move(False)
             time.sleep(0.03)
     finally:
         release_key(SC_W)
+        _yavas_mod_durum(False)
     cur_after_brake = _read_axis_guarded()
     if cur_after_brake is not None:
         cur = cur_after_brake
     if overshoot_failed:
         return _finish_prec_move(False)
+    if hedef_bulundu:
+        return _finish_prec_move(True)
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
@@ -4849,6 +4892,7 @@ def move_to_769_and_turn_from_top(w):
 def send_town_command(*a, force=False, wait_override=None, **kw):
     # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
     global TOWN_LOCKED, BANK_OPEN
+    _yavas_mod_durum(False)
     stage_now = _normalize_stage_name(globals().get("_current_stage", ""))
     if _stage_allows_town_recover(stage_now) and globals().get('TOWN_HARD_LOCK', False):
         _set_town_hardlock_state(False, "RECOVER_STAGE_TOWN")
