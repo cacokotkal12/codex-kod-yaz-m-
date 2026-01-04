@@ -4597,6 +4597,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
         return val
 
     def _finish_prec_move(val: bool) -> bool:
+        _yavas_mod_durum(False)
         if hardlock_guard:
             _set_town_hardlock_state(False, "PREC_MOVE_DONE")
         return val
