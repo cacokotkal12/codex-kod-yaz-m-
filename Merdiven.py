@@ -4562,6 +4562,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     y598_guard = (axis == 'y' and int(target) == 598 and bool(globals().get("Y598_OVERSHOOT_ENABLE", True)))
     overshoot_failed = False
     overshoot_hits = 0
+    slow_mod_used = False
+    slow_logged_on = False
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
@@ -4655,7 +4657,15 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 press_key(SC_W)
                 continue
             if cur_int is not None and abs(target - cur_int) <= pre_brake_delta:
-                _yavas_mod_durum(True)
+                if axis == 'y' and not slow_mod_used:
+                    slow_mod_used = True
+                    _yavas_mod_durum(True)
+                    if not slow_logged_on:
+                        slow_logged_on = True
+                        try:
+                            print("[SLOW] ON (pre_brake içine girildi)")
+                        except Exception:
+                            pass
                 if cur_int == target:
                     hedef_bulundu = True
                     break
@@ -4664,20 +4674,85 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             time.sleep(0.03)
     finally:
         release_key(SC_W)
-        _yavas_mod_durum(False)
+        release_key(SC_S)
+        if not (axis == 'y' and slow_mod_used and hedef_bulundu):
+            _yavas_mod_durum(False)
     cur_after_brake = _read_axis_guarded()
     if cur_after_brake is not None:
         cur = cur_after_brake
     if overshoot_failed:
+        _yavas_mod_durum(False)
         return _finish_prec_move(False)
     if hedef_bulundu:
-        return _finish_prec_move(True)
+        if axis == 'y' and slow_mod_used:
+            pass
+        else:
+            return _finish_prec_move(True)
     direction = detect_w_direction(w, axis, target=target);
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
     remaining_timeout = max(0.0, float(timeout) - (time.time() - t0))
     deadline = time.time() + remaining_timeout
+    if axis == 'y' and slow_mod_used:
+        active_key = None
+        stable_hits = 0
+        while True:
+            wait_if_paused();
+            watchdog_enforce()
+            if _kb_pressed('f12'):
+                if active_key: release_key(active_key)
+                _yavas_mod_durum(False)
+                return _finish_prec_move(False)
+            cur_val = _read_axis_guarded()
+            if overshoot_failed:
+                if active_key: release_key(active_key)
+                _yavas_mod_durum(False)
+                return _finish_prec_move(False)
+            if cur_val is None:
+                time.sleep(MICRO_READ_DELAY)
+                continue
+            try:
+                cur_int = int(cur_val)
+            except Exception:
+                cur_int = None
+            if cur_int is None:
+                time.sleep(MICRO_READ_DELAY)
+                continue
+            diff = target - cur_int
+            if diff == 0:
+                stable_hits += 1
+                if active_key:
+                    release_key(active_key)
+                    active_key = None
+                if stable_hits >= max(1, settle_hits):
+                    try:
+                        print(f"[SLOW] target stabilized hits={stable_hits}")
+                    except Exception:
+                        pass
+                    _yavas_mod_durum(False)
+                    try:
+                        print("[SLOW] OFF (target locked)")
+                    except Exception:
+                        pass
+                    return _finish_prec_move(True)
+            else:
+                stable_hits = 0
+                desired_key = SC_W if diff > 0 else SC_S
+                if active_key != desired_key:
+                    if active_key:
+                        release_key(active_key)
+                    active_key = desired_key
+                    press_key(active_key)
+                    try:
+                        print(f"[SLOW] HOLD FIX start dir={'W' if desired_key == SC_W else 'S'} cur={cur_int} target={target}")
+                    except Exception:
+                        pass
+            if (time.time() > deadline) or ((deadline - time.time()) <= 0):
+                if active_key: release_key(active_key)
+                _yavas_mod_durum(False)
+                return _finish_prec_move(False)
+            time.sleep(MICRO_READ_DELAY)
     matched = _micro_adjust_axis(_read_axis_guarded, axis, target, direction, seq, settle_hits,
                                  max_duration=MICRO_ADJUST_MAX_DURATION, deadline=deadline)
     fc = _read_axis_guarded();
@@ -6688,20 +6763,51 @@ def check_and_correct_y(target_y, read_func=None):
         current_y = read_func();
         step = 0;
         last_change = time.time()
-        while abs(current_y - target_y) != 0:
-            if current_y > target_y:
-                keyboard.press('s')
-            elif current_y < target_y:
-                keyboard.press('w')
-            time.sleep(random.uniform(0.10, 0.15))
-            keyboard.release('s');
-            keyboard.release('w')
-            time.sleep(0.05)
+        stable_hits = 0
+        active_key = None
+        settle_req = int(globals().get("TARGET_STABLE_HITS", TARGET_STABLE_HITS))
+        while True:
+            try:
+                wait_if_paused()
+                watchdog_enforce()
+            except Exception:
+                pass
+            if keyboard.is_pressed('f12'):
+                if active_key: keyboard.release(active_key)
+                _yavas_mod_durum(False)
+                return
+            diff = (target_y - current_y) if current_y is not None else None
+            if diff is None:
+                time.sleep(MICRO_READ_DELAY)
+                current_y = read_func();
+                continue
+            if diff == 0:
+                stable_hits += 1
+                if active_key:
+                    keyboard.release(active_key)
+                    active_key = None
+                if stable_hits >= max(1, settle_req):
+                    print(f"[SLOW] target stabilized hits={stable_hits}")
+                    _yavas_mod_durum(False)
+                    print("[SLOW] OFF (target locked)")
+                    print(f"[MİKRO] Hedef bulundu: Y={current_y}")
+                    break
+            else:
+                stable_hits = 0
+                desired = 'w' if diff > 0 else 's'
+                if active_key != desired:
+                    if active_key:
+                        keyboard.release(active_key)
+                    active_key = desired
+                    keyboard.press(active_key)
+                    print(f"[SLOW] HOLD FIX start dir={'W' if desired == 'w' else 'S'} cur={current_y} target={target_y}")
+            time.sleep(MICRO_READ_DELAY)
             new_y = read_func()
-            if new_y != current_y: last_change = time.time()
+            if new_y != current_y and new_y is not None: last_change = time.time()
             current_y = new_y;
             step += 1
             if step >= 400:
+                if active_key: keyboard.release(active_key)
                 print("[MİKRO] 400 deneme başarısız, oyun yeniden başlatılıyor...")
                 try:
                     close_game();
@@ -6711,9 +6817,9 @@ def check_and_correct_y(target_y, read_func=None):
                     print("[MİKRO] relaunch hata:", e)
                 return
             if time.time() - last_change > 10:
+                if active_key: keyboard.release(active_key)
                 print("[MİKRO] 10 sn boyunca koordinat değişmedi, döngü sonlandırıldı.");
                 break
-        print(f"[MİKRO] Hedef bulundu: Y={current_y}")
     except Exception as e:
         print("[MİKRO] check_and_correct_y hata:", e)
 
@@ -6786,30 +6892,65 @@ def post_598_to_597():
             print("[598→597] Y okunamadı, işlem atlandı.");
             return
         print(f"[598→597] Başlatıldı. Şu an Y={y}, hedef={target}")
-        while y != target:
+        if not yavas_mod_acik:
+            _yavas_mod_durum(True)
+            try:
+                print("[SLOW] ON (pre_brake içine girildi)")
+            except Exception:
+                pass
+        active_key = None
+        stable_hits = 0
+        settle_req = int(globals().get("TARGET_STABLE_HITS", TARGET_STABLE_HITS))
+        while True:
+            try:
+                wait_if_paused()
+                watchdog_enforce()
+            except Exception:
+                pass
+            if keyboard.is_pressed('f12'):
+                if active_key: keyboard.release(active_key)
+                _yavas_mod_durum(False)
+                return
             if y is None:
                 y = _read_y_safe();
+                time.sleep(MICRO_READ_DELAY)
                 continue
-            if y > target:  # 598,599,... → S ile küçült
-                keyboard.press('s');
-                time.sleep(random.uniform(PRESS_MIN, PRESS_MAX));
-                keyboard.release('s')
-            else:  # 596,595,... (fazla iner ise) → W ile büyüt
-                keyboard.press('w');
-                time.sleep(random.uniform(PRESS_MIN, PRESS_MAX));
-                keyboard.release('w')
-            time.sleep(0.05)
+            diff = target - y
+            if diff == 0:
+                stable_hits += 1
+                if active_key:
+                    keyboard.release(active_key)
+                    active_key = None
+                if stable_hits >= max(1, settle_req):
+                    print(f"[SLOW] target stabilized hits={stable_hits}")
+                    _yavas_mod_durum(False)
+                    print("[SLOW] OFF (target locked)")
+                    print("[598→597] Tamamlandı: Y=597")
+                    break
+            else:
+                stable_hits = 0
+                desired = 'w' if diff > 0 else 's'
+                if active_key != desired:
+                    if active_key:
+                        keyboard.release(active_key)
+                    active_key = desired
+                    keyboard.press(active_key)
+                    print(f"[SLOW] HOLD FIX start dir={'W' if desired == 'w' else 'S'} cur={y} target={target}")
+            time.sleep(MICRO_READ_DELAY)
             y_new = _read_y_safe()
             if y_new != y and y_new is not None: last = time.time()
             y = y_new;
             step += 1
             if step >= MAX_STEPS:
+                if active_key: keyboard.release(active_key)
+                _yavas_mod_durum(False)
                 print("[598→597] %d deneme başarısız, vazgeçildi." % MAX_STEPS);
                 return
             if time.time() - last > STUCK_TIMEOUT:
+                if active_key: keyboard.release(active_key)
+                _yavas_mod_durum(False)
                 print("[598→597] %ds değişim yok, güvenlik gereği bırakıldı." % STUCK_TIMEOUT);
                 return
-        print("[598→597] Tamamlandı: Y=597")
         if globals().get("TOWN_HARD_LOCK", False):
             _set_town_hardlock_state(False, "PREC_MOVE_DONE")
     except Exception as e:
