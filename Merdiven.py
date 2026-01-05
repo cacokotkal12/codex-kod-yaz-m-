@@ -970,6 +970,9 @@ X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kab
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
 X_TOL_READ_DELAY = 0.05  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
+X768_OVERSHOOT_CONFIRM_HITS = 3
+X768_OVERSHOOT_MAX_STEPS = 50
+X768_OCR_SAMPLES = 3
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
 PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
@@ -4369,9 +4372,9 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
     except Exception:
         band = 0
     try:
-        steps = max(int(globals().get("Y598_FIX_MAX_STEPS", 400)), int(max_taps) if max_taps is not None else 0)
+        steps = max(int(globals().get("X768_OVERSHOOT_MAX_STEPS", 50)), int(max_taps) if max_taps is not None else 0)
     except Exception:
-        steps = 400
+        steps = 50
     try:
         p_min = float(globals().get("Y598_FIX_PULSE_MIN", 0.035))
     except Exception:
@@ -4381,9 +4384,9 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
     except Exception:
         p_max = p_min
     try:
-        st_hits = int(globals().get("Y598_OVERSHOOT_CONFIRM_HITS", 2))
+        st_hits = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
     except Exception:
-        st_hits = 2
+        st_hits = 3
     try:
         r_delay = float(globals().get("Y598_FIX_READ_DELAY", MICRO_READ_DELAY))
     except Exception:
@@ -4529,9 +4532,19 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     except Exception:
         overshoot_read_delay = MICRO_READ_DELAY
     overshoot_guard = (axis == 'x' and int(target) == 768)
+    if overshoot_guard:
+        try:
+            overshoot_steps = int(globals().get("X768_OVERSHOOT_MAX_STEPS", 50))
+        except Exception:
+            overshoot_steps = 50
+        try:
+            overshoot_hits_req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
+        except Exception:
+            overshoot_hits_req = 3
     y598_guard = (axis == 'y' and int(target) == 598 and bool(globals().get("Y598_OVERSHOOT_ENABLE", True)))
     overshoot_failed = False
     overshoot_hits = 0
+    x768_hits = []
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
@@ -4589,10 +4602,45 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 cur_int = None
             overshoot_detected = False
             if cur_int is not None:
+                cond = False
                 if expected_dir > 0 and cur_int > (target + pre_brake_delta):
-                    overshoot_detected = True
+                    cond = True
                 elif expected_dir < 0 and cur_int < (target - pre_brake_delta):
-                    overshoot_detected = True
+                    cond = True
+                if overshoot_guard:
+                    if cond:
+                        x768_hits.append(cur_int)
+                        try:
+                            req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
+                        except Exception:
+                            req = 3
+                        try:
+                            sample_len = int(globals().get("X768_OCR_SAMPLES", req))
+                        except Exception:
+                            sample_len = req
+                        if sample_len < 1: sample_len = req
+                        if len(x768_hits) > sample_len:
+                            x768_hits[:] = x768_hits[-sample_len:]
+                        if len(x768_hits) >= max(1, req):
+                            try:
+                                med = sorted(x768_hits)[len(x768_hits) // 2]
+                            except Exception:
+                                med = cur_int
+                            cond_med = cond
+                            try:
+                                if expected_dir > 0:
+                                    cond_med = med > (target + pre_brake_delta)
+                                elif expected_dir < 0:
+                                    cond_med = med < (target - pre_brake_delta)
+                            except Exception:
+                                cond_med = cond
+                            if cond_med:
+                                overshoot_detected = True
+                    else:
+                        x768_hits.clear()
+                else:
+                    if cond:
+                        overshoot_detected = True
             if overshoot_detected:
                 release_key(SC_W)
                 ok, final_val = _overshoot_micro_realign(axis, target, lambda: _read_axis(w, axis),
