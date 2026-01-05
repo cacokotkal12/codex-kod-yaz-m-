@@ -971,8 +971,11 @@ X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
 X_TOL_READ_DELAY = 0.05  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 X768_OVERSHOOT_CONFIRM_HITS = 3
-X768_OVERSHOOT_MAX_STEPS = 40
+X768_OVERSHOOT_MAX_STEPS = 50
 X768_OCR_SAMPLES = 3
+X768_PLAUSIBLE_MIN = 740
+X768_PLAUSIBLE_MAX = 780
+X768_MICRO_BAND = (767, 766, 765, 764, 763)
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
 PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
@@ -4395,23 +4398,7 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
                                         pulse_max=p_max, stable_hits=st_hits, read_delay=r_delay)
     if ok:
         return True
-    try:
-        try:
-            _rc = read_coordinates(w)
-        except Exception:
-            _rc = None
-        print(f"[PREC][OVERSHOOT] X768 relaunch debug: read_fn={read_axis_fn()} read_coordinates={_rc}")
-    except Exception as _dbg_e:
-        print("[PREC][OVERSHOOT] relaunch debug hata:", _dbg_e)
-    set_stage("PREC_MOVE_X_768_OVERSHOOT_RELAUNCH")
-    try:
-        exit_game_fast(w)
-    except Exception as e:
-        print("[PREC][OVERSHOOT] exit_game_fast hata:", e)
-    try:
-        relaunch_and_login_to_ingame()
-    except Exception as e:
-        print("[PREC][OVERSHOOT] relaunch hata:", e)
+    print(f"[PREC][X768][MICRO] toparlama başarısız (max_steps={steps})")
     return False
 
 def _normalize_stage_name(stage: str) -> str:
@@ -4549,20 +4536,26 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             overshoot_hits_req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
         except Exception:
             overshoot_hits_req = 3
+    try:
+        x768_plausible_min = int(globals().get("X768_PLAUSIBLE_MIN", 740))
+    except Exception:
+        x768_plausible_min = 740
+    try:
+        x768_plausible_max = int(globals().get("X768_PLAUSIBLE_MAX", 780))
+    except Exception:
+        x768_plausible_max = 780
+    try:
+        x768_micro_band = tuple(int(v) for v in globals().get("X768_MICRO_BAND", X768_MICRO_BAND))
+    except Exception:
+        x768_micro_band = X768_MICRO_BAND
     y598_guard = (axis == 'y' and int(target) == 598 and bool(globals().get("Y598_OVERSHOOT_ENABLE", True)))
     overshoot_failed = False
     overshoot_hits = 0
     x768_hits = []
-    x768_armed = False
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
         val = _read_axis(w, axis)
-        if overshoot_guard:
-            val, ok = _maybe_handle_x768_overshoot(w, val, lambda: _read_axis(w, axis))
-            if not ok:
-                overshoot_failed = True
-                return None
         if y598_guard:
             try:
                 delta = int(globals().get("Y598_OVERSHOOT_DELTA", 1))
@@ -4612,70 +4605,74 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             overshoot_detected = False
             if cur_int is not None:
                 cond = False
-                if expected_dir > 0 and cur_int > (target + pre_brake_delta):
-                    cond = True
-                elif expected_dir < 0 and cur_int < (target - pre_brake_delta):
-                    cond = True
                 if overshoot_guard:
-                    if not x768_armed:
+                    if cur_int < x768_plausible_min or cur_int > x768_plausible_max:
                         try:
-                            if cur_int >= (target - pre_brake_delta):
-                                x768_armed = True
+                            print(f"[PREC][X768][GLITCH] read={cur_int} ignored (out of plausible range)")
                         except Exception:
-                            x768_armed = False
-                        if not x768_armed:
-                            x768_hits.clear()
-                    if cond and x768_armed:
-                        if x768_hits and cur_int < x768_hits[-1] and cur_int >= target:
-                            continue  # yukarı spike sonrası geri okumalara takılma
-                        x768_hits.append(cur_int)
+                            pass
+                        time.sleep(MICRO_READ_DELAY)
+                        continue
+                    x768_hits.append(cur_int)
+                    try:
+                        req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
+                    except Exception:
+                        req = 3
+                    try:
+                        sample_len = int(globals().get("X768_OCR_SAMPLES", req))
+                    except Exception:
+                        sample_len = req
+                    if sample_len < 1: sample_len = req
+                    if len(x768_hits) > sample_len:
+                        x768_hits[:] = x768_hits[-sample_len:]
+                    if len(x768_hits) >= max(1, req):
                         try:
-                            req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
+                            med = sorted(x768_hits)[len(x768_hits) // 2]
                         except Exception:
-                            req = 3
-                        try:
-                            sample_len = int(globals().get("X768_OCR_SAMPLES", req))
-                        except Exception:
-                            sample_len = req
-                        if sample_len < 1: sample_len = req
-                        if len(x768_hits) > sample_len:
-                            x768_hits[:] = x768_hits[-sample_len:]
-                        if len(x768_hits) >= max(1, req):
+                            med = cur_int
+                        if med in x768_micro_band:
                             try:
-                                med = sorted(x768_hits)[len(x768_hits) // 2]
+                                print(f"[PREC][X768][MICRO] trigger band hit: {med} -> starting micro-correct")
                             except Exception:
-                                med = cur_int
-                            cond_med = cond
+                                pass
+                            overshoot_detected = True
+                        elif med == target:
                             try:
-                                if expected_dir > 0:
-                                    cond_med = med > (target + pre_brake_delta)
-                                elif expected_dir < 0:
-                                    cond_med = med < (target - pre_brake_delta)
+                                print(f"[PREC][X768] ok: read={med} -> stop W")
                             except Exception:
-                                cond_med = cond
-                            if cond_med:
-                                overshoot_detected = True
-                    else:
-                        x768_hits.clear()
+                                pass
+                            cur_int = med
+                            cur = med
                 else:
+                    if expected_dir > 0 and cur_int > (target + pre_brake_delta):
+                        cond = True
+                    elif expected_dir < 0 and cur_int < (target - pre_brake_delta):
+                        cond = True
                     if cond:
                         overshoot_detected = True
             if overshoot_detected:
                 release_key(SC_W)
-                ok, final_val = _overshoot_micro_realign(axis, target, lambda: _read_axis(w, axis),
-                                                         max(pre_brake_delta, 0), max_steps=overshoot_steps,
-                                                         pulse_min=overshoot_p_min, pulse_max=overshoot_p_max,
-                                                         stable_hits=overshoot_hits_req, read_delay=overshoot_read_delay)
+                final_val = None
+                if overshoot_guard:
+                    ok = _fix_x768_overshoot(w, lambda: _read_axis(w, axis), max_taps=overshoot_steps)
+                    if ok:
+                        final_val = _read_axis(w, axis)
+                else:
+                    ok, final_val = _overshoot_micro_realign(axis, target, lambda: _read_axis(w, axis),
+                                                             max(pre_brake_delta, 0), max_steps=overshoot_steps,
+                                                             pulse_min=overshoot_p_min, pulse_max=overshoot_p_max,
+                                                             stable_hits=overshoot_hits_req, read_delay=overshoot_read_delay)
                 if not ok:
-                    set_stage(f"PREC_MOVE_{axis.upper()}_{target}_OVERSHOOT_RELAUNCH")
-                    try:
-                        exit_game_fast(w)
-                    except Exception as _e:
-                        print("[PREC][OVERSHOOT] exit_game_fast hata:", _e)
-                    try:
-                        relaunch_and_login_to_ingame()
-                    except Exception as _e:
-                        print("[PREC][OVERSHOOT] relaunch hata:", _e)
+                    if not overshoot_guard:
+                        set_stage(f"PREC_MOVE_{axis.upper()}_{target}_OVERSHOOT_RELAUNCH")
+                        try:
+                            exit_game_fast(w)
+                        except Exception as _e:
+                            print("[PREC][OVERSHOOT] exit_game_fast hata:", _e)
+                        try:
+                            relaunch_and_login_to_ingame()
+                        except Exception as _e:
+                            print("[PREC][OVERSHOOT] relaunch hata:", _e)
                     return _finish_prec_move(False)
                 try:
                     cur = int(final_val) if final_val is not None else cur
