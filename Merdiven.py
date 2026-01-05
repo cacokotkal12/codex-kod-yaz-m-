@@ -6679,7 +6679,7 @@ import random, time, keyboard
 
 
 def check_and_correct_y(target_y, read_func=None):
-    """Y koordinatını 0 sapmayla düzeltir (maks 400 deneme)."""
+    """Y koordinatını 0 sapmayla düzeltir (maks 50 deneme)."""
     global relaunch
     if read_func is None:
         try:
@@ -6706,7 +6706,7 @@ def check_and_correct_y(target_y, read_func=None):
             current_y = new_y;
             step += 1
             if step >= 50:
-                print("[MİKRO] 400 deneme başarısız, oyun yeniden başlatılıyor...")
+                print("[MİKRO] 50 deneme başarısız, oyun yeniden başlatılıyor...")
                 try:
                     close_game();
                     time.sleep(2);
@@ -6723,7 +6723,7 @@ def check_and_correct_y(target_y, read_func=None):
 
 
 def check_and_correct_x(target_x, read_func=None):
-    """X koordinatını 0 sapmayla düzeltir (maks 400 deneme)."""
+    """X koordinatını 0 sapmayla düzeltir (maks 50 deneme)."""
     global relaunch
     if read_func is None:
         try:
@@ -6750,7 +6750,7 @@ def check_and_correct_x(target_x, read_func=None):
             current_x = new_x;
             step += 1
             if step >= 50:
-                print("[MİKRO] 400 deneme başarısız, oyun yeniden başlatılıyor...")
+                print("[MİKRO] 50 deneme başarısız, oyun yeniden başlatılıyor...")
                 try:
                     close_game();
                     time.sleep(2);
