@@ -4545,6 +4545,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     overshoot_failed = False
     overshoot_hits = 0
     x768_hits = []
+    x768_armed = False
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
@@ -4608,7 +4609,15 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 elif expected_dir < 0 and cur_int < (target - pre_brake_delta):
                     cond = True
                 if overshoot_guard:
-                    if cond:
+                    if not x768_armed:
+                        try:
+                            if cur_int >= (target - pre_brake_delta):
+                                x768_armed = True
+                        except Exception:
+                            x768_armed = False
+                        if not x768_armed:
+                            x768_hits.clear()
+                    if cond and x768_armed:
                         x768_hits.append(cur_int)
                         try:
                             req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
