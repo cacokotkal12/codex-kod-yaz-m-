@@ -4395,6 +4395,14 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
                                         pulse_max=p_max, stable_hits=st_hits, read_delay=r_delay)
     if ok:
         return True
+    try:
+        try:
+            _rc = read_coordinates(w)
+        except Exception:
+            _rc = None
+        print(f"[PREC][OVERSHOOT] X768 relaunch debug: read_fn={read_axis_fn()} read_coordinates={_rc}")
+    except Exception as _dbg_e:
+        print("[PREC][OVERSHOOT] relaunch debug hata:", _dbg_e)
     set_stage("PREC_MOVE_X_768_OVERSHOOT_RELAUNCH")
     try:
         exit_game_fast(w)
