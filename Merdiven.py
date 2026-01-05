@@ -971,13 +971,13 @@ X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
 X_TOL_READ_DELAY = 0.05  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 X768_OVERSHOOT_CONFIRM_HITS = 3
-X768_OVERSHOOT_MAX_STEPS = 50
+X768_OVERSHOOT_MAX_STEPS = 40
 X768_OCR_SAMPLES = 3
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
 PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
 PRESS_MAX = 0.1  # S/W mikro basış maksimum (sn)
-MAX_STEPS = 400  # 598→597 düzeltmede en fazla adım
+MAX_STEPS = 50  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
 try:
@@ -988,7 +988,7 @@ try:
     if PRESS_MIN < 0.01: PRESS_MIN = 0.01
     if PRESS_MAX > 0.20: PRESS_MAX = 0.20
     # adım ve timeout sınırları
-    MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 400
+    MAX_STEPS = int(MAX_STEPS) if int(MAX_STEPS) > 0 else 50
     if MAX_STEPS > 2000: MAX_STEPS = 2000
     STUCK_TIMEOUT = int(STUCK_TIMEOUT) if int(STUCK_TIMEOUT) >= 3 else 10
     if STUCK_TIMEOUT > 60: STUCK_TIMEOUT = 60
@@ -1004,7 +1004,7 @@ MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (s
 Y598_OVERSHOOT_ENABLE = True
 Y598_OVERSHOOT_DELTA = 1
 Y598_OVERSHOOT_CONFIRM_HITS = 2
-Y598_FIX_MAX_STEPS = 400
+Y598_FIX_MAX_STEPS = 50
 Y598_FIX_PULSE_MIN = 0.035
 Y598_FIX_PULSE_MAX = 0.090
 Y598_FIX_READ_DELAY = 0.020
@@ -4294,7 +4294,7 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     return False
 
 
-def _overshoot_micro_realign(axis, target, read_fn, band_tol, max_steps=400, pulse_min=None, pulse_max=None,
+def _overshoot_micro_realign(axis, target, read_fn, band_tol, max_steps=50, pulse_min=None, pulse_max=None,
                              stable_hits=2, read_delay=MICRO_READ_DELAY):
     try:
         p_min = float(pulse_min if pulse_min is not None else globals().get("Y598_FIX_PULSE_MIN", 0.035))
@@ -4312,7 +4312,7 @@ def _overshoot_micro_realign(axis, target, read_fn, band_tol, max_steps=400, pul
     try:
         max_try = max(1, int(max_steps))
     except Exception:
-        max_try = 400
+        max_try = 50
     try:
         stable_target = max(1, int(stable_hits))
     except Exception:
@@ -4423,7 +4423,7 @@ def _fix_y598_overshoot(w, read_axis_fn: Callable[[], Optional[int]], start_val=
     release_key(SC_W)
     set_stage("PREC_MOVE_Y_598_OVERSHOOT_FIX")
     try:
-        max_steps = int(globals().get("Y598_FIX_MAX_STEPS", 400))
+        max_steps = int(globals().get("Y598_FIX_MAX_STEPS", 50))
     except Exception:
         max_steps = 400
     try:
@@ -4512,9 +4512,9 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     except Exception:
         expected_dir = +1
     try:
-        overshoot_steps = int(globals().get("Y598_FIX_MAX_STEPS", 400))
+        overshoot_steps = int(globals().get("Y598_FIX_MAX_STEPS", 50))
     except Exception:
-        overshoot_steps = 400
+        overshoot_steps = 50
     try:
         overshoot_p_min = float(globals().get("Y598_FIX_PULSE_MIN", 0.035))
     except Exception:
@@ -6705,7 +6705,7 @@ def check_and_correct_y(target_y, read_func=None):
             if new_y != current_y: last_change = time.time()
             current_y = new_y;
             step += 1
-            if step >= 400:
+            if step >= 50:
                 print("[MİKRO] 400 deneme başarısız, oyun yeniden başlatılıyor...")
                 try:
                     close_game();
@@ -6749,7 +6749,7 @@ def check_and_correct_x(target_x, read_func=None):
             if new_x != current_x: last_change = time.time()
             current_x = new_x;
             step += 1
-            if step >= 400:
+            if step >= 50:
                 print("[MİKRO] 400 deneme başarısız, oyun yeniden başlatılıyor...")
                 try:
                     close_game();
