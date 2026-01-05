@@ -4626,6 +4626,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                         if not x768_armed:
                             x768_hits.clear()
                     if cond and x768_armed:
+                        if x768_hits and cur_int < x768_hits[-1] and cur_int >= target:
+                            continue  # yukarı spike sonrası geri okumalara takılma
                         x768_hits.append(cur_int)
                         try:
                             req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
