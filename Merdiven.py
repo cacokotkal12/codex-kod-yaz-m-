@@ -1089,6 +1089,11 @@ X768_OCR_SAMPLES = 3
 X768_PLAUSIBLE_MIN = 740
 X768_PLAUSIBLE_MAX = 780
 X768_MICRO_BAND = (767, 766, 765, 764, 763)
+X768_STABLE_EPS = 2
+X768_STABLE_HITS_REQ = 2
+X768_ACCEPT_TIMEOUT = 2.5
+X768_FIX_TOL = 1
+X768_FIX_STABLE_HITS = 1
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
 PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
@@ -4514,7 +4519,10 @@ def _overshoot_micro_realign(axis, target, read_fn, band_tol, max_steps=50, puls
 def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: int = 6) -> bool:
     """X=768 hedefinde overshoot tespit edilince S ile mikro geri toparlama + failsafe hizalama yapar."""
     release_key(SC_W)
-    band = 0
+    try:
+        band = int(globals().get("X768_FIX_TOL", 1))
+    except Exception:
+        band = 1
     try:
         steps = max(int(globals().get("X768_OVERSHOOT_MAX_STEPS", 50)), int(max_taps) if max_taps is not None else 0)
     except Exception:
@@ -4528,9 +4536,9 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
     except Exception:
         p_max = p_min
     try:
-        st_hits = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
+        st_hits = int(globals().get("X768_FIX_STABLE_HITS", 1))
     except Exception:
-        st_hits = 3
+        st_hits = 1
     try:
         r_delay = float(globals().get("Y598_FIX_READ_DELAY", MICRO_READ_DELAY))
     except Exception:
@@ -4702,6 +4710,20 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     x768_last_raw = None
     x768_stable_hits = 0
     x768_closest = None
+    x768_micro_hits = 0
+    try:
+        x768_stable_eps = int(globals().get("X768_STABLE_EPS", 2))
+    except Exception:
+        x768_stable_eps = 2
+    try:
+        x768_stable_hits_req = int(globals().get("X768_STABLE_HITS_REQ", 2))
+    except Exception:
+        x768_stable_hits_req = 2
+    try:
+        x768_accept_timeout = float(globals().get("X768_ACCEPT_TIMEOUT", 2.5))
+    except Exception:
+        x768_accept_timeout = 2.5
+    x768_last_accept_ts = time.time()
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
@@ -4757,6 +4779,28 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                     print(f"[PREC][X768][GLITCH] read={cur} ignored (parse) last_good={x768_last_good} stable={x768_stable_hits}")
                 except Exception:
                     pass
+                if (time.time() - x768_last_accept_ts) > max(0.5, x768_accept_timeout):
+                    release_key(SC_W)
+                    time.sleep(0.2)
+                    try:
+                        _retry = _read_axis(w, axis)
+                        _retry_int = int(_retry) if _retry is not None else None
+                    except Exception:
+                        _retry_int = None
+                    if _retry_int is None or _retry_int < x768_plausible_min or _retry_int > x768_plausible_max:
+                        print("[PREC][X768] read failsafe: no acceptable parse -> relaunch")
+                        set_stage("PREC_MOVE_X_768_READ_FAILSAFE")
+                        try:
+                            exit_game_fast(w)
+                        except Exception as _e:
+                            print("[PREC][X768] exit_game_fast hata:", _e)
+                        try:
+                            relaunch_and_login_to_ingame()
+                        except Exception as _e:
+                            print("[PREC][X768] relaunch hata:", _e)
+                        return _finish_prec_move(False)
+                    x768_last_accept_ts = time.time()
+                    press_key(SC_W)
                 time.sleep(MICRO_READ_DELAY)
                 continue
             overshoot_detected = False
@@ -4787,18 +4831,39 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                         x768_stable_hits = 0
                         time.sleep(MICRO_READ_DELAY)
                         continue
-                    if x768_last_raw is not None and abs(cur_int - int(x768_last_raw)) <= 1:
-                        x768_stable_hits += 1
-                    else:
-                        x768_stable_hits = 1
-                    x768_last_raw = cur_int
-                    if x768_stable_hits < 3:
+                    x768_last_accept_ts = time.time()
+                    if cur_int == target:
                         try:
-                            print(f"[PREC][X768][GLITCH] read={cur_int} ignored (unstable) last_good={x768_last_good} stable={x768_stable_hits}")
+                            print(f"[PREC][X768_STOP] target hit: {cur_int}")
                         except Exception:
                             pass
-                        time.sleep(MICRO_READ_DELAY)
-                        continue
+                        release_key(SC_W)
+                        cur = cur_int
+                        break
+                    if cur_int in x768_micro_band:
+                        x768_micro_hits += 1
+                    else:
+                        x768_micro_hits = 0
+                    if x768_micro_hits >= max(1, overshoot_hits_req):
+                        try:
+                            print(f"[PREC][X768_STOP] micro band hit: {cur_int}")
+                        except Exception:
+                            pass
+                        overshoot_detected = True
+                    if not overshoot_detected:
+                        if x768_last_raw is not None and abs(cur_int - int(x768_last_raw)) <= max(0, x768_stable_eps):
+                            x768_stable_hits += 1
+                        else:
+                            x768_stable_hits = 1
+                        x768_last_raw = cur_int
+                        if x768_stable_hits < max(1, x768_stable_hits_req):
+                            try:
+                                print(f"[PREC][X768][GLITCH] read={cur_int} ignored (unstable) last_good={x768_last_good} stable={x768_stable_hits}")
+                            except Exception:
+                                pass
+                            time.sleep(MICRO_READ_DELAY)
+                            continue
+                    x768_last_raw = cur_int
                     x768_last_good = cur_int
                     if x768_closest is None or abs(int(target) - int(cur_int)) < abs(int(target) - int(x768_closest)):
                         x768_closest = cur_int
