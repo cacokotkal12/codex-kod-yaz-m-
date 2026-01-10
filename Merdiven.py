@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import pygetwindow
+
 # DENEME: 11.11.2025 – küçük test
 TOWN_HARD_LOCK = False
 
@@ -230,6 +233,109 @@ def PERSIST_DIR(name):
     os.makedirs(path, exist_ok=True)
     return path
 
+
+# === [PATCH_PLUS8_RESUME_JSON] ===
+RUNTIME_STATE_FILE="runtime_state.json" # +8 resume kayıt dosyası
+RUNTIME_STATE_MAX_AGE_SEC=600 # 30dk'dan eski kayıt yok sayılır
+_RT_MIN_WRITE_INTERVAL=0.50 # Disk yazma aralığı
+_RT_LOCK=threading.Lock()
+_RT_LAST_WRITE=0.0
+
+def _rt_path(): return PERSIST_PATH(RUNTIME_STATE_FILE)
+
+def _rt_read():
+    try:
+        p=_rt_path()
+        if not os.path.exists(p): return None
+        with open(p,"r",encoding="utf-8") as f: return json.load(f)
+    except Exception: return None
+
+def _rt_write(d:dict):
+    try:
+        p=_rt_path(); tmp=p+".tmp"
+        os.makedirs(os.path.dirname(p),exist_ok=True)
+        with open(tmp,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
+        os.replace(tmp,p)
+    except Exception:
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except Exception: pass
+
+def _rt_checkpoint(*,stage:str=None,phase:str=None,plus8:dict=None,crash:bool=False,err:str=None,force:bool=False):
+    global _RT_LAST_WRITE
+    try:
+        now=time.time()
+        if (not force) and (now-_RT_LAST_WRITE)<_RT_MIN_WRITE_INTERVAL: return
+        if not (MODE=="BANK_PLUS8" or PLUS8_RESUME or crash): return
+        with _RT_LOCK:
+            d=_rt_read() or {}
+            d["ts"]=now
+            d["pc"]=os.environ.get("COMPUTERNAME") or ""
+            d["account"]=str(globals().get("ACTIVE_ACCOUNT_LABEL") or globals().get("ACTIVE_ACCOUNT") or globals().get("HESAP") or "")
+            d["mode"]=str(MODE or "")
+            d["plus8_resume"]=bool(PLUS8_RESUME or MODE=="BANK_PLUS8")
+            d["active"]=bool(d["plus8_resume"])
+            if stage is None:
+                try: stage=str(globals().get("_current_stage","") or "")
+                except Exception: stage=""
+            d["stage"]=stage or d.get("stage","")
+            if phase is not None: d["phase"]=phase
+            if crash: d["crash"]=True
+            if err: d["err"]=str(err)[:500]
+            if plus8 is not None:
+                p=d.get("plus8") or {}
+                p.update(plus8); d["plus8"]=p
+            _rt_write(d); _RT_LAST_WRITE=now; globals()['_PLUS8_RT']=d
+    except Exception: pass
+
+def _rt_clear(reason:str=""):
+    try:
+        with _RT_LOCK:
+            p=_rt_path()
+            if os.path.exists(p): os.remove(p)
+        globals()['_PLUS8_RT']=None
+        if reason: print(f"[RESUME] Temizlendi: {reason}")
+    except Exception: pass
+
+def _rt_boot_apply():
+    global MODE,PLUS8_RESUME
+    try:
+        d=_rt_read()
+        if not d or not d.get('active'): return
+        if (time.time()-float(d.get('ts',0) or 0))>float(RUNTIME_STATE_MAX_AGE_SEC): return
+        if d.get('plus8_resume'):
+            MODE="BANK_PLUS8"; PLUS8_RESUME=True; globals()["_PLUS8_RT"]=d
+            p8=d.get('plus8') or {}
+            print(f"[RESUME] +8 resume bulundu → MODE=BANK_PLUS8 (done={p8.get('attempts_done',0)} start={p8.get('start_index',0)})")
+    except Exception: pass
+
+def _rt_should_resume_plus8_upgrade():
+    try:
+        d=globals().get('_PLUS8_RT') or _rt_read() or {}
+        if not d.get('active') or not d.get('plus8_resume'): return False
+        ph=str(d.get('phase','') or '').upper()
+        p8=d.get('plus8') or {}
+        lim=int(p8.get('attempts_limit',0) or 0); done=int(p8.get('attempts_done',0) or 0)
+        return (ph=="UPGRADING") and (lim>0) and (done<lim)
+    except Exception: return False
+
+def _rt_get_plus8_resume():
+    try:
+        d=globals().get('_PLUS8_RT') or _rt_read() or {}
+        if not d.get('plus8_resume'): return None
+        if str(d.get("phase","") or "").upper()!="UPGRADING": return None
+        return d.get('plus8') or None
+    except Exception: return None
+
+def _rt_p8_update(done:int,lim:int,start:int,used:set,wrap:int=None,*,force:bool=False):
+    try:
+        if not (MODE=="BANK_PLUS8" or PLUS8_RESUME): return
+        used_list=[(int(c),int(r)) for (c,r) in (used or set())]
+        p={'attempts_done':int(done or 0),'attempts_limit':int(lim or 0),'start_index':int(start or 0),'used':used_list}
+        if wrap is not None: p['wrap_cursor']=int(wrap)
+        _rt_checkpoint(phase='UPGRADING',plus8=p,force=force)
+    except Exception: pass
+# === [/PATCH_PLUS8_RESUME_JSON] ===
 
 def _MERDIVEN_CFG_PATH():
     """Ayar dosyası için tekil ve yazılabilir yol döndür."""
@@ -714,6 +820,9 @@ def dump_crash(e: Exception, stage: str = "UNKNOWN"):
         time.sleep(0.12)
         cv2.imwrite(os.path.join(CRASH_DIR, f"crash_{ts}_b.png"), _grab_full_bgr())
         log(f"[CRASH] dump: {ts}", "error")
+        # [PATCH_RT_IN_DUMP_CRASH]
+        try: _rt_checkpoint(stage=stage, crash=True, err=repr(e), force=True)
+        except Exception: pass
     except Exception:
         pass
 
@@ -772,6 +881,7 @@ def _bye(): log("[EXIT] program sonlandı")
 
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
+COORD_READ_DEBUG = True
 tus_hizi = 0.050;
 mouse_hizi = 0.1;
 jitter_px = 0
@@ -910,6 +1020,9 @@ PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 PLUS8_CYCLE_BANK_START = 0
 PLUS8_CYCLE_SUMMARY_SENT = False
+# [PATCH_PLUS8_PREFLIGHT_CFG]
+PLUS8_PREFLIGHT_DEPOSIT=True # +8 modunda üstte +8 varsa önce bankaya at
+PLUS8_CLEANUP_CHECK_IN_WORKFLOW=True # Workflow başında +8 varsa bankaya at (kurtarma)
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
@@ -1215,6 +1328,9 @@ def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
     MODE = "NORMAL"
     if reset_plus8_state:
         PLUS8_RESUME = False
+        # [PATCH_RT_IN_SET_MODE_NORMAL]
+        try: _rt_clear("mode_normal")
+        except Exception: pass
     if reason:
         print(f"[MODE] NORMAL ({reason})")
 
@@ -1225,6 +1341,9 @@ def _set_mode_bank_plus8(reason: str = None):
     _stop_plus8_wait_notifier()
     MODE = "BANK_PLUS8"
     PLUS8_RESUME = True
+    # [PATCH_RT_IN_SET_MODE_BANK_PLUS8]
+    try: _rt_checkpoint(stage="MODE_BANK_PLUS8", phase="BANKING", force=True)
+    except Exception: pass
     if reason:
         print(f"[MODE] BANK_PLUS8 ({reason})")
 
@@ -1635,6 +1754,9 @@ _LAST_WATCHDOG_KICK_TS = 0.0
 def set_stage(name: str):
     global _current_stage, _stage_enter_ts
     _current_stage = name;
+    # [PATCH_RT_IN_SET_STAGE]
+    try: _rt_checkpoint(stage=name)
+    except Exception: pass
     _stage_enter_ts = time.time();
     _mark_progress(f"stage:{name}")
     print(f"[STAGE] {_current_stage}");
@@ -2585,6 +2707,13 @@ def _is_win_error_1400(exc: Exception) -> bool:
                 return True
         except Exception:
             pass
+    # [PATCH_PLUS8_WIN1400]
+    try:
+        pge=getattr(pygetwindow,"PyGetWindowException",None)
+        if pge is not None and isinstance(exc,pge) and "1400" in str(exc):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -6195,12 +6324,38 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
     _set_town_lock_by_y(y_now)
     if TOWN_LOCKED:
         _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
-    first = True
+    # [PATCH_RT_IN_RUN_BANK_PLUS8_CYCLE]
+    resume_once = False
+    try: resume_once = _rt_should_resume_plus8_upgrade()
+    except Exception: resume_once = False
+    first = (not resume_once)
     try:
         while True:
             wait_if_paused();
+            # [PATCH_RT_PLUS8_PREFLIGHT_DEPOSIT]
+            if not resume_once:
+                try:
+                    dep = deposit_inventory_plusN_to_bank(w, 8)
+                    if dep: print(f"[BANK_PLUS8] Preflight: üzerindeki +8 bankaya atıldı ({dep}).")
+                except Exception:
+                    pass
             watchdog_enforce()
-            if first:
+            if resume_once:
+                taken = int((_rt_get_plus8_resume() or {}).get("attempts_limit", BASMA_HAKKI) or BASMA_HAKKI)
+                print(f"[BANK_PLUS8] Resume: upgrade kaldığı yerden (limit={taken}).")
+                _rt_checkpoint(stage="BANK_PLUS8_RESUME", phase="UPGRADING", plus8={"attempts_limit": taken}, force=True)
+                resume_once = False
+                first = False
+            elif first:
+                # [PATCH_PLUS8_PREFLIGHT_DEPOSIT]
+                if globals().get("PLUS8_PREFLIGHT_DEPOSIT",True):
+                    try:
+                        set_stage("BANK_PLUS8_PREFLIGHT_DEPOSIT")
+                        pre=deposit_inventory_plusN_to_bank(w,8)
+                        if pre:
+                            print(f"[BANK_PLUS8] Preflight: üzerindeki +8 bankaya atıldı: {pre}")
+                    except Exception as e:
+                        print(f"[BANK_PLUS8] Preflight deposit hata: {e}")
                 initial = withdraw_plusN_from_bank_pages(w, 7, max_take=2);
                 print(f"[BANK_PLUS8] İlk +7: {initial}/2")
                 low_moved = deposit_low_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
@@ -6390,6 +6545,10 @@ def run_stairs_and_workflow(w):
     # global satırı EN BAŞTA olmalı
     global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, REQUEST_RELAUNCH, FORCE_PLUS7_ONCE, BANK_OPEN, NEED_STAIRS_REALIGN, TOWN_LOCKED
     global PLUS8_RESUME
+    # [PATCH_RT_IN_BOOT]
+    try: _rt_boot_apply()
+    except Exception: pass
+
 
     set_stage("WORKFLOW_LOOP")
     print(f">>> Akış başlıyor (tur={GLOBAL_CYCLE}, +7_kontrol_turu>={NEXT_PLUS7_CHECK_AT})")
@@ -6463,6 +6622,11 @@ def run_stairs_and_workflow(w):
 
             do_plus7 = FORCE_PLUS7_ONCE or (GLOBAL_CYCLE >= NEXT_PLUS7_CHECK_AT)
             plus7_count = -1
+            # [PATCH_PLUS8_WORKFLOW_SCAN]
+            plus8_count=0
+            if globals().get("PLUS8_CLEANUP_CHECK_IN_WORKFLOW",True) and not (MODE=="BANK_PLUS8" or PLUS8_RESUME):
+                print("[Karar] +8 taraması (kurtarma) AKTİF.")
+                plus8_count=count_inventory_plusN(w,8,"INV")
             if do_plus7:
                 if FORCE_PLUS7_ONCE:
                     print("[Karar] Bu tur +7 taraması **ZORUNLU**.")
@@ -6476,6 +6640,22 @@ def run_stairs_and_workflow(w):
             press_key(SC_I);
             release_key(SC_I);
             time.sleep(0.3)
+            # [PATCH_PLUS8_WORKFLOW_DEPOSIT]
+            if globals().get("PLUS8_CLEANUP_CHECK_IN_WORKFLOW",True) and (not (MODE=="BANK_PLUS8" or PLUS8_RESUME)) and plus8_count>=1:
+                print(f"[RECOVERY] Üzerinde +8 bulundu ({plus8_count}) → bankaya atılıyor.")
+                if move_to_769_and_turn_from_top(w):
+                    deposit_inventory_plusN_to_bank(w,8)
+                    md2=after_deposit_check_and_decide_mode(w)
+                    if md2=="BANK_PLUS8":
+                        run_bank_plus8_cycle(w,bank_is_open=True)
+                        ensure_ui_closed()
+                        return (True,False)
+                    elif md2=="ABORT":
+                        return (False,False)
+                    ensure_ui_closed()
+                    return (True,False)
+                else:
+                    return (False,False)
 
             if do_plus7 and plus7_count >= 3:
                 print("[Karar] Üzerinde ≥3 +7 → STORAGE akışı.")
@@ -11382,3 +11562,144 @@ if __name__ == "__main__":
     except Exception:
         pass
     _MERDIVEN_GUI_ENTRY(auto_open=True)
+
+# === [YAMA COORD MSS] start ===
+# NE İŞE YARAR: Koordinat ROI grab işlemini ImageGrab yerine MSS ile hızlandırır (CPU OCR aynı, grab hızlanır).
+COORD_USE_MSS=bool(globals().get("COORD_USE_MSS",True))
+COORD_READ_DEBUG=bool(globals().get("COORD_READ_DEBUG",True))
+COORD_RESIZE_SCALE=float(globals().get("COORD_RESIZE_SCALE",1.2))  # 1.3->1.2 mini PC için daha hızlı
+COORD_CONTRAST=float(globals().get("COORD_CONTRAST",2.6))  # 3.0->2.6 genelde yeter
+def _read_coordinates_mss(window):
+    """NE İŞE YARAR: read_coordinates() yerine geçer; MSS varsa ROI'yi hızlı yakalar."""
+    attempts=0;extra_retry=False
+    while (attempts<1) or extra_retry:
+        attempts+=1;extra_retry=False
+        w,rect=ensure_knight_online_window("read_coordinates",existing_window=window,focus=False,want_rect=True,attempts=5,retry_delay=0.6)
+        if (not w) or (rect is None): return None,None
+        t0=time.time()
+        try:
+            left,top,_r,_b=rect
+            x1,y1,x2,y2=(left+104,top+102,left+160,top+120)  # senin mevcut bbox
+            img=None
+            if COORD_USE_MSS:
+                try:
+                    _m=globals().get("mss",None)
+                    if _m is None:
+                        import mss as _m
+                    import numpy as _np
+                    with _m.mss() as sct:
+                        mon={"left":int(x1),"top":int(y1),"width":int(x2-x1),"height":int(y2-y1)}
+                        arr=_np.array(sct.grab(mon))[:,:,:3]  # BGR
+                    from PIL import Image
+                    img=Image.fromarray(arr[:,:,::-1])  # RGB
+                except Exception:
+                    img=None
+            if img is None:
+                from PIL import ImageGrab
+                img=ImageGrab.grab(bbox=(x1,y1,x2,y2))
+            from PIL import ImageEnhance
+            gray=img.convert("L")
+            sc=max(1.0,float(COORD_RESIZE_SCALE))
+            if sc!=1.0: gray=gray.resize((int(gray.width*sc),int(gray.height*sc)))
+            gray=ImageEnhance.Contrast(gray).enhance(float(COORD_CONTRAST))
+            cfg=r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1'
+            text=pytesseract.image_to_string(gray,config=cfg).strip()
+            parts=re.split(r'[,.\s]+',text);nums=[p for p in parts if p.isdigit()]
+            if COORD_READ_DEBUG:
+                dt=(time.time()-t0)*1000.0
+                try: log(f"[COORD] read {dt:.1f}ms txt='{text}' nums={nums} mss={COORD_USE_MSS}","info")
+                except Exception: pass
+            if len(nums)>=2:
+                x_val,y_val=int(nums[0]),int(nums[1])
+                try: _update_progress_with_coord((x_val,y_val))
+                except Exception: pass
+                return x_val,y_val
+        except Exception as exc:
+            try:
+                if _is_win_error_1400(exc):
+                    _handle_win1400_recovery("read_coordinates","reset_hwnd refind_window retry=1/2",attempts,2)
+                    if attempts<2: extra_retry=True; continue
+                else:
+                    raise
+            except Exception:
+                raise
+    return None,None
+try:
+    globals()["read_coordinates"]=_read_coordinates_mss  # mevcut read_coordinates'i override eder
+except Exception:
+    pass
+# === [YAMA COORD MSS] end ===
+
+
+
+
+
+
+
+# === [YAMA COORD PERF LOG V2] start ===
+# NE İŞE YARAR: Koordinat okuma süresini (ms) %APPDATA%\Merdiven\logs\coord_perf.log dosyasına yazar.
+COORD_PERF_LOG_ENABLE=bool(globals().get("COORD_PERF_LOG_ENABLE",True))
+COORD_PERF_LOG_NAME=str(globals().get("COORD_PERF_LOG_NAME","coord_perf.log"))  # dosya adı
+COORD_PERF_FORCE_CREATE=bool(globals().get("COORD_PERF_FORCE_CREATE",True))     # program başında dosyayı oluştur
+COORD_PERF_FLUSH=bool(globals().get("COORD_PERF_FLUSH",True))                  # her satırda flush
+try:
+    import threading as _thr
+    _COORD_PERF_LOCK=_thr.Lock()
+except Exception:
+    _COORD_PERF_LOCK=None
+def _coord_perf_path():
+    import os as _os
+    try:
+        ld=globals().get("LOG_DIR")
+        if isinstance(ld,str) and ld.strip():
+            _os.makedirs(ld,exist_ok=True)
+            return _os.path.join(ld,COORD_PERF_LOG_NAME)
+    except Exception:
+        pass
+    base=_os.path.join(_os.getenv("APPDATA") or _os.path.expanduser("~"),"Merdiven","logs")
+    try: _os.makedirs(base,exist_ok=True)
+    except Exception: pass
+    return _os.path.join(base,COORD_PERF_LOG_NAME)
+def _coord_perf_write(line):
+    if not COORD_PERF_LOG_ENABLE: return
+    try:
+        p=_coord_perf_path()
+        if _COORD_PERF_LOCK:
+            with _COORD_PERF_LOCK:
+                f=open(p,"a",encoding="utf-8");f.write(line+"\n")
+                if COORD_PERF_FLUSH: f.flush()
+                f.close()
+        else:
+            f=open(p,"a",encoding="utf-8");f.write(line+"\n")
+            if COORD_PERF_FLUSH: f.flush()
+            f.close()
+    except Exception:
+        pass
+# Dosyayı başta oluştur (boş da olsa görünsün)
+try:
+    if COORD_PERF_FORCE_CREATE:
+        import time as _t
+        _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\tSTART\tpid={os.getpid()}")
+        try:
+            log(f"[COORD-PERF] file={_coord_perf_path()}", "info")
+        except Exception:
+            pass
+except Exception:
+    pass
+# read_coordinates() wrapper (tek sefer sar)
+try:
+    if not globals().get("_COORD_PERF_WRAPPED",False) and callable(globals().get("read_coordinates",None)):
+        _COORD_PERF_WRAPPED=True
+        _orig_rc=globals()["read_coordinates"]
+        import time as _t
+        def read_coordinates(window=None):
+            t0=_t.time();x=y=None;ok=0
+            try:
+                x,y=_orig_rc(window);ok=1;return x,y
+            finally:
+                dt=(_t.time()-t0)*1000.0
+                _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\t{dt:.1f}ms\tok={ok}\tX={x}\tY={y}")
+except Exception:
+    pass
+# === [YAMA COORD PERF LOG V2] end ===
+
