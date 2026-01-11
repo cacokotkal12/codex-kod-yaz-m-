@@ -374,11 +374,6 @@ _sync_sale_refresh_from_cfg()
 
 
 try:
-    import mss
-except Exception:
-    mss = None
-
-try:
     import requests
 except Exception:
     requests = None
@@ -538,6 +533,9 @@ def log(msg, lvl="info"): getattr(_logger, lvl, _logger.info)(msg)
 
 # ---- Kalıcı istatistik yardımcıları ----
 _STATS_FILE = PERSIST_PATH('istatistik.json')
+_RESUME_STATE_PATH = PERSIST_PATH('resume_state.json')
+_RESUME_FORCE_PLUS8_CHECK = False
+_RESUME_STATE_DATA = None
 _STATS_DEFAULT = {
     "PLUS7_BANK_COUNT": 0,
     "PLUS8_BANK_COUNT": 0,
@@ -684,14 +682,6 @@ _init_statistics()
 
 
 def _grab_full_bgr():
-    try:
-        if mss is not None:
-            with mss.mss() as sct:
-                mon = sct.monitors[1];
-                im = np.array(sct.grab(mon))[:, :, :3];
-                return im
-    except Exception:
-        pass
     im = ImageGrab.grab();
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
 
@@ -3353,15 +3343,6 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 # ================== Görüntü/Template Yardımcıları ==================
 def grab_window_gray(win):
     x1, y1, x2, y2 = win.left, win.top, win.right, win.bottom
-    if mss is not None:
-        try:
-            import numpy as _np
-            with mss.mss() as sct:
-                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-                im = _np.array(sct.grab(mon))[:, :, :3]
-                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        except Exception:
-            pass
     img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
@@ -3899,7 +3880,7 @@ def _grab_tooltip_roi_near_mouse(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_ROI_H):
 
 
 def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
-    # Hızlı +7/+8 tespiti: tek/az örnek, MSS ile hızlı grab, OCR opsiyonel
+    # Hızlı +7/+8 tespiti: tek/az örnek, hızlı grab, OCR opsiyonel
     if hover_wait is None:
         hover_wait = HOVER_WAIT_BANK if region == "BANK_PANEL" else HOVER_WAIT_INV
     x, y = slot_center(region, col, row)
@@ -3914,7 +3895,7 @@ def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
         wait_between = float(globals().get('PLUSN_WAIT_BETWEEN', 0.06))
         last_roi = None
         for i in range(samples):
-            roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
+            roi = _grab_tooltip_roi_near_mouse(win)
             last_roi = roi
             if N == 7:
                 if _match_plus7_templates_on(roi, 0.78) or _match_plus7_templates_on(roi, 0.80): return True
@@ -4498,6 +4479,14 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     set_stage(f"PREC_MOVE_{axis.upper()}_{target}");
     ensure_ui_closed();
     t0 = time.time();
+    failfast_limit = 60.0
+    failfast_deadline = t0 + failfast_limit
+    try:
+        timeout = float(timeout)
+    except Exception:
+        timeout = 20.0
+    if timeout < failfast_limit:
+        timeout = failfast_limit
     try:
         base_cur = _read_axis(w, axis)
     except Exception:
@@ -4586,12 +4575,57 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             _set_town_hardlock_state(False, "PREC_MOVE_DONE")
         return val
 
+    def _prec_failfast_restart():
+        release_key(SC_W)
+        try:
+            stage_name = _normalize_stage_name(globals().get("_current_stage", "")) or f"PREC_MOVE_{axis.upper()}_{target}"
+        except Exception:
+            stage_name = f"PREC_MOVE_{axis.upper()}_{target}"
+        try:
+            data = {
+                "last_stage": stage_name,
+                "fail_reason": "STAGE_STUCK_60S",
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "run_context": {
+                    "mode": globals().get("MODE", ""),
+                    "plus8_resume": bool(globals().get("PLUS8_RESUME", False)),
+                    "bank_open": bool(globals().get("BANK_OPEN", False)),
+                    "operation_mode": globals().get("OPERATION_MODE", OPERATION_MODE),
+                    "global_cycle": globals().get("GLOBAL_CYCLE", None),
+                    "next_plus7_check_at": globals().get("NEXT_PLUS7_CHECK_AT", None),
+                    "plus8_active": bool(globals().get("MODE", "") == "BANK_PLUS8") or bool(
+                        globals().get("PLUS8_RESUME", False)),
+                    "plus8_cycle_bank_start": globals().get("PLUS8_CYCLE_BANK_START", None),
+                    "plus8_cycle_summary_sent": globals().get("PLUS8_CYCLE_SUMMARY_SENT", None),
+                },
+            }
+            tmp = _RESUME_STATE_PATH + ".tmp"
+            os.makedirs(os.path.dirname(_RESUME_STATE_PATH), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, _RESUME_STATE_PATH)
+            globals()["_RESUME_FORCE_PLUS8_CHECK"] = True
+            globals()["_RESUME_STATE_DATA"] = data
+        except Exception:
+            pass
+        try:
+            exit_game_fast(w)
+        except Exception:
+            pass
+        try:
+            relaunch_and_login_to_ingame()
+        except Exception:
+            pass
+        return _finish_prec_move(False)
+
     press_key(SC_W)
     try:
         while True:
             wait_if_paused();
             watchdog_enforce()
             if _kb_pressed('f12'): return _finish_prec_move(False)
+            if time.time() >= failfast_deadline:
+                return _prec_failfast_restart()
             cur = _read_axis_guarded()
             if overshoot_failed:
                 return _finish_prec_move(False)
@@ -4673,6 +4707,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                             relaunch_and_login_to_ingame()
                         except Exception as _e:
                             print("[PREC][OVERSHOOT] relaunch hata:", _e)
+                    if time.time() >= failfast_deadline:
+                        return _prec_failfast_restart()
                     return _finish_prec_move(False)
                 try:
                     cur = int(final_val) if final_val is not None else cur
@@ -4702,6 +4738,8 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     matched = _micro_adjust_axis(_read_axis_guarded, axis, target, direction, seq, settle_hits,
                                  max_duration=MICRO_ADJUST_MAX_DURATION, deadline=deadline)
     fc = _read_axis_guarded();
+    if not matched and time.time() >= failfast_deadline:
+        return _prec_failfast_restart()
     if overshoot_guard and overshoot_failed:
         return _finish_prec_move(False)
     ok = matched or ((fc == target) if force_exact else abs((fc or target) - target) <= 1)
@@ -4886,7 +4924,9 @@ def move_to_769_and_turn_from_top(w):
     time.sleep(TURN_LEFT_SEC);
     release_key(SC_A)
     ok = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
-    if not ok: print("[Uyarı] 768 x hedeflemesi zaman aşımı (storage).")
+    if not ok:
+        print("[Uyarı] 768 x hedeflemesi zaman aşımı (storage).")
+        return False
     press_key(SC_D);
     time.sleep(TURN_RIGHT_SEC);
     release_key(SC_D)
@@ -5071,7 +5111,7 @@ def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 
                     if hover_has_plusN(win, "BANK_PANEL", c, r, 7, hover_wait=HOVER_WAIT_BANK) or \
                             hover_has_plusN(win, "BANK_PANEL", c, r, 8, hover_wait=HOVER_WAIT_BANK):
                         continue
-                    roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
+                    roi = _grab_tooltip_roi_near_mouse(win)
                     if roi is not None and (_roi_has_plusN(roi, 7) or _roi_has_plusN(roi, 8)):
                         continue
                     x, y = slot_center("BANK_PANEL", c, r)
@@ -5643,15 +5683,6 @@ def _jdelay(base: float, spread: float = 0.02) -> float:
 # === Genel bölge kırpma yardımcıları ===
 def _grab_gray_rect(rect):
     x1, y1, x2, y2 = rect
-    if mss is not None:
-        try:
-            import numpy as _np
-            with mss.mss() as sct:
-                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-                im = _np.array(sct.grab(mon))[:, :, :3]
-                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        except Exception:
-            pass
     img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
@@ -6148,6 +6179,14 @@ def relaunch_and_login_to_ingame():
         BANK_OPEN = False;
         maybe_autotune(True);
         _reset_progress_state("relaunch_success")
+        try:
+            if os.path.exists(_RESUME_STATE_PATH):
+                with open(_RESUME_STATE_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                globals()["_RESUME_STATE_DATA"] = data
+                globals()["_RESUME_FORCE_PLUS8_CHECK"] = True
+        except Exception:
+            pass
         return w
 
 
@@ -6409,7 +6448,8 @@ def run_stairs_and_workflow(w):
                 ascend_stairs_to_top(w)
                 continue
 
-            if keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME:
+            resume_check = bool(globals().get("_RESUME_FORCE_PLUS8_CHECK", False))
+            if (not resume_check) and (keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME):
                 _set_mode_bank_plus8("Klavye/Resume")
                 print("[KAMPANYA] +8 modu (F/Resume).")
                 if not BANK_OPEN:
@@ -6460,6 +6500,25 @@ def run_stairs_and_workflow(w):
             release_key(SC_I);
             time.sleep(0.6)
             empty_slots = count_empty_slots("INV")
+
+            if resume_check:
+                plus8_count = count_inventory_plusN(w, 8, "INV")
+                globals()["_RESUME_FORCE_PLUS8_CHECK"] = False
+                if plus8_count >= 1:
+                    press_key(SC_I);
+                    release_key(SC_I);
+                    time.sleep(0.3)
+                    if not move_to_769_and_turn_from_top(w):
+                        print("[KAMPANYA] Banka yok; town & retry.")
+                        send_town_command()
+                        continue
+                    deposit_inventory_plusN_to_bank(w, 8)
+                    ensure_ui_closed()
+                    if MODE == "BANK_PLUS8" or PLUS8_RESUME:
+                        run_bank_plus8_cycle(w, bank_is_open=True)
+                        print("[KAMPANYA] +8 modu tamam → NORMAL.")
+                        _set_mode_normal("BANK_PLUS8 döngü tamam")
+                    continue
 
             do_plus7 = FORCE_PLUS7_ONCE or (GLOBAL_CYCLE >= NEXT_PLUS7_CHECK_AT)
             plus7_count = -1
@@ -7966,7 +8025,6 @@ _TR = {
     'ON_TEMPLATE_TIMEOUT_RESTART': 'şablon gecikirse yeniden başlat',
     'DEBUG_SAVE': 'debug görselleri kaydet',
     'GUI_AUTO_OPEN_SPEED': 'başlangıçta hız sekmesini aç',
-    'TOOLTIP_GRAB_WITH_MSS': 'tooltip yakalamada mss kullan',
     'TOOLTIP_OFFSET_Y': 'tooltip Y ofseti',
     'TOOLTIP_ROI_W': 'tooltip ROI genişlik',
     'TOOLTIP_ROI_H': 'tooltip ROI yükseklik',
@@ -8119,7 +8177,6 @@ _TR_HELP.update({
     "EMPTY_SLOT_THRESHOLD": "Boş slot sayısı ≥ bu değer ise 'çoğunlukla boş' kabul edilir.",
     'ENABLE_YAMA_SLOT_CACHE': 'Boş/dolu sonuçlarını önbelleğe al.',
     'MAX_CACHE_SIZE_PER_SNAPSHOT': 'Tek yakalamada izinli maksimum önbellek pikseli.',
-    'TOOLTIP_GRAB_WITH_MSS': 'Tooltip için mss kullan (genelde daha stabil).',
     'TOOLTIP_OFFSET_Y': 'Tooltip kırpma ofseti (Y).',
     'TOOLTIP_ROI_W': 'Tooltip ROI genişliği.',
     'TOOLTIP_ROI_H': 'Tooltip ROI yüksekliği.',
@@ -8300,7 +8357,6 @@ _ADV_CATEGORY_RULES = (
             'EMPTY_SLOT_THRESHOLD',
             'ENABLE_YAMA_SLOT_CACHE',
             'MAX_CACHE_SIZE_PER_SNAPSHOT',
-            'TOOLTIP_GRAB_WITH_MSS',
             'TOOLTIP_OFFSET_Y',
             'TOOLTIP_ROI_W',
             'TOOLTIP_ROI_H',
@@ -10709,43 +10765,6 @@ PLUSN_FAST_MODE = bool(globals().get('PLUSN_FAST_MODE', True))
 PLUSN_HOVER_SAMPLES = int(globals().get('PLUSN_HOVER_SAMPLES', 1))
 PLUSN_WAIT_BETWEEN = float(globals().get('PLUSN_WAIT_BETWEEN', 0.06))
 PLUSN_USE_OCR_FALLBACK = bool(globals().get('PLUSN_USE_OCR_FALLBACK', False))
-TOOLTIP_GRAB_WITH_MSS = bool(globals().get('TOOLTIP_GRAB_WITH_MSS', True))
-
-
-# [YAMA] Tooltip ROI hızlı yakalama (MSS varsa onu kullan)
-def _grab_tooltip_roi_near_mouse_fast(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_ROI_H):
-    try:
-        if not bool(globals().get('TOOLTIP_GRAB_WITH_MSS', True)):
-            raise RuntimeError("MSS devre dışı")
-        import mss, numpy as _np, cv2
-        # Mevcut mouse pozisyonundan tepeye doğru roi
-        class _PT:
-            pass
-
-        import ctypes
-        pt = _PT();
-        pt.x = ctypes.c_long();
-        pt.y = ctypes.c_long()
-        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-        mx, my = int(pt.x.value), int(pt.y.value)
-        Lw, Tw, Rw, Bw = win.left, win.top, win.right, win.bottom
-        half = roi_w // 2;
-        x1 = mx - half;
-        y1 = my - (roi_h + TOOLTIP_OFFSET_Y);
-        x2 = x1 + roi_w;
-        y2 = y1 + roi_h
-        x1 = max(Lw, x1);
-        y1 = max(Tw, y1);
-        x2 = min(Rw, x2);
-        y2 = min(Bw, y2)
-        if x2 - x1 < 40 or y2 - y1 < 40: return None
-        with mss.mss() as sct:
-            mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-            im = _np.array(sct.grab(mon))[:, :, :3]
-            import cv2 as _cv2
-            return _cv2.cvtColor(im, _cv2.COLOR_BGR2GRAY)
-    except Exception:
-        return None
 
 
 # >>> [YAMA:GUI_DEFAULTS]
