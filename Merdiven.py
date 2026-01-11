@@ -882,6 +882,14 @@ def _bye(): log("[EXIT] program sonlandı")
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
 COORD_READ_DEBUG = True
+COORD_USE_MSS = True  # PyInstaller: hidden-import=mss (gerekirse mss.tools)
+COORD_RESIZE_SCALE = 1.2
+COORD_CONTRAST = 2.6
+COORD_THRESHOLD = 160
+COORD_FAST_RESIZE_SCALE = 1.0
+COORD_FAST_CONTRAST = 2.2
+COORD_FAST_THRESHOLD = 160
+COORD_PERF_LOG_ENABLE = True
 tus_hizi = 0.050;
 mouse_hizi = 0.1;
 jitter_px = 0
@@ -1094,6 +1102,11 @@ X768_STABLE_HITS_REQ = 2
 X768_ACCEPT_TIMEOUT = 2.5
 X768_FIX_TOL = 1
 X768_FIX_STABLE_HITS = 1
+X768_YAKIN_MAX_SICRAMA = 5
+NPC_FREN_MESAFE = 5
+NPC_HIZLI_OKUMA_GECIKME = 0.02
+NPC_STABIL_HIT = 2
+NPC_X768_OVERSHOOT_MAX_ADIM = 50
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
 PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
@@ -3181,19 +3194,32 @@ def read_coordinates(window):
         if not w or rect is None:
             return None, None
         try:
+            t0 = time.time()
             left, top, _r, _b = rect
             bbox = (left + 104, top + 102, left + 160, top + 120)
             img = ImageGrab.grab(bbox);
-            gray = img.convert('L').resize((int(img.width * 1.3), int(img.height * 1.3)))
-            TOWN_LOCKED = False
-            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-            TOWN_LOCKED = False
-            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
-            gray = ImageEnhance.Contrast(gray).enhance(3.0);
+            stage_now = str(globals().get("_current_stage", "") or "").upper()
+            fast_mode = (stage_now == "PREC_MOVE_X_768")
+            gray = img.convert('L')
+            sc = float(globals().get("COORD_FAST_RESIZE_SCALE" if fast_mode else "COORD_RESIZE_SCALE", 1.3))
+            if sc != 1.0:
+                gray = gray.resize((int(gray.width * sc), int(gray.height * sc)))
+            cval = float(globals().get("COORD_FAST_CONTRAST" if fast_mode else "COORD_CONTRAST", 3.0))
+            if cval != 1.0:
+                gray = ImageEnhance.Contrast(gray).enhance(cval);
+            thr = int(globals().get("COORD_FAST_THRESHOLD" if fast_mode else "COORD_THRESHOLD", 0))
+            if thr > 0:
+                gray = gray.point(lambda p: 255 if p > thr else 0)
             cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1';
             text = pytesseract.image_to_string(gray, config=cfg).strip()
             parts = re.split(r'[,.\s]+', text);
             nums = [p for p in parts if p.isdigit()]
+            if COORD_READ_DEBUG:
+                dt = (time.time() - t0) * 1000.0
+                try:
+                    log(f"[COORD] dt={dt:.1f}ms txt='{text}' nums={nums}", "info")
+                except Exception:
+                    pass
             if len(nums) >= 2:
                 x_val, y_val = int(nums[0]), int(nums[1])
                 _update_progress_with_coord((x_val, y_val))
@@ -3207,6 +3233,171 @@ def read_coordinates(window):
             else:
                 raise
     return None, None
+
+
+# === [YAMA COORD MSS] start ===
+# NE İŞE YARAR: Koordinat ROI grab işlemini ImageGrab yerine MSS ile hızlandırır (CPU OCR aynı, grab hızlanır).
+# PyInstaller notu: hidden-import=mss (gerekirse mss.tools)
+def _read_coordinates_mss(window):
+    """NE İŞE YARAR: read_coordinates() yerine geçer; MSS varsa ROI'yi hızlı yakalar."""
+    attempts = 0;
+    extra_retry = False
+    while (attempts < 1) or extra_retry:
+        attempts += 1;
+        extra_retry = False
+        w, rect = ensure_knight_online_window("read_coordinates", existing_window=window, focus=False, want_rect=True,
+                                              attempts=5, retry_delay=0.6)
+        if (not w) or (rect is None): return None, None
+        t0 = time.time()
+        try:
+            left, top, _r, _b = rect
+            x1, y1, x2, y2 = (left + 104, top + 102, left + 160, top + 120)  # senin mevcut bbox
+            img = None
+            if bool(globals().get("COORD_USE_MSS", True)):
+                try:
+                    _m = globals().get("mss", None)
+                    if _m is None:
+                        import mss as _m
+                    import numpy as _np
+                    with _m.mss() as sct:
+                        mon = {"left": int(x1), "top": int(y1), "width": int(x2 - x1), "height": int(y2 - y1)}
+                        arr = _np.array(sct.grab(mon))[:, :, :3]  # BGR
+                    from PIL import Image
+                    img = Image.fromarray(arr[:, :, ::-1])  # RGB
+                except Exception:
+                    img = None
+            if img is None:
+                from PIL import ImageGrab
+                img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+            stage_now = str(globals().get("_current_stage", "") or "").upper()
+            fast_mode = (stage_now == "PREC_MOVE_X_768")
+            from PIL import ImageEnhance
+            gray = img.convert("L")
+            sc = float(globals().get("COORD_FAST_RESIZE_SCALE" if fast_mode else "COORD_RESIZE_SCALE", 1.2))
+            if sc != 1.0: gray = gray.resize((int(gray.width * sc), int(gray.height * sc)))
+            cval = float(globals().get("COORD_FAST_CONTRAST" if fast_mode else "COORD_CONTRAST", 2.6))
+            if cval != 1.0:
+                gray = ImageEnhance.Contrast(gray).enhance(cval)
+            thr = int(globals().get("COORD_FAST_THRESHOLD" if fast_mode else "COORD_THRESHOLD", 0))
+            if thr > 0:
+                gray = gray.point(lambda p: 255 if p > thr else 0)
+            cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1'
+            text = pytesseract.image_to_string(gray, config=cfg).strip()
+            parts = re.split(r'[,.\s]+', text);
+            nums = [p for p in parts if p.isdigit()]
+            if COORD_READ_DEBUG:
+                dt = (time.time() - t0) * 1000.0
+                try:
+                    log(f"[COORD] dt={dt:.1f}ms txt='{text}' nums={nums} mss={bool(globals().get('COORD_USE_MSS', True))}",
+                        "info")
+                except Exception:
+                    pass
+            if len(nums) >= 2:
+                x_val, y_val = int(nums[0]), int(nums[1])
+                try:
+                    _update_progress_with_coord((x_val, y_val))
+                except Exception:
+                    pass
+                return x_val, y_val
+        except Exception as exc:
+            try:
+                if _is_win_error_1400(exc):
+                    _handle_win1400_recovery("read_coordinates", "reset_hwnd refind_window retry=1/2", attempts, 2)
+                    if attempts < 2: extra_retry = True; continue
+                else:
+                    raise
+            except Exception:
+                raise
+    return None, None
+
+
+try:
+    globals()["read_coordinates"] = _read_coordinates_mss  # mevcut read_coordinates'i override eder
+except Exception:
+    pass
+# === [YAMA COORD MSS] end ===
+
+
+# === [YAMA COORD PERF LOG V2] start ===
+# NE İŞE YARAR: Koordinat okuma süresini (ms) %APPDATA%\Merdiven\logs\coord_perf.log dosyasına yazar.
+COORD_PERF_LOG_ENABLE = bool(globals().get("COORD_PERF_LOG_ENABLE", True))
+COORD_PERF_LOG_NAME = str(globals().get("COORD_PERF_LOG_NAME", "coord_perf.log"))  # dosya adı
+COORD_PERF_FORCE_CREATE = bool(globals().get("COORD_PERF_FORCE_CREATE", True))  # program başında dosyayı oluştur
+COORD_PERF_FLUSH = bool(globals().get("COORD_PERF_FLUSH", True))  # her satırda flush
+try:
+    import threading as _thr
+    _COORD_PERF_LOCK = _thr.Lock()
+except Exception:
+    _COORD_PERF_LOCK = None
+
+
+def _coord_perf_path():
+    import os as _os
+    try:
+        ld = globals().get("LOG_DIR")
+        if isinstance(ld, str) and ld.strip():
+            _os.makedirs(ld, exist_ok=True)
+            return _os.path.join(ld, COORD_PERF_LOG_NAME)
+    except Exception:
+        pass
+    base = _os.path.join(_os.getenv("APPDATA") or _os.path.expanduser("~"), "Merdiven", "logs")
+    try:
+        _os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return _os.path.join(base, COORD_PERF_LOG_NAME)
+
+
+def _coord_perf_write(line):
+    if not COORD_PERF_LOG_ENABLE: return
+    try:
+        p = _coord_perf_path()
+        if _COORD_PERF_LOCK:
+            with _COORD_PERF_LOCK:
+                f = open(p, "a", encoding="utf-8"); f.write(line + "\n")
+                if COORD_PERF_FLUSH: f.flush()
+                f.close()
+        else:
+            f = open(p, "a", encoding="utf-8"); f.write(line + "\n")
+            if COORD_PERF_FLUSH: f.flush()
+            f.close()
+    except Exception:
+        pass
+
+
+# Dosyayı başta oluştur (boş da olsa görünsün)
+try:
+    if COORD_PERF_FORCE_CREATE:
+        import time as _t
+        _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\tSTART\tpid={os.getpid()}")
+        try:
+            log(f"[COORD-PERF] file={_coord_perf_path()}", "info")
+        except Exception:
+            pass
+except Exception:
+    pass
+# read_coordinates() wrapper (tek sefer sar)
+try:
+    if not globals().get("_COORD_PERF_WRAPPED", False) and callable(globals().get("read_coordinates", None)):
+        _COORD_PERF_WRAPPED = True
+        _orig_rc = globals()["read_coordinates"]
+        import time as _t
+
+        def read_coordinates(window=None):
+            t0 = _t.time();
+            x = y = None;
+            ok = 0
+            try:
+                x, y = _orig_rc(window);
+                ok = 1;
+                return x, y
+            finally:
+                dt = (_t.time() - t0) * 1000.0
+                st = str(globals().get("_current_stage", "") or "").upper()
+                _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\t{st}\t{dt:.1f}ms\tok={ok}\tX={x}\tY={y}")
+except Exception:
+    pass
+# === [YAMA COORD PERF LOG V2] end ===
 
 
 def get_region_bounds(region):
@@ -4406,6 +4597,13 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     start = time.time()
     stable = 0
     key_map = {'w': SC_W, 's': SC_S}
+    delay = MICRO_READ_DELAY
+    try:
+        if str(globals().get("_current_stage", "") or "").upper() == "PREC_MOVE_X_768":
+            delay = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", delay))
+    except Exception:
+        delay = MICRO_READ_DELAY
+    if delay < 0.005: delay = 0.005
 
     def _deadline_reached():
         now = time.time()
@@ -4422,14 +4620,14 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
             return False
         cur = read_current()
         if cur is None:
-            time.sleep(MICRO_READ_DELAY)
+            time.sleep(delay)
             continue
         if cur == target:
             stable += 1
             if stable >= settle_hits:
                 print(f"[PREC] {axis.upper()} hedef {target} yakalandı.")
                 return True
-            time.sleep(MICRO_READ_DELAY)
+            time.sleep(delay)
             continue
         stable = 0
         key_char = _select_micro_key(direction, cur, target)
@@ -4439,7 +4637,7 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
                 press_key(key_code)
                 time.sleep(max(0.002, dp))
                 release_key(key_code)
-            time.sleep(MICRO_READ_DELAY)
+            time.sleep(delay)
             after = read_current()
             if after is not None and after != cur:
                 break
@@ -4543,6 +4741,13 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
         r_delay = float(globals().get("Y598_FIX_READ_DELAY", MICRO_READ_DELAY))
     except Exception:
         r_delay = MICRO_READ_DELAY
+    try:
+        if str(globals().get("_current_stage", "") or "").upper() == "PREC_MOVE_X_768":
+            steps = int(globals().get("NPC_X768_OVERSHOOT_MAX_ADIM", steps))
+            st_hits = int(globals().get("NPC_STABIL_HIT", st_hits))
+            r_delay = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", r_delay))
+    except Exception:
+        pass
     ok, _val = _overshoot_micro_realign('x', 768, read_axis_fn, band, max_steps=steps, pulse_min=p_min,
                                         pulse_max=p_max, stable_hits=st_hits, read_delay=r_delay)
     if ok:
@@ -4676,12 +4881,13 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     except Exception:
         overshoot_read_delay = MICRO_READ_DELAY
     overshoot_guard = (axis == 'x' and int(target) == 768)
+    micro_delay = MICRO_READ_DELAY
     if overshoot_guard:
         timeout = 60.0
         try:
-            settle_hits = max(int(settle_hits), 3)
+            settle_hits = int(globals().get("NPC_STABIL_HIT", settle_hits))
         except Exception:
-            settle_hits = 3
+            settle_hits = settle_hits
         try:
             overshoot_steps = int(globals().get("X768_OVERSHOOT_MAX_STEPS", 50))
         except Exception:
@@ -4690,6 +4896,15 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             overshoot_hits_req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
         except Exception:
             overshoot_hits_req = 3
+        try:
+            micro_delay = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", MICRO_READ_DELAY))
+        except Exception:
+            micro_delay = MICRO_READ_DELAY
+        if micro_delay < 0.005: micro_delay = 0.005
+        try:
+            overshoot_steps = int(globals().get("NPC_X768_OVERSHOOT_MAX_ADIM", overshoot_steps))
+        except Exception:
+            overshoot_steps = overshoot_steps
     try:
         x768_plausible_min = int(globals().get("X768_PLAUSIBLE_MIN", 740))
     except Exception:
@@ -4768,7 +4983,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if overshoot_failed:
                 return _finish_prec_move(False)
             if cur is None:
-                time.sleep(MICRO_READ_DELAY);
+                time.sleep(micro_delay);
                 continue
             try:
                 cur_int = int(cur)
@@ -4801,7 +5016,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                         return _finish_prec_move(False)
                     x768_last_accept_ts = time.time()
                     press_key(SC_W)
-                time.sleep(MICRO_READ_DELAY)
+                time.sleep(micro_delay)
                 continue
             overshoot_detected = False
             if cur_int is not None:
@@ -4820,8 +5035,28 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                             print(f"[PREC][X768][GLITCH] read={cur_int} ignored (range) last_good={x768_last_good} stable={x768_stable_hits}")
                         except Exception:
                             pass
-                        time.sleep(MICRO_READ_DELAY)
+                        time.sleep(micro_delay)
                         continue
+                    if x768_last_good is not None:
+                        try:
+                            near_limit = int(globals().get("NPC_FREN_MESAFE", 5))
+                        except Exception:
+                            near_limit = 5
+                        try:
+                            max_jump_near = int(globals().get("X768_YAKIN_MAX_SICRAMA", 5))
+                        except Exception:
+                            max_jump_near = 5
+                        try:
+                            if abs(int(target) - int(x768_last_good)) <= max(1, near_limit) and abs(
+                                    cur_int - int(x768_last_good)) > max_jump_near:
+                                try:
+                                    print(f"[PREC][X768][GLITCH] read={cur_int} ignored (near_jump) last_good={x768_last_good} stable={x768_stable_hits}")
+                                except Exception:
+                                    pass
+                                time.sleep(micro_delay)
+                                continue
+                        except Exception:
+                            pass
                     if x768_last_raw is not None and abs(cur_int - int(x768_last_raw)) > 25:
                         try:
                             print(f"[PREC][X768][GLITCH] read={cur_int} ignored (jump) last_good={x768_last_good} stable={x768_stable_hits}")
@@ -4829,7 +5064,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                             pass
                         x768_last_raw = cur_int
                         x768_stable_hits = 0
-                        time.sleep(MICRO_READ_DELAY)
+                        time.sleep(micro_delay)
                         continue
                     x768_last_accept_ts = time.time()
                     if cur_int == target:
@@ -4861,7 +5096,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                                 print(f"[PREC][X768][GLITCH] read={cur_int} ignored (unstable) last_good={x768_last_good} stable={x768_stable_hits}")
                             except Exception:
                                 pass
-                            time.sleep(MICRO_READ_DELAY)
+                            time.sleep(micro_delay)
                             continue
                     x768_last_raw = cur_int
                     x768_last_good = cur_int
@@ -6590,13 +6825,29 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
                 taken = withdraw_plusN_from_bank_pages(w, 7, max_take=27);
                 print(f"[BANK_PLUS8] Döngü +7: {taken}/27")
             if taken <= 0:
-                print("[BANK_PLUS8] Bankada +7 kalmadı → scroll dönüşümü ve çıkış.")
-                mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
-                low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
-                print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
-                send_plus8_summary_once("PLUS7 kaynak bitti")
-                _set_mode_normal("Bankada +7 kalmadı")
-                return
+                retry = 0
+                while retry < 2 and taken <= 0:
+                    time.sleep(0.2)
+                    print(f"[BANK_PLUS8] +7 alınamadı → tekrar dene ({retry + 1}/2).")
+                    taken = withdraw_plusN_from_bank_pages(w, 7, max_take=27)
+                    print(f"[BANK_PLUS8] Retry +7: {taken}/27")
+                    retry += 1
+                if taken <= 0:
+                    print("[BANK_PLUS8] Bankada +7 kalmadı → scroll dönüşümü ve çıkış.")
+                    mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
+                    low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
+                    print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
+                    send_plus8_summary_once("PLUS7 kaynak bitti")
+                    _set_mode_normal("BANK_PLUS8_DONE_NO_ITEMS")
+                    ensure_ui_closed();
+                    exit_game_fast(w);
+                    w = relaunch_and_login_to_ingame()
+                    if not w:
+                        print("[BANK_PLUS8] Yeniden giriş başarısız (empty +7).");
+                        send_plus8_summary_once("Relaunch empty +7 başarısız");
+                        _set_mode_normal("Relaunch empty +7 başarısız");
+                        return True
+                    return True
             ensure_ui_closed();
             exit_game_fast(w);
             w = relaunch_and_login_to_ingame()
@@ -7492,7 +7743,36 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     time.sleep(TURN_LEFT_SEC);
     release_key(SC_A)
     press_key(SC_W);
-    time.sleep(NPC_GIDIS_SURESI);
+    t0 = time.time()
+    try:
+        brake = int(globals().get("NPC_FREN_MESAFE", 5))
+    except Exception:
+        brake = 5
+    try:
+        rd = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", 0.02))
+    except Exception:
+        rd = 0.02
+    if rd < 0.005: rd = 0.005
+    while (time.time() - t0) < float(NPC_GIDIS_SURESI):
+        wait_if_paused();
+        watchdog_enforce()
+        if _kb_pressed('f12'):
+            release_key(SC_W)
+            return (False, w)
+        try:
+            cx, _cy = read_coordinates(w)
+        except Exception:
+            cx = None
+        if cx is None:
+            time.sleep(rd)
+            continue
+        try:
+            cxi = int(cx)
+        except Exception:
+            cxi = None
+        if cxi is not None and cxi <= (TARGET_NPC_X + brake):
+            break
+        time.sleep(rd)
     release_key(SC_W)
     try:
         _ = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
@@ -8397,6 +8677,10 @@ _TR = {
     'NPC_CONFIRM_TEMPLATE_PATH': 'NPC onay şablonu',
     'NPC_SEEK_TIMEOUT': 'NPC arama zaman aşımı (sn)',
     'NPC_GIDIS_SURESI': 'NPC’ye yürüme süresi (sn)',
+    'NPC_FREN_MESAFE': 'NPC fren mesafe (px)',
+    'NPC_HIZLI_OKUMA_GECIKME': 'NPC hizli okuma gecikme (sn)',
+    'NPC_STABIL_HIT': 'NPC hedef stabil hit sayisi',
+    'NPC_X768_OVERSHOOT_MAX_ADIM': 'NPC X768 overshoot max adim',
     'NPC_POSTBUY_FIRST_A_DURATION': 'alış sonrası 1. A basma (sn)',
     'NPC_POSTBUY_SECOND_A_DURATION': 'alış sonrası 2. A basma (sn)',
     'NPC_POSTBUY_A_WHILE_W_DURATION': 'alış sonrası A + W (sn)',
@@ -8419,6 +8703,7 @@ _TR = {
     'X_BAND_CONSEC': 'X bant arka arkaya isabet',
     'X_TOL_TIMEOUT': 'X tolerans zaman aşımı (sn)',
     'X_TOL_READ_DELAY': 'X okuma gecikmesi (sn)',
+    'X768_YAKIN_MAX_SICRAMA': 'X768 yakin max sicrama',
     'Y_SEEK_TIMEOUT': 'Y arama zaman aşımı (sn)',
     'TARGET_STABLE_HITS': 'hedef sabit okuma sayısı',
     'TARGET_Y_AFTER_TURN': 'dönüş sonrası hedef Y',
@@ -8571,6 +8856,10 @@ _ADV_CATEGORY_RULES = (
             'LINEN_STEPS',
             'NPC_GIDIS_SURESI',
             'NPC_SEEK_TIMEOUT',
+            'NPC_FREN_MESAFE',
+            'NPC_HIZLI_OKUMA_GECIKME',
+            'NPC_STABIL_HIT',
+            'NPC_X768_OVERSHOOT_MAX_ADIM',
             'NPC_POSTBUY_FIRST_A_DURATION',
             'NPC_POSTBUY_SECOND_A_DURATION',
             'NPC_POSTBUY_A_WHILE_W_DURATION',
@@ -8628,6 +8917,7 @@ _ADV_CATEGORY_RULES = (
             'X_BAND_CONSEC',
             'X_TOL_TIMEOUT',
             'X_TOL_READ_DELAY',
+            'X768_YAKIN_MAX_SICRAMA',
             'Y_SEEK_TIMEOUT',
         ),
         prefixes=(
@@ -8686,6 +8976,15 @@ _ADV_CATEGORY_RULES = (
         names=(
             'ROI_STALE_MS',
             'UPG_ROI_STALE_MS',
+            'COORD_READ_DEBUG',
+            'COORD_USE_MSS',
+            'COORD_RESIZE_SCALE',
+            'COORD_CONTRAST',
+            'COORD_THRESHOLD',
+            'COORD_FAST_RESIZE_SCALE',
+            'COORD_FAST_CONTRAST',
+            'COORD_FAST_THRESHOLD',
+            'COORD_PERF_LOG_ENABLE',
             'EMPTY_SLOT_TEMPLATE_PATH',
             'EMPTY_SLOT_MATCH_THRESHOLD',
             'FALLBACK_MEAN_THRESHOLD',
@@ -11775,143 +12074,3 @@ if __name__ == "__main__":
     except Exception:
         pass
     _MERDIVEN_GUI_ENTRY(auto_open=True)
-
-# === [YAMA COORD MSS] start ===
-# NE İŞE YARAR: Koordinat ROI grab işlemini ImageGrab yerine MSS ile hızlandırır (CPU OCR aynı, grab hızlanır).
-COORD_USE_MSS=bool(globals().get("COORD_USE_MSS",True))
-COORD_READ_DEBUG=bool(globals().get("COORD_READ_DEBUG",True))
-COORD_RESIZE_SCALE=float(globals().get("COORD_RESIZE_SCALE",1.2))  # 1.3->1.2 mini PC için daha hızlı
-COORD_CONTRAST=float(globals().get("COORD_CONTRAST",2.6))  # 3.0->2.6 genelde yeter
-def _read_coordinates_mss(window):
-    """NE İŞE YARAR: read_coordinates() yerine geçer; MSS varsa ROI'yi hızlı yakalar."""
-    attempts=0;extra_retry=False
-    while (attempts<1) or extra_retry:
-        attempts+=1;extra_retry=False
-        w,rect=ensure_knight_online_window("read_coordinates",existing_window=window,focus=False,want_rect=True,attempts=5,retry_delay=0.6)
-        if (not w) or (rect is None): return None,None
-        t0=time.time()
-        try:
-            left,top,_r,_b=rect
-            x1,y1,x2,y2=(left+104,top+102,left+160,top+120)  # senin mevcut bbox
-            img=None
-            if COORD_USE_MSS:
-                try:
-                    _m=globals().get("mss",None)
-                    if _m is None:
-                        import mss as _m
-                    import numpy as _np
-                    with _m.mss() as sct:
-                        mon={"left":int(x1),"top":int(y1),"width":int(x2-x1),"height":int(y2-y1)}
-                        arr=_np.array(sct.grab(mon))[:,:,:3]  # BGR
-                    from PIL import Image
-                    img=Image.fromarray(arr[:,:,::-1])  # RGB
-                except Exception:
-                    img=None
-            if img is None:
-                from PIL import ImageGrab
-                img=ImageGrab.grab(bbox=(x1,y1,x2,y2))
-            from PIL import ImageEnhance
-            gray=img.convert("L")
-            sc=max(1.0,float(COORD_RESIZE_SCALE))
-            if sc!=1.0: gray=gray.resize((int(gray.width*sc),int(gray.height*sc)))
-            gray=ImageEnhance.Contrast(gray).enhance(float(COORD_CONTRAST))
-            cfg=r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1'
-            text=pytesseract.image_to_string(gray,config=cfg).strip()
-            parts=re.split(r'[,.\s]+',text);nums=[p for p in parts if p.isdigit()]
-            if COORD_READ_DEBUG:
-                dt=(time.time()-t0)*1000.0
-                try: log(f"[COORD] read {dt:.1f}ms txt='{text}' nums={nums} mss={COORD_USE_MSS}","info")
-                except Exception: pass
-            if len(nums)>=2:
-                x_val,y_val=int(nums[0]),int(nums[1])
-                try: _update_progress_with_coord((x_val,y_val))
-                except Exception: pass
-                return x_val,y_val
-        except Exception as exc:
-            try:
-                if _is_win_error_1400(exc):
-                    _handle_win1400_recovery("read_coordinates","reset_hwnd refind_window retry=1/2",attempts,2)
-                    if attempts<2: extra_retry=True; continue
-                else:
-                    raise
-            except Exception:
-                raise
-    return None,None
-try:
-    globals()["read_coordinates"]=_read_coordinates_mss  # mevcut read_coordinates'i override eder
-except Exception:
-    pass
-# === [YAMA COORD MSS] end ===
-
-
-
-
-
-
-
-# === [YAMA COORD PERF LOG V2] start ===
-# NE İŞE YARAR: Koordinat okuma süresini (ms) %APPDATA%\Merdiven\logs\coord_perf.log dosyasına yazar.
-COORD_PERF_LOG_ENABLE=bool(globals().get("COORD_PERF_LOG_ENABLE",True))
-COORD_PERF_LOG_NAME=str(globals().get("COORD_PERF_LOG_NAME","coord_perf.log"))  # dosya adı
-COORD_PERF_FORCE_CREATE=bool(globals().get("COORD_PERF_FORCE_CREATE",True))     # program başında dosyayı oluştur
-COORD_PERF_FLUSH=bool(globals().get("COORD_PERF_FLUSH",True))                  # her satırda flush
-try:
-    import threading as _thr
-    _COORD_PERF_LOCK=_thr.Lock()
-except Exception:
-    _COORD_PERF_LOCK=None
-def _coord_perf_path():
-    import os as _os
-    try:
-        ld=globals().get("LOG_DIR")
-        if isinstance(ld,str) and ld.strip():
-            _os.makedirs(ld,exist_ok=True)
-            return _os.path.join(ld,COORD_PERF_LOG_NAME)
-    except Exception:
-        pass
-    base=_os.path.join(_os.getenv("APPDATA") or _os.path.expanduser("~"),"Merdiven","logs")
-    try: _os.makedirs(base,exist_ok=True)
-    except Exception: pass
-    return _os.path.join(base,COORD_PERF_LOG_NAME)
-def _coord_perf_write(line):
-    if not COORD_PERF_LOG_ENABLE: return
-    try:
-        p=_coord_perf_path()
-        if _COORD_PERF_LOCK:
-            with _COORD_PERF_LOCK:
-                f=open(p,"a",encoding="utf-8");f.write(line+"\n")
-                if COORD_PERF_FLUSH: f.flush()
-                f.close()
-        else:
-            f=open(p,"a",encoding="utf-8");f.write(line+"\n")
-            if COORD_PERF_FLUSH: f.flush()
-            f.close()
-    except Exception:
-        pass
-# Dosyayı başta oluştur (boş da olsa görünsün)
-try:
-    if COORD_PERF_FORCE_CREATE:
-        import time as _t
-        _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\tSTART\tpid={os.getpid()}")
-        try:
-            log(f"[COORD-PERF] file={_coord_perf_path()}", "info")
-        except Exception:
-            pass
-except Exception:
-    pass
-# read_coordinates() wrapper (tek sefer sar)
-try:
-    if not globals().get("_COORD_PERF_WRAPPED",False) and callable(globals().get("read_coordinates",None)):
-        _COORD_PERF_WRAPPED=True
-        _orig_rc=globals()["read_coordinates"]
-        import time as _t
-        def read_coordinates(window=None):
-            t0=_t.time();x=y=None;ok=0
-            try:
-                x,y=_orig_rc(window);ok=1;return x,y
-            finally:
-                dt=(_t.time()-t0)*1000.0
-                _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\t{dt:.1f}ms\tok={ok}\tX={x}\tY={y}")
-except Exception:
-    pass
-# === [YAMA COORD PERF LOG V2] end ===
