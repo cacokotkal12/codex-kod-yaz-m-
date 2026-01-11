@@ -1,7 +1,4 @@
 from __future__ import annotations
-
-import pygetwindow
-
 # DENEME: 11.11.2025 – küçük test
 TOWN_HARD_LOCK = False
 
@@ -234,109 +231,6 @@ def PERSIST_DIR(name):
     return path
 
 
-# === [PATCH_PLUS8_RESUME_JSON] ===
-RUNTIME_STATE_FILE="runtime_state.json" # +8 resume kayıt dosyası
-RUNTIME_STATE_MAX_AGE_SEC=600 # 30dk'dan eski kayıt yok sayılır
-_RT_MIN_WRITE_INTERVAL=0.50 # Disk yazma aralığı
-_RT_LOCK=threading.Lock()
-_RT_LAST_WRITE=0.0
-
-def _rt_path(): return PERSIST_PATH(RUNTIME_STATE_FILE)
-
-def _rt_read():
-    try:
-        p=_rt_path()
-        if not os.path.exists(p): return None
-        with open(p,"r",encoding="utf-8") as f: return json.load(f)
-    except Exception: return None
-
-def _rt_write(d:dict):
-    try:
-        p=_rt_path(); tmp=p+".tmp"
-        os.makedirs(os.path.dirname(p),exist_ok=True)
-        with open(tmp,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
-        os.replace(tmp,p)
-    except Exception:
-        try:
-            if os.path.exists(tmp): os.remove(tmp)
-        except Exception: pass
-
-def _rt_checkpoint(*,stage:str=None,phase:str=None,plus8:dict=None,crash:bool=False,err:str=None,force:bool=False):
-    global _RT_LAST_WRITE
-    try:
-        now=time.time()
-        if (not force) and (now-_RT_LAST_WRITE)<_RT_MIN_WRITE_INTERVAL: return
-        if not (MODE=="BANK_PLUS8" or PLUS8_RESUME or crash): return
-        with _RT_LOCK:
-            d=_rt_read() or {}
-            d["ts"]=now
-            d["pc"]=os.environ.get("COMPUTERNAME") or ""
-            d["account"]=str(globals().get("ACTIVE_ACCOUNT_LABEL") or globals().get("ACTIVE_ACCOUNT") or globals().get("HESAP") or "")
-            d["mode"]=str(MODE or "")
-            d["plus8_resume"]=bool(PLUS8_RESUME or MODE=="BANK_PLUS8")
-            d["active"]=bool(d["plus8_resume"])
-            if stage is None:
-                try: stage=str(globals().get("_current_stage","") or "")
-                except Exception: stage=""
-            d["stage"]=stage or d.get("stage","")
-            if phase is not None: d["phase"]=phase
-            if crash: d["crash"]=True
-            if err: d["err"]=str(err)[:500]
-            if plus8 is not None:
-                p=d.get("plus8") or {}
-                p.update(plus8); d["plus8"]=p
-            _rt_write(d); _RT_LAST_WRITE=now; globals()['_PLUS8_RT']=d
-    except Exception: pass
-
-def _rt_clear(reason:str=""):
-    try:
-        with _RT_LOCK:
-            p=_rt_path()
-            if os.path.exists(p): os.remove(p)
-        globals()['_PLUS8_RT']=None
-        if reason: print(f"[RESUME] Temizlendi: {reason}")
-    except Exception: pass
-
-def _rt_boot_apply():
-    global MODE,PLUS8_RESUME
-    try:
-        d=_rt_read()
-        if not d or not d.get('active'): return
-        if (time.time()-float(d.get('ts',0) or 0))>float(RUNTIME_STATE_MAX_AGE_SEC): return
-        if d.get('plus8_resume'):
-            MODE="BANK_PLUS8"; PLUS8_RESUME=True; globals()["_PLUS8_RT"]=d
-            p8=d.get('plus8') or {}
-            print(f"[RESUME] +8 resume bulundu → MODE=BANK_PLUS8 (done={p8.get('attempts_done',0)} start={p8.get('start_index',0)})")
-    except Exception: pass
-
-def _rt_should_resume_plus8_upgrade():
-    try:
-        d=globals().get('_PLUS8_RT') or _rt_read() or {}
-        if not d.get('active') or not d.get('plus8_resume'): return False
-        ph=str(d.get('phase','') or '').upper()
-        p8=d.get('plus8') or {}
-        lim=int(p8.get('attempts_limit',0) or 0); done=int(p8.get('attempts_done',0) or 0)
-        return (ph=="UPGRADING") and (lim>0) and (done<lim)
-    except Exception: return False
-
-def _rt_get_plus8_resume():
-    try:
-        d=globals().get('_PLUS8_RT') or _rt_read() or {}
-        if not d.get('plus8_resume'): return None
-        if str(d.get("phase","") or "").upper()!="UPGRADING": return None
-        return d.get('plus8') or None
-    except Exception: return None
-
-def _rt_p8_update(done:int,lim:int,start:int,used:set,wrap:int=None,*,force:bool=False):
-    try:
-        if not (MODE=="BANK_PLUS8" or PLUS8_RESUME): return
-        used_list=[(int(c),int(r)) for (c,r) in (used or set())]
-        p={'attempts_done':int(done or 0),'attempts_limit':int(lim or 0),'start_index':int(start or 0),'used':used_list}
-        if wrap is not None: p['wrap_cursor']=int(wrap)
-        _rt_checkpoint(phase='UPGRADING',plus8=p,force=force)
-    except Exception: pass
-# === [/PATCH_PLUS8_RESUME_JSON] ===
-
 def _MERDIVEN_CFG_PATH():
     """Ayar dosyası için tekil ve yazılabilir yol döndür."""
     import os
@@ -478,6 +372,11 @@ def _load_accounts_on_start() -> Dict[str, Any]:
 _load_accounts_on_start()
 _sync_sale_refresh_from_cfg()
 
+
+try:
+    import mss
+except Exception:
+    mss = None
 
 try:
     import requests
@@ -785,6 +684,14 @@ _init_statistics()
 
 
 def _grab_full_bgr():
+    try:
+        if mss is not None:
+            with mss.mss() as sct:
+                mon = sct.monitors[1];
+                im = np.array(sct.grab(mon))[:, :, :3];
+                return im
+    except Exception:
+        pass
     im = ImageGrab.grab();
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
 
@@ -807,9 +714,6 @@ def dump_crash(e: Exception, stage: str = "UNKNOWN"):
         time.sleep(0.12)
         cv2.imwrite(os.path.join(CRASH_DIR, f"crash_{ts}_b.png"), _grab_full_bgr())
         log(f"[CRASH] dump: {ts}", "error")
-        # [PATCH_RT_IN_DUMP_CRASH]
-        try: _rt_checkpoint(stage=stage, crash=True, err=repr(e), force=True)
-        except Exception: pass
     except Exception:
         pass
 
@@ -868,14 +772,6 @@ def _bye(): log("[EXIT] program sonlandı")
 
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
-COORD_READ_DEBUG = True
-COORD_RESIZE_SCALE = 1.2
-COORD_CONTRAST = 2.6
-COORD_THRESHOLD = 160
-COORD_FAST_RESIZE_SCALE = 1.0
-COORD_FAST_CONTRAST = 2.2
-COORD_FAST_THRESHOLD = 160
-COORD_PERF_LOG_ENABLE = True
 tus_hizi = 0.050;
 mouse_hizi = 0.1;
 jitter_px = 0
@@ -897,7 +793,7 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 1
 X_OKUMA_ADET = 2
-X_OKUMA_GECIKME = 0.05
+X_OKUMA_GECIKME = 0.03
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -1008,15 +904,12 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8009866329:AAFyeuZvrwe5klEii66bW10X-_2Uh4BElvk")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1520623463")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 PLUS8_CYCLE_BANK_START = 0
 PLUS8_CYCLE_SUMMARY_SENT = False
-# [PATCH_PLUS8_PREFLIGHT_CFG]
-PLUS8_PREFLIGHT_DEPOSIT=True # +8 modunda üstte +8 varsa önce bankaya at
-PLUS8_CLEANUP_CHECK_IN_WORKFLOW=True # Workflow başında +8 varsa bankaya at (kurtarma)
 ITEM_SALE_BANK_NOTIFY = True
 ITEM_SALE_BANK_EMPTY_MESSAGE = "Bankada item kalmadı"
 ITEM_SALE_BANK_WITHDRAW_COUNT = 28
@@ -1037,7 +930,7 @@ TUR_BASLANGIC_ITEM_SAYISI = 0
 
 # ---- Telegram boş banka uyarı ayarları ----
 TELEGRAM_EMPTY_BANK_BURST_COUNT = 1
-TELEGRAM_EMPTY_BANK_INTERVAL_MIN = 3
+TELEGRAM_EMPTY_BANK_INTERVAL_MIN = 10.0
 
 _GUI_UPDATE_SALE_SLOT = None
 _GUI_UPDATE_STATS = None
@@ -1077,26 +970,16 @@ X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kab
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
 X_TOL_READ_DELAY = 0.05  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
-X768_OVERSHOOT_CONFIRM_HITS = 2
+X768_OVERSHOOT_CONFIRM_HITS = 3
 X768_OVERSHOOT_MAX_STEPS = 50
-X768_OCR_SAMPLES = 2
+X768_OCR_SAMPLES = 3
 X768_PLAUSIBLE_MIN = 740
 X768_PLAUSIBLE_MAX = 780
 X768_MICRO_BAND = (767, 766, 765, 764, 763)
-X768_STABLE_EPS = 2
-X768_STABLE_HITS_REQ = 2
-X768_ACCEPT_TIMEOUT = 2.5
-X768_FIX_TOL = 1
-X768_FIX_STABLE_HITS = 1
-X768_YAKIN_MAX_SICRAMA = 5
-NPC_FREN_MESAFE = 5
-NPC_HIZLI_OKUMA_GECIKME = 0.05
-NPC_STABIL_HIT = 2
-NPC_X768_OVERSHOOT_MAX_ADIM = 50
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
-PRESS_MIN = 0.25  # S/W mikro basış minimum (sn)
-PRESS_MAX = 0.25  # S/W mikro basış maksimum (sn)
+PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
+PRESS_MAX = 0.1  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 50  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
@@ -1123,7 +1006,7 @@ MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (s
 # ---- Y=598 Overshoot ----
 Y598_OVERSHOOT_ENABLE = True
 Y598_OVERSHOOT_DELTA = 1
-Y598_OVERSHOOT_CONFIRM_HITS = 3
+Y598_OVERSHOOT_CONFIRM_HITS = 2
 Y598_FIX_MAX_STEPS = 50
 Y598_FIX_PULSE_MIN = 0.035
 Y598_FIX_PULSE_MAX = 0.090
@@ -1164,7 +1047,7 @@ PLUS8_MARGIN = 0.05;
 # ---- Scroll Takası Şablon & Ayarlcacokotkal12 ar ----
 SCROLL_LOW_TEMPLATE_PATHS = ["scroll_low.png", "scroll_low2.png"]
 SCROLL_MID_TEMPLATE_PATHS = ["scroll_mid.png", "scroll_mid2.png"]
-SCROLL_MATCH_THRESHOLD = 0.55;
+SCROLL_MATCH_THRESHOLD = 0.70;
 SCROLL_SCALES = (0.80, 0.90, 1.00, 1.10, 1.20);
 SCROLL_SWAP_MAX_STACKS = 8
 # ---- Scroll arama (sabit nokta yerine tüm UPG/INV içinde) ----
@@ -1332,9 +1215,6 @@ def _set_mode_normal(reason: str = None, *, reset_plus8_state: bool = True):
     MODE = "NORMAL"
     if reset_plus8_state:
         PLUS8_RESUME = False
-        # [PATCH_RT_IN_SET_MODE_NORMAL]
-        try: _rt_clear("mode_normal")
-        except Exception: pass
     if reason:
         print(f"[MODE] NORMAL ({reason})")
 
@@ -1345,9 +1225,6 @@ def _set_mode_bank_plus8(reason: str = None):
     _stop_plus8_wait_notifier()
     MODE = "BANK_PLUS8"
     PLUS8_RESUME = True
-    # [PATCH_RT_IN_SET_MODE_BANK_PLUS8]
-    try: _rt_checkpoint(stage="MODE_BANK_PLUS8", phase="BANKING", force=True)
-    except Exception: pass
     if reason:
         print(f"[MODE] BANK_PLUS8 ({reason})")
 
@@ -1758,9 +1635,6 @@ _LAST_WATCHDOG_KICK_TS = 0.0
 def set_stage(name: str):
     global _current_stage, _stage_enter_ts
     _current_stage = name;
-    # [PATCH_RT_IN_SET_STAGE]
-    try: _rt_checkpoint(stage=name)
-    except Exception: pass
     _stage_enter_ts = time.time();
     _mark_progress(f"stage:{name}")
     print(f"[STAGE] {_current_stage}");
@@ -2711,13 +2585,6 @@ def _is_win_error_1400(exc: Exception) -> bool:
                 return True
         except Exception:
             pass
-    # [PATCH_PLUS8_WIN1400]
-    try:
-        pge=getattr(pygetwindow,"PyGetWindowException",None)
-        if pge is not None and isinstance(exc,pge) and "1400" in str(exc):
-            return True
-    except Exception:
-        pass
     return False
 
 
@@ -3180,43 +3047,20 @@ def read_coordinates(window):
         if not w or rect is None:
             return None, None
         try:
-            t0 = time.time()
             left, top, _r, _b = rect
             bbox = (left + 104, top + 102, left + 160, top + 120)
             img = ImageGrab.grab(bbox);
-            stage_now = str(globals().get("_current_stage", "") or "").upper()
-            fast_mode = (stage_now == "PREC_MOVE_X_768")
-            gray = img.convert('L')
-            sc = float(globals().get("COORD_FAST_RESIZE_SCALE" if fast_mode else "COORD_RESIZE_SCALE", 1.3))
-            if sc != 1.0:
-                gray = gray.resize((int(gray.width * sc), int(gray.height * sc)))
-            cval = float(globals().get("COORD_FAST_CONTRAST" if fast_mode else "COORD_CONTRAST", 3.0))
-            if cval != 1.0:
-                gray = ImageEnhance.Contrast(gray).enhance(cval);
-            thr = int(globals().get("COORD_FAST_THRESHOLD" if fast_mode else "COORD_THRESHOLD", 0))
-            if thr > 0:
-                gray = gray.point(lambda p: 255 if p > thr else 0)
+            gray = img.convert('L').resize((int(img.width * 1.3), int(img.height * 1.3)))
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+            TOWN_LOCKED = False
+            _town_log_once("[TOWN] Kilit sıfırlandı (tüm pencereler kapandı).")
+            gray = ImageEnhance.Contrast(gray).enhance(3.0);
             cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1';
             text = pytesseract.image_to_string(gray, config=cfg).strip()
             parts = re.split(r'[,.\s]+', text);
             nums = [p for p in parts if p.isdigit()]
-            if COORD_READ_DEBUG:
-                dt = (time.time() - t0) * 1000.0
-                try:
-                    log(f"[COORD] dt={dt:.1f}ms txt='{text}' nums={nums}", "info")
-                except Exception:
-                    pass
             if len(nums) >= 2:
-                try:
-                    _py = None
-                    _lp = globals().get("_LAST_PROGRESS_COORD", None)
-                    if isinstance(_lp, (list, tuple)) and len(_lp) >= 2:
-                        _py = _lp[1]
-                    if _py is not None and int(_py) >= 100 and len(str(nums[1])) < len(str(int(_py))):
-                        extra_retry = True
-                        continue
-                except Exception:
-                    pass
                 x_val, y_val = int(nums[0]), int(nums[1])
                 _update_progress_with_coord((x_val, y_val))
                 return x_val, y_val
@@ -3229,88 +3073,6 @@ def read_coordinates(window):
             else:
                 raise
     return None, None
-
-
-# === [YAMA COORD PERF LOG V2] start ===
-# NE İŞE YARAR: Koordinat okuma süresini (ms) %APPDATA%\Merdiven\logs\coord_perf.log dosyasına yazar.
-COORD_PERF_LOG_ENABLE = bool(globals().get("COORD_PERF_LOG_ENABLE", True))
-COORD_PERF_LOG_NAME = str(globals().get("COORD_PERF_LOG_NAME", "coord_perf.log"))  # dosya adı
-COORD_PERF_FORCE_CREATE = bool(globals().get("COORD_PERF_FORCE_CREATE", True))  # program başında dosyayı oluştur
-COORD_PERF_FLUSH = bool(globals().get("COORD_PERF_FLUSH", True))  # her satırda flush
-try:
-    import threading as _thr
-    _COORD_PERF_LOCK = _thr.Lock()
-except Exception:
-    _COORD_PERF_LOCK = None
-
-
-def _coord_perf_path():
-    import os as _os
-    try:
-        ld = globals().get("LOG_DIR")
-        if isinstance(ld, str) and ld.strip():
-            _os.makedirs(ld, exist_ok=True)
-            return _os.path.join(ld, COORD_PERF_LOG_NAME)
-    except Exception:
-        pass
-    base = _os.path.join(_os.getenv("APPDATA") or _os.path.expanduser("~"), "Merdiven", "logs")
-    try:
-        _os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return _os.path.join(base, COORD_PERF_LOG_NAME)
-
-
-def _coord_perf_write(line):
-    if not COORD_PERF_LOG_ENABLE: return
-    try:
-        p = _coord_perf_path()
-        if _COORD_PERF_LOCK:
-            with _COORD_PERF_LOCK:
-                f = open(p, "a", encoding="utf-8"); f.write(line + "\n")
-                if COORD_PERF_FLUSH: f.flush()
-                f.close()
-        else:
-            f = open(p, "a", encoding="utf-8"); f.write(line + "\n")
-            if COORD_PERF_FLUSH: f.flush()
-            f.close()
-    except Exception:
-        pass
-
-
-# Dosyayı başta oluştur (boş da olsa görünsün)
-try:
-    if COORD_PERF_FORCE_CREATE:
-        import time as _t
-        _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\tSTART\tpid={os.getpid()}")
-        try:
-            log(f"[COORD-PERF] file={_coord_perf_path()}", "info")
-        except Exception:
-            pass
-except Exception:
-    pass
-# read_coordinates() wrapper (tek sefer sar)
-try:
-    if not globals().get("_COORD_PERF_WRAPPED", False) and callable(globals().get("read_coordinates", None)):
-        _COORD_PERF_WRAPPED = True
-        _orig_rc = globals()["read_coordinates"]
-        import time as _t
-
-        def read_coordinates(window=None):
-            t0 = _t.time();
-            x = y = None;
-            ok = 0
-            try:
-                x, y = _orig_rc(window);
-                ok = 1;
-                return x, y
-            finally:
-                dt = (_t.time() - t0) * 1000.0
-                st = str(globals().get("_current_stage", "") or "").upper()
-                _coord_perf_write(f"{_t.strftime('%Y-%m-%d %H:%M:%S')}\t{st}\t{dt:.1f}ms\tok={ok}\tX={x}\tY={y}")
-except Exception:
-    pass
-# === [YAMA COORD PERF LOG V2] end ===
 
 
 def get_region_bounds(region):
@@ -3591,6 +3353,15 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 # ================== Görüntü/Template Yardımcıları ==================
 def grab_window_gray(win):
     x1, y1, x2, y2 = win.left, win.top, win.right, win.bottom
+    if mss is not None:
+        try:
+            import numpy as _np
+            with mss.mss() as sct:
+                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
+                im = _np.array(sct.grab(mon))[:, :, :3]
+                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            pass
     img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
@@ -4128,6 +3899,7 @@ def _grab_tooltip_roi_near_mouse(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_ROI_H):
 
 
 def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
+    # Hızlı +7/+8 tespiti: tek/az örnek, MSS ile hızlı grab, OCR opsiyonel
     if hover_wait is None:
         hover_wait = HOVER_WAIT_BANK if region == "BANK_PANEL" else HOVER_WAIT_INV
     x, y = slot_center(region, col, row)
@@ -4142,7 +3914,7 @@ def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
         wait_between = float(globals().get('PLUSN_WAIT_BETWEEN', 0.06))
         last_roi = None
         for i in range(samples):
-            roi = _grab_tooltip_roi_near_mouse(win)
+            roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
             last_roi = roi
             if N == 7:
                 if _match_plus7_templates_on(roi, 0.78) or _match_plus7_templates_on(roi, 0.80): return True
@@ -4186,9 +3958,6 @@ def count_inventory_plusN(win, N: int, region="INV"):
 
 def deposit_inventory_plusN_to_bank(win, N: int):
     set_stage(f"STORAGE_DEPOSIT_PLUS{N}");
-    if not bank_ui_visible():
-        print("[STORAGE] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     deposited = 0
     cols, rows = get_region_grid("BANK");
     tmpl = _load_empty_template()
@@ -4225,9 +3994,6 @@ def _cell_roi(gray, region, c, r): x1, y1, x2, y2 = cell_rect_in_img(c, r, gray.
 def deposit_low_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS):
     if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); return 0
     set_stage("SCROLL_DEPOSIT_LOW");
-    if not bank_ui_visible():
-        print("[SCROLL] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     moved = 0;
     gray = grab_gray_region("BANK");
     cols, rows = get_region_grid("BANK")
@@ -4250,9 +4016,6 @@ def deposit_low_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS
 def withdraw_mid_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACKS):
     if not SCROLL_MID_TEMPLATES: print("[SCROLL] Mid templates yok."); return 0
     set_stage("SCROLL_WITHDRAW_MID");
-    if not bank_ui_visible():
-        print("[SCROLL] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     taken = 0;
     inv_empty = count_empty_slots("BANK")
     if inv_empty <= 0: print("[SCROLL] Envanterde boş yok."); return 0
@@ -4282,9 +4045,6 @@ def withdraw_mid_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACK
 def deposit_mid_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS):
     if not SCROLL_MID_TEMPLATES: print("[SCROLL] Mid templates yok."); return 0
     set_stage("SCROLL_DEPOSIT_MID");
-    if not bank_ui_visible():
-        print("[SCROLL] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     moved = 0;
     gray = grab_gray_region("BANK");
     cols, rows = get_region_grid("BANK");
@@ -4307,9 +4067,6 @@ def deposit_mid_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS
 def withdraw_low_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACKS):
     if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); return 0
     set_stage("SCROLL_WITHDRAW_LOW");
-    if not bank_ui_visible():
-        print("[SCROLL] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     taken = 0;
     inv_empty = count_empty_slots("BANK")
     if inv_empty <= 0: print("[SCROLL] Envanterde boş yok."); return 0
@@ -4500,13 +4257,6 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
     start = time.time()
     stable = 0
     key_map = {'w': SC_W, 's': SC_S}
-    delay = MICRO_READ_DELAY
-    try:
-        if str(globals().get("_current_stage", "") or "").upper() == "PREC_MOVE_X_768":
-            delay = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", delay))
-    except Exception:
-        delay = MICRO_READ_DELAY
-    if delay < 0.005: delay = 0.005
 
     def _deadline_reached():
         now = time.time()
@@ -4523,14 +4273,14 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
             return False
         cur = read_current()
         if cur is None:
-            time.sleep(delay)
+            time.sleep(MICRO_READ_DELAY)
             continue
         if cur == target:
             stable += 1
             if stable >= settle_hits:
                 print(f"[PREC] {axis.upper()} hedef {target} yakalandı.")
                 return True
-            time.sleep(delay)
+            time.sleep(MICRO_READ_DELAY)
             continue
         stable = 0
         key_char = _select_micro_key(direction, cur, target)
@@ -4540,7 +4290,7 @@ def _micro_adjust_axis(read_current: Callable[[], Optional[int]], axis: str, tar
                 press_key(key_code)
                 time.sleep(max(0.002, dp))
                 release_key(key_code)
-            time.sleep(delay)
+            time.sleep(MICRO_READ_DELAY)
             after = read_current()
             if after is not None and after != cur:
                 break
@@ -4621,9 +4371,9 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
     """X=768 hedefinde overshoot tespit edilince S ile mikro geri toparlama + failsafe hizalama yapar."""
     release_key(SC_W)
     try:
-        band = int(globals().get("X768_FIX_TOL", 1))
+        band = abs(int(globals().get("X_TOLERANCE", X_TOLERANCE)))
     except Exception:
-        band = 1
+        band = 0
     try:
         steps = max(int(globals().get("X768_OVERSHOOT_MAX_STEPS", 50)), int(max_taps) if max_taps is not None else 0)
     except Exception:
@@ -4637,20 +4387,13 @@ def _fix_x768_overshoot(w, read_axis_fn: Callable[[], Optional[int]], max_taps: 
     except Exception:
         p_max = p_min
     try:
-        st_hits = int(globals().get("X768_FIX_STABLE_HITS", 1))
+        st_hits = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
     except Exception:
-        st_hits = 1
+        st_hits = 3
     try:
         r_delay = float(globals().get("Y598_FIX_READ_DELAY", MICRO_READ_DELAY))
     except Exception:
         r_delay = MICRO_READ_DELAY
-    try:
-        if str(globals().get("_current_stage", "") or "").upper() == "PREC_MOVE_X_768":
-            steps = int(globals().get("NPC_X768_OVERSHOOT_MAX_ADIM", steps))
-            st_hits = int(globals().get("NPC_STABIL_HIT", st_hits))
-            r_delay = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", r_delay))
-    except Exception:
-        pass
     ok, _val = _overshoot_micro_realign('x', 768, read_axis_fn, band, max_steps=steps, pulse_min=p_min,
                                         pulse_max=p_max, stable_hits=st_hits, read_delay=r_delay)
     if ok:
@@ -4784,13 +4527,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     except Exception:
         overshoot_read_delay = MICRO_READ_DELAY
     overshoot_guard = (axis == 'x' and int(target) == 768)
-    micro_delay = MICRO_READ_DELAY
     if overshoot_guard:
-        timeout = 60.0
-        try:
-            settle_hits = int(globals().get("NPC_STABIL_HIT", settle_hits))
-        except Exception:
-            settle_hits = settle_hits
         try:
             overshoot_steps = int(globals().get("X768_OVERSHOOT_MAX_STEPS", 50))
         except Exception:
@@ -4799,15 +4536,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             overshoot_hits_req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
         except Exception:
             overshoot_hits_req = 3
-        try:
-            micro_delay = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", MICRO_READ_DELAY))
-        except Exception:
-            micro_delay = MICRO_READ_DELAY
-        if micro_delay < 0.005: micro_delay = 0.005
-        try:
-            overshoot_steps = int(globals().get("NPC_X768_OVERSHOOT_MAX_ADIM", overshoot_steps))
-        except Exception:
-            overshoot_steps = overshoot_steps
     try:
         x768_plausible_min = int(globals().get("X768_PLAUSIBLE_MIN", 740))
     except Exception:
@@ -4824,24 +4552,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     overshoot_failed = False
     overshoot_hits = 0
     x768_hits = []
-    x768_last_good = None
-    x768_last_raw = None
-    x768_stable_hits = 0
-    x768_closest = None
-    x768_micro_hits = 0
-    try:
-        x768_stable_eps = int(globals().get("X768_STABLE_EPS", 2))
-    except Exception:
-        x768_stable_eps = 2
-    try:
-        x768_stable_hits_req = int(globals().get("X768_STABLE_HITS_REQ", 2))
-    except Exception:
-        x768_stable_hits_req = 2
-    try:
-        x768_accept_timeout = float(globals().get("X768_ACCEPT_TIMEOUT", 2.5))
-    except Exception:
-        x768_accept_timeout = 2.5
-    x768_last_accept_ts = time.time()
 
     def _read_axis_guarded():
         nonlocal overshoot_failed
@@ -4886,125 +4596,23 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             if overshoot_failed:
                 return _finish_prec_move(False)
             if cur is None:
-                time.sleep(micro_delay);
+                time.sleep(MICRO_READ_DELAY);
                 continue
             try:
                 cur_int = int(cur)
             except Exception:
                 cur_int = None
-            if overshoot_guard and cur_int is None:
-                try:
-                    print(f"[PREC][X768][GLITCH] read={cur} ignored (parse) last_good={x768_last_good} stable={x768_stable_hits}")
-                except Exception:
-                    pass
-                if (time.time() - x768_last_accept_ts) > max(0.5, x768_accept_timeout):
-                    release_key(SC_W)
-                    time.sleep(0.2)
-                    try:
-                        _retry = _read_axis(w, axis)
-                        _retry_int = int(_retry) if _retry is not None else None
-                    except Exception:
-                        _retry_int = None
-                    if _retry_int is None or _retry_int < x768_plausible_min or _retry_int > x768_plausible_max:
-                        print("[PREC][X768] read failsafe: no acceptable parse -> relaunch")
-                        set_stage("PREC_MOVE_X_768_READ_FAILSAFE")
-                        try:
-                            exit_game_fast(w)
-                        except Exception as _e:
-                            print("[PREC][X768] exit_game_fast hata:", _e)
-                        try:
-                            relaunch_and_login_to_ingame()
-                        except Exception as _e:
-                            print("[PREC][X768] relaunch hata:", _e)
-                        return _finish_prec_move(False)
-                    x768_last_accept_ts = time.time()
-                    press_key(SC_W)
-                time.sleep(micro_delay)
-                continue
             overshoot_detected = False
             if cur_int is not None:
                 cond = False
                 if overshoot_guard:
-                    try:
-                        if x768_last_good is None:
-                            dyn_min, dyn_max = 740, 840
-                        else:
-                            dyn_min = min(x768_plausible_min, int(x768_last_good) - 40)
-                            dyn_max = max(x768_plausible_max, int(x768_last_good) + 40)
-                    except Exception:
-                        dyn_min, dyn_max = 740, 840
-                    if cur_int < dyn_min or cur_int > dyn_max:
+                    if cur_int < x768_plausible_min or cur_int > x768_plausible_max:
                         try:
-                            print(f"[PREC][X768][GLITCH] read={cur_int} ignored (range) last_good={x768_last_good} stable={x768_stable_hits}")
+                            print(f"[PREC][X768][GLITCH] read={cur_int} ignored (out of plausible range)")
                         except Exception:
                             pass
-                        time.sleep(micro_delay)
+                        time.sleep(MICRO_READ_DELAY)
                         continue
-                    if x768_last_good is not None:
-                        try:
-                            near_limit = int(globals().get("NPC_FREN_MESAFE", 5))
-                        except Exception:
-                            near_limit = 5
-                        try:
-                            max_jump_near = int(globals().get("X768_YAKIN_MAX_SICRAMA", 5))
-                        except Exception:
-                            max_jump_near = 5
-                        try:
-                            if abs(int(target) - int(x768_last_good)) <= max(1, near_limit) and abs(
-                                    cur_int - int(x768_last_good)) > max_jump_near:
-                                try:
-                                    print(f"[PREC][X768][GLITCH] read={cur_int} ignored (near_jump) last_good={x768_last_good} stable={x768_stable_hits}")
-                                except Exception:
-                                    pass
-                                time.sleep(micro_delay)
-                                continue
-                        except Exception:
-                            pass
-                    if x768_last_raw is not None and abs(cur_int - int(x768_last_raw)) > 25:
-                        try:
-                            print(f"[PREC][X768][GLITCH] read={cur_int} ignored (jump) last_good={x768_last_good} stable={x768_stable_hits}")
-                        except Exception:
-                            pass
-                        x768_last_raw = cur_int
-                        x768_stable_hits = 0
-                        time.sleep(micro_delay)
-                        continue
-                    x768_last_accept_ts = time.time()
-                    if cur_int == target:
-                        try:
-                            print(f"[PREC][X768_STOP] target hit: {cur_int}")
-                        except Exception:
-                            pass
-                        release_key(SC_W)
-                        cur = cur_int
-                        break
-                    if cur_int in x768_micro_band:
-                        x768_micro_hits += 1
-                    else:
-                        x768_micro_hits = 0
-                    if x768_micro_hits >= max(1, overshoot_hits_req):
-                        try:
-                            print(f"[PREC][X768_STOP] micro band hit: {cur_int}")
-                        except Exception:
-                            pass
-                        overshoot_detected = True
-                    if not overshoot_detected:
-                        if x768_last_raw is not None and abs(cur_int - int(x768_last_raw)) <= max(0, x768_stable_eps):
-                            x768_stable_hits += 1
-                        else:
-                            x768_stable_hits = 1
-                        x768_last_raw = cur_int
-                        if x768_stable_hits < max(1, x768_stable_hits_req):
-                            try:
-                                print(f"[PREC][X768][GLITCH] read={cur_int} ignored (unstable) last_good={x768_last_good} stable={x768_stable_hits}")
-                            except Exception:
-                                pass
-                            time.sleep(micro_delay)
-                            continue
-                    x768_last_raw = cur_int
-                    x768_last_good = cur_int
-                    if x768_closest is None or abs(int(target) - int(cur_int)) < abs(int(target) - int(x768_closest)):
-                        x768_closest = cur_int
                     x768_hits.append(cur_int)
                     try:
                         req = int(globals().get("X768_OVERSHOOT_CONFIRM_HITS", 3))
@@ -5035,8 +4643,6 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                                 pass
                             cur_int = med
                             cur = med
-                        elif med < target:
-                            overshoot_detected = True
                 else:
                     if expected_dir > 0 and cur_int > (target + pre_brake_delta):
                         cond = True
@@ -5078,15 +4684,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
                 press_key(SC_W)
                 continue
             if cur_int is not None and abs(target - cur_int) <= pre_brake_delta: break
-            if (time.time() - t0) > timeout:
-                if overshoot_guard:
-                    try:
-                        print(f"[PREC][X768] timeout: {time.time() - t0:.1f}s cur={cur} target={target} closest={x768_closest}")
-                    except Exception:
-                        pass
-                else:
-                    print(f"[PREC] timeout pre-brake cur={cur} target={target}")
-                return _finish_prec_move(False)
+            if (time.time() - t0) > timeout: print(f"[PREC] timeout pre-brake cur={cur} target={target}"); return _finish_prec_move(False)
             time.sleep(0.03)
     finally:
         release_key(SC_W)
@@ -5158,7 +4756,7 @@ def town_until_valid_x(w):
 # >>> SPEED_AWARE_BEGIN_v2
 # === Hız-Profili Dinamik Fren Mesafesi (X ve Y) ===
 # NE İŞE YARAR: FAST/BALANCED/SAFE → pre_brake_delta seçer ve precise_move_w_to_axis ile hedefe gider.
-_SPEED_PRE_BRAKE = {"FAST": 5, "BALANCED": 5, "SAFE": 5}
+_SPEED_PRE_BRAKE = {"FAST": 2, "BALANCED": 3, "SAFE": 4}
 
 
 def _get_speed_profile():
@@ -5279,78 +4877,37 @@ def go_to_anvil_from_top(start_x):
     release_key(SC_W)
 
 
-def bank_ui_visible():
-    try:
-        gray = grab_gray_region("BANK_PANEL")
-        if gray is None or gray.size == 0:
-            return False
-        tmpl = _load_empty_template()
-        if tmpl is not None:
-            cols, rows = get_region_grid("BANK_PANEL")
-            for r in range(rows):
-                for c in range(cols):
-                    if slot_is_empty_in_gray(gray, c, r, "BANK_PANEL", tmpl):
-                        return True
-        try:
-            edges = cv2.Canny(gray, 50, 120)
-            edge_density = float(edges.sum()) / (255.0 * max(gray.size, 1))
-            return edge_density > 0.01
-        except Exception:
-            return False
-    except Exception:
-        return False
-
-
 def move_to_769_and_turn_from_top(w):
     global BANK_OPEN
     _workflow_precondition_gate(w)
     set_stage("MOVE_TO_STORAGE_AREA");
     ensure_ui_closed();
-    need_gate = (MODE == "BANK_PLUS8" or PLUS8_RESUME)
-    max_try = 3 if need_gate else 1
-    for _ in range(max_try):
-        press_key(SC_A);
-        time.sleep(TURN_LEFT_SEC);
-        release_key(SC_A)
-        ok = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
-        if not ok: print("[Uyarı] 768 x hedeflemesi zaman aşımı (storage).")
-        if need_gate and not ok:
-            return False
-        press_key(SC_D);
-        time.sleep(TURN_RIGHT_SEC);
-        release_key(SC_D)
-        ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
-        if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
-        if need_gate and not ok:
-            return False
-        time.sleep(0.05);
-        press_key(SC_B);
-        release_key(SC_B);
-        time.sleep(0.15);
-        mouse_move(*NPC_CONTEXT_RIGHTCLICK_POS);
-        mouse_click("right");
-        time.sleep(0.2)
-        tpl = pick_existing_template(USE_STORAGE_TEMPLATE_PATHS)
-        if not tpl: print("[STORAGE] 'Use Storage' template yok."); return False
-        ok = wait_and_click_template(w, tpl, threshold=USE_STORAGE_MATCH_THRESHOLD, timeout=USE_STORAGE_FIND_TIMEOUT,
-                                     scales=USE_STORAGE_SCALES)
-        if not ok:
-            print("[STORAGE] 'Use Storage' bulunamadı.");
-            BANK_OPEN = False;
-            if need_gate and _ < (max_try - 1):
-                continue
-            return False
-        print("[STORAGE] 'Use Storage' tıklandı → banka.");
-        time.sleep(0.4);
-        BANK_OPEN = True;
-        if not bank_ui_visible():
-            print("[STORAGE] Banka doğrulanmadı.");
-            BANK_OPEN = False;
-            if _ < (max_try - 1):
-                continue
-            return False
-        return True
-    return False
+    press_key(SC_A);
+    time.sleep(TURN_LEFT_SEC);
+    release_key(SC_A)
+    ok = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
+    if not ok: print("[Uyarı] 768 x hedeflemesi zaman aşımı (storage).")
+    press_key(SC_D);
+    time.sleep(TURN_RIGHT_SEC);
+    release_key(SC_D)
+    ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
+    if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
+    time.sleep(0.05);
+    press_key(SC_B);
+    release_key(SC_B);
+    time.sleep(0.15);
+    mouse_move(*NPC_CONTEXT_RIGHTCLICK_POS);
+    mouse_click("right");
+    time.sleep(0.2)
+    tpl = pick_existing_template(USE_STORAGE_TEMPLATE_PATHS)
+    if not tpl: print("[STORAGE] 'Use Storage' template yok."); return False
+    ok = wait_and_click_template(w, tpl, threshold=USE_STORAGE_MATCH_THRESHOLD, timeout=USE_STORAGE_FIND_TIMEOUT,
+                                 scales=USE_STORAGE_SCALES)
+    if not ok: print("[STORAGE] 'Use Storage' bulunamadı."); return False
+    print("[STORAGE] 'Use Storage' tıklandı → banka.");
+    time.sleep(0.4);
+    BANK_OPEN = True;
+    return True
 
 
 def send_town_command(*a, force=False, wait_override=None, **kw):
@@ -5468,9 +5025,6 @@ def after_deposit_check_and_decide_mode(w):
 
 def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
     set_stage(f"BANK_WITHDRAW_PLUS{N}");
-    if not bank_ui_visible():
-        print("[BANK] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     taken = 0;
     tmpl = _load_empty_template();
     bank_go_to_first_page()
@@ -5497,9 +5051,6 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
 
 def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 6, max_take: int = 27):
     set_stage("BANK_WITHDRAW_PLUS_RANGE");
-    if not bank_ui_visible():
-        print("[BANK] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     taken = 0
     tmpl = _load_empty_template()
     bank_go_to_first_page()
@@ -5520,7 +5071,7 @@ def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 
                     if hover_has_plusN(win, "BANK_PANEL", c, r, 7, hover_wait=HOVER_WAIT_BANK) or \
                             hover_has_plusN(win, "BANK_PANEL", c, r, 8, hover_wait=HOVER_WAIT_BANK):
                         continue
-                    roi = _grab_tooltip_roi_near_mouse(win)
+                    roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
                     if roi is not None and (_roi_has_plusN(roi, 7) or _roi_has_plusN(roi, 8)):
                         continue
                     x, y = slot_center("BANK_PANEL", c, r)
@@ -5538,9 +5089,6 @@ def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 
 
 def withdraw_items_from_bank_for_sale(max_take: int = None):
     set_stage("ITEM_SATIS_BANK_WITHDRAW")
-    if not bank_ui_visible():
-        print("[ITEM_SATIS][BANK] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-        return 0
     try:
         max_take_val = int(max_take if max_take is not None else ITEM_SALE_BANK_WITHDRAW_COUNT)
     except Exception:
@@ -6095,6 +5643,15 @@ def _jdelay(base: float, spread: float = 0.02) -> float:
 # === Genel bölge kırpma yardımcıları ===
 def _grab_gray_rect(rect):
     x1, y1, x2, y2 = rect
+    if mss is not None:
+        try:
+            import numpy as _np
+            with mss.mss() as sct:
+                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
+                im = _np.array(sct.grab(mon))[:, :, :3]
+                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            pass
     img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
@@ -6627,81 +6184,23 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
         print("[BANK_PLUS8] Banka açık → devam.")
     else:
         if not move_to_769_and_turn_from_top(w):
-            print("[BANK_PLUS8] Banka açılamadı; recovery/relaunch.")
-            try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-            except Exception: pass
-            try:
-                exit_game_fast(w)
-            except Exception as e:
-                print(f"[BANK_PLUS8] Çıkış hata: {e}")
-            w = relaunch_and_login_to_ingame()
-            if not w:
-                print("[BANK_PLUS8] Yeniden giriş başarısız (banka).")
-                return
-            town_until_valid_x(w);
-            ascend_stairs_to_top(w);
-            if not move_to_769_and_turn_from_top(w):
-                print("[BANK_PLUS8] Banka yine açılamadı; recovery/relaunch.")
-                try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-                except Exception: pass
-                return
+            print("[BANK_PLUS8] Banka açılamadı, town & tekrar.");
+            send_town_command()
+            if not move_to_769_and_turn_from_top(w): print(
+                "[BANK_PLUS8] Banka yine açılamadı. Mod iptal."); send_plus8_summary_once("Banka açılamadı"); _set_mode_normal(
+                "Banka açılamadı"); return
 
     # >>> 598'e başarıyla varıldıysa kilidi Y'ye göre AYARLA
     y_now = _read_y_now()
     _set_town_lock_by_y(y_now)
     if TOWN_LOCKED:
         _town_log_once('[TOWN] Kilit aktif (Y=598) — town artık kapalı')
-    # [PATCH_RT_IN_RUN_BANK_PLUS8_CYCLE]
-    resume_once = False
-    try: resume_once = _rt_should_resume_plus8_upgrade()
-    except Exception: resume_once = False
-    first = (not resume_once)
+    first = True
     try:
         while True:
             wait_if_paused();
-            if not bank_ui_visible():
-                print("[BANK_PLUS8] Devam edilmiyor: bank doğrulanmadı → recovery/relaunch")
-                try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-                except Exception: pass
-                try:
-                    exit_game_fast(w)
-                except Exception as e:
-                    print(f"[BANK_PLUS8] Çıkış hata: {e}")
-                w = relaunch_and_login_to_ingame()
-                if not w:
-                    print("[BANK_PLUS8] Yeniden giriş başarısız (banka).")
-                    return
-                town_until_valid_x(w);
-                ascend_stairs_to_top(w);
-                if not move_to_769_and_turn_from_top(w):
-                    print("[BANK_PLUS8] Banka açılamadı; recovery/relaunch.")
-                    try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-                    except Exception: pass
-                    return
-            # [PATCH_RT_PLUS8_PREFLIGHT_DEPOSIT]
-            if not resume_once:
-                try:
-                    dep = deposit_inventory_plusN_to_bank(w, 8)
-                    if dep: print(f"[BANK_PLUS8] Preflight: üzerindeki +8 bankaya atıldı ({dep}).")
-                except Exception:
-                    pass
             watchdog_enforce()
-            if resume_once:
-                taken = int((_rt_get_plus8_resume() or {}).get("attempts_limit", BASMA_HAKKI) or BASMA_HAKKI)
-                print(f"[BANK_PLUS8] Resume: upgrade kaldığı yerden (limit={taken}).")
-                _rt_checkpoint(stage="BANK_PLUS8_RESUME", phase="UPGRADING", plus8={"attempts_limit": taken}, force=True)
-                resume_once = False
-                first = False
-            elif first:
-                # [PATCH_PLUS8_PREFLIGHT_DEPOSIT]
-                if globals().get("PLUS8_PREFLIGHT_DEPOSIT",True):
-                    try:
-                        set_stage("BANK_PLUS8_PREFLIGHT_DEPOSIT")
-                        pre=deposit_inventory_plusN_to_bank(w,8)
-                        if pre:
-                            print(f"[BANK_PLUS8] Preflight: üzerindeki +8 bankaya atıldı: {pre}")
-                    except Exception as e:
-                        print(f"[BANK_PLUS8] Preflight deposit hata: {e}")
+            if first:
                 initial = withdraw_plusN_from_bank_pages(w, 7, max_take=2);
                 print(f"[BANK_PLUS8] İlk +7: {initial}/2")
                 low_moved = deposit_low_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
@@ -6719,29 +6218,13 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
                 taken = withdraw_plusN_from_bank_pages(w, 7, max_take=27);
                 print(f"[BANK_PLUS8] Döngü +7: {taken}/27")
             if taken <= 0:
-                retry = 0
-                while retry < 2 and taken <= 0:
-                    time.sleep(0.2)
-                    print(f"[BANK_PLUS8] +7 alınamadı → tekrar dene ({retry + 1}/2).")
-                    taken = withdraw_plusN_from_bank_pages(w, 7, max_take=27)
-                    print(f"[BANK_PLUS8] Retry +7: {taken}/27")
-                    retry += 1
-                if taken <= 0:
-                    print("[BANK_PLUS8] Bankada +7 kalmadı → scroll dönüşümü ve çıkış.")
-                    mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
-                    low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
-                    print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
-                    send_plus8_summary_once("PLUS7 kaynak bitti")
-                    _set_mode_normal("BANK_PLUS8_DONE_NO_ITEMS")
-                    ensure_ui_closed();
-                    exit_game_fast(w);
-                    w = relaunch_and_login_to_ingame()
-                    if not w:
-                        print("[BANK_PLUS8] Yeniden giriş başarısız (empty +7).");
-                        send_plus8_summary_once("Relaunch empty +7 başarısız");
-                        _set_mode_normal("Relaunch empty +7 başarısız");
-                        return True
-                    return True
+                print("[BANK_PLUS8] Bankada +7 kalmadı → scroll dönüşümü ve çıkış.")
+                mid_back = deposit_mid_scrolls_from_inventory_to_bank(SCROLL_SWAP_MAX_STACKS)
+                low_back = withdraw_low_scrolls_from_bank_to_inventory(SCROLL_SWAP_MAX_STACKS)
+                print(f"[BANK_PLUS8] Final takas: MID→BANK={mid_back}, LOW→ENV={low_back}");
+                send_plus8_summary_once("PLUS7 kaynak bitti")
+                _set_mode_normal("Bankada +7 kalmadı")
+                return
             ensure_ui_closed();
             exit_game_fast(w);
             w = relaunch_and_login_to_ingame()
@@ -6762,25 +6245,19 @@ def run_bank_plus8_cycle(w, bank_is_open: bool = False):
             release_key(SC_I);
             time.sleep(0.5)
             plus8 = count_inventory_plusN(w, 8, "INV");
-            try: _rt_checkpoint(phase="BANKING", plus8={"inv_plus8_count": int(plus8), "on_character_has_items": bool(plus8 >= 1), "bank_open_required": True}, force=True)
-            except Exception: pass
             press_key(SC_I);
             release_key(SC_I);
             time.sleep(0.2)
             if plus8 >= 1:
                 if not move_to_769_and_turn_from_top(w):
-                    print("[BANK_PLUS8] Storage açılamadı; recovery/relaunch.")
-                    try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-                    except Exception: pass
-                    return
-                deposit_inventory_plusN_to_bank(w, 8)
+                    print("[BANK_PLUS8] Storage açılamadı; sonraki döngü.")
+                else:
+                    deposit_inventory_plusN_to_bank(w, 8)
             else:
                 print("[BANK_PLUS8] Üzerinde +8 yok.")
-                if not move_to_769_and_turn_from_top(w):
-                    print("[BANK_PLUS8] Banka açılamadı (döngü sonrası).")
-                    try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-                    except Exception: pass
-                    return
+                if not move_to_769_and_turn_from_top(w): print(
+                    "[BANK_PLUS8] Banka açılamadı (döngü sonrası). Mod bitiyor."); send_plus8_summary_once(
+                    "Depozit banka açılamadı"); _set_mode_normal("Depozit banka açılamadı"); return
     finally:
         try:
             send_plus8_summary_once()
@@ -6913,10 +6390,6 @@ def run_stairs_and_workflow(w):
     # global satırı EN BAŞTA olmalı
     global GLOBAL_CYCLE, NEXT_PLUS7_CHECK_AT, MODE, REQUEST_RELAUNCH, FORCE_PLUS7_ONCE, BANK_OPEN, NEED_STAIRS_REALIGN, TOWN_LOCKED
     global PLUS8_RESUME
-    # [PATCH_RT_IN_BOOT]
-    try: _rt_boot_apply()
-    except Exception: pass
-
 
     set_stage("WORKFLOW_LOOP")
     print(f">>> Akış başlıyor (tur={GLOBAL_CYCLE}, +7_kontrol_turu>={NEXT_PLUS7_CHECK_AT})")
@@ -6941,21 +6414,10 @@ def run_stairs_and_workflow(w):
                 print("[KAMPANYA] +8 modu (F/Resume).")
                 if not BANK_OPEN:
                     if not move_to_769_and_turn_from_top(w):
-                        print("[KAMPANYA] Banka yok; recovery/relaunch.")
-                        try: _rt_checkpoint(stage="OPEN_STORAGE", phase="BANKING", plus8={"bank_open_required": True}, force=True)
-                        except Exception: pass
-                        try:
-                            exit_game_fast(w)
-                        except Exception as e:
-                            print(f"[KAMPANYA] Çıkış hata: {e}")
-                        w = relaunch_and_login_to_ingame()
-                        if not w:
-                            print("[KAMPANYA] Yeniden giriş başarısız (banka).")
-                            continue
+                        print("[KAMPANYA] Banka yok; town & retry.")
+                        send_town_command()
                         continue
                 run_bank_plus8_cycle(w, bank_is_open=BANK_OPEN)
-                if MODE == "BANK_PLUS8" or PLUS8_RESUME:
-                    continue
                 print("[KAMPANYA] +8 modu tamam → NORMAL.")
                 _set_mode_normal("BANK_PLUS8 döngü tamam")
                 continue
@@ -7637,36 +7099,7 @@ def go_to_npc_from_top(w):  # moda göre sayfa seçimi
     time.sleep(TURN_LEFT_SEC);
     release_key(SC_A)
     press_key(SC_W);
-    t0 = time.time()
-    try:
-        brake = int(globals().get("NPC_FREN_MESAFE", 5))
-    except Exception:
-        brake = 5
-    try:
-        rd = float(globals().get("NPC_HIZLI_OKUMA_GECIKME", 0.02))
-    except Exception:
-        rd = 0.02
-    if rd < 0.005: rd = 0.005
-    while (time.time() - t0) < float(NPC_GIDIS_SURESI):
-        wait_if_paused();
-        watchdog_enforce()
-        if _kb_pressed('f12'):
-            release_key(SC_W)
-            return (False, w)
-        try:
-            cx, _cy = read_coordinates(w)
-        except Exception:
-            cx = None
-        if cx is None:
-            time.sleep(rd)
-            continue
-        try:
-            cxi = int(cx)
-        except Exception:
-            cxi = None
-        if cxi is not None and cxi <= (TARGET_NPC_X + brake):
-            break
-        time.sleep(rd)
+    time.sleep(NPC_GIDIS_SURESI);
     release_key(SC_W)
     try:
         _ = go_w_to_x(w, TARGET_NPC_X, timeout=NPC_SEEK_TIMEOUT)
@@ -7998,7 +7431,7 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("TELEGRAM_EMPTY_BANK_BURST_COUNT", 1),
                 "Banka boşaldığında ardışık gönderilecek mesaj sayısı."),
     ConfigField("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", "Boş banka tekrar süresi (dk)", "Item Satış", "float",
-                _cfg_default("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", 3.0),
+                _cfg_default("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", 10.0),
                 "Banka boş kalmaya devam ederse yeniden uyarı aralığı."),
     ConfigField("TELEGRAM_TOKEN", "Telegram Token", "Item Satış", "str",
                 _cfg_default("TELEGRAM_TOKEN", ""),
@@ -8533,6 +7966,7 @@ _TR = {
     'ON_TEMPLATE_TIMEOUT_RESTART': 'şablon gecikirse yeniden başlat',
     'DEBUG_SAVE': 'debug görselleri kaydet',
     'GUI_AUTO_OPEN_SPEED': 'başlangıçta hız sekmesini aç',
+    'TOOLTIP_GRAB_WITH_MSS': 'tooltip yakalamada mss kullan',
     'TOOLTIP_OFFSET_Y': 'tooltip Y ofseti',
     'TOOLTIP_ROI_W': 'tooltip ROI genişlik',
     'TOOLTIP_ROI_H': 'tooltip ROI yükseklik',
@@ -8570,10 +8004,6 @@ _TR = {
     'NPC_CONFIRM_TEMPLATE_PATH': 'NPC onay şablonu',
     'NPC_SEEK_TIMEOUT': 'NPC arama zaman aşımı (sn)',
     'NPC_GIDIS_SURESI': 'NPC’ye yürüme süresi (sn)',
-    'NPC_FREN_MESAFE': 'NPC fren mesafe (px)',
-    'NPC_HIZLI_OKUMA_GECIKME': 'NPC hizli okuma gecikme (sn)',
-    'NPC_STABIL_HIT': 'NPC hedef stabil hit sayisi',
-    'NPC_X768_OVERSHOOT_MAX_ADIM': 'NPC X768 overshoot max adim',
     'NPC_POSTBUY_FIRST_A_DURATION': 'alış sonrası 1. A basma (sn)',
     'NPC_POSTBUY_SECOND_A_DURATION': 'alış sonrası 2. A basma (sn)',
     'NPC_POSTBUY_A_WHILE_W_DURATION': 'alış sonrası A + W (sn)',
@@ -8596,7 +8026,6 @@ _TR = {
     'X_BAND_CONSEC': 'X bant arka arkaya isabet',
     'X_TOL_TIMEOUT': 'X tolerans zaman aşımı (sn)',
     'X_TOL_READ_DELAY': 'X okuma gecikmesi (sn)',
-    'X768_YAKIN_MAX_SICRAMA': 'X768 yakin max sicrama',
     'Y_SEEK_TIMEOUT': 'Y arama zaman aşımı (sn)',
     'TARGET_STABLE_HITS': 'hedef sabit okuma sayısı',
     'TARGET_Y_AFTER_TURN': 'dönüş sonrası hedef Y',
@@ -8690,6 +8119,7 @@ _TR_HELP.update({
     "EMPTY_SLOT_THRESHOLD": "Boş slot sayısı ≥ bu değer ise 'çoğunlukla boş' kabul edilir.",
     'ENABLE_YAMA_SLOT_CACHE': 'Boş/dolu sonuçlarını önbelleğe al.',
     'MAX_CACHE_SIZE_PER_SNAPSHOT': 'Tek yakalamada izinli maksimum önbellek pikseli.',
+    'TOOLTIP_GRAB_WITH_MSS': 'Tooltip için mss kullan (genelde daha stabil).',
     'TOOLTIP_OFFSET_Y': 'Tooltip kırpma ofseti (Y).',
     'TOOLTIP_ROI_W': 'Tooltip ROI genişliği.',
     'TOOLTIP_ROI_H': 'Tooltip ROI yüksekliği.',
@@ -8748,10 +8178,6 @@ _ADV_CATEGORY_RULES = (
             'LINEN_STEPS',
             'NPC_GIDIS_SURESI',
             'NPC_SEEK_TIMEOUT',
-            'NPC_FREN_MESAFE',
-            'NPC_HIZLI_OKUMA_GECIKME',
-            'NPC_STABIL_HIT',
-            'NPC_X768_OVERSHOOT_MAX_ADIM',
             'NPC_POSTBUY_FIRST_A_DURATION',
             'NPC_POSTBUY_SECOND_A_DURATION',
             'NPC_POSTBUY_A_WHILE_W_DURATION',
@@ -8809,7 +8235,6 @@ _ADV_CATEGORY_RULES = (
             'X_BAND_CONSEC',
             'X_TOL_TIMEOUT',
             'X_TOL_READ_DELAY',
-            'X768_YAKIN_MAX_SICRAMA',
             'Y_SEEK_TIMEOUT',
         ),
         prefixes=(
@@ -8868,14 +8293,6 @@ _ADV_CATEGORY_RULES = (
         names=(
             'ROI_STALE_MS',
             'UPG_ROI_STALE_MS',
-            'COORD_READ_DEBUG',
-            'COORD_RESIZE_SCALE',
-            'COORD_CONTRAST',
-            'COORD_THRESHOLD',
-            'COORD_FAST_RESIZE_SCALE',
-            'COORD_FAST_CONTRAST',
-            'COORD_FAST_THRESHOLD',
-            'COORD_PERF_LOG_ENABLE',
             'EMPTY_SLOT_TEMPLATE_PATH',
             'EMPTY_SLOT_MATCH_THRESHOLD',
             'FALLBACK_MEAN_THRESHOLD',
@@ -8883,6 +8300,7 @@ _ADV_CATEGORY_RULES = (
             'EMPTY_SLOT_THRESHOLD',
             'ENABLE_YAMA_SLOT_CACHE',
             'MAX_CACHE_SIZE_PER_SNAPSHOT',
+            'TOOLTIP_GRAB_WITH_MSS',
             'TOOLTIP_OFFSET_Y',
             'TOOLTIP_ROI_W',
             'TOOLTIP_ROI_H',
@@ -10596,7 +10014,7 @@ def _MERDIVEN_RUN_GUI():
             if hasattr(m, "PRESS_MIN"): m.PRESS_MIN = float(self.v["press_min"].get())
             if hasattr(m, "PRESS_MAX"): m.PRESS_MAX = float(self.v["press_max"].get())
             try:
-                d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 5, "BALANCED": 5, "SAFE": 5})
+                d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
                 d.update({"FAST": int(self.v["brake_fast"].get()), "BALANCED": int(self.v["brake_bal"].get()),
                           "SAFE": int(self.v["brake_safe"].get())})
                 setattr(m, "_SPEED_PRE_BRAKE", d)
@@ -11291,6 +10709,45 @@ PLUSN_FAST_MODE = bool(globals().get('PLUSN_FAST_MODE', True))
 PLUSN_HOVER_SAMPLES = int(globals().get('PLUSN_HOVER_SAMPLES', 1))
 PLUSN_WAIT_BETWEEN = float(globals().get('PLUSN_WAIT_BETWEEN', 0.06))
 PLUSN_USE_OCR_FALLBACK = bool(globals().get('PLUSN_USE_OCR_FALLBACK', False))
+TOOLTIP_GRAB_WITH_MSS = bool(globals().get('TOOLTIP_GRAB_WITH_MSS', True))
+
+
+# [YAMA] Tooltip ROI hızlı yakalama (MSS varsa onu kullan)
+def _grab_tooltip_roi_near_mouse_fast(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_ROI_H):
+    try:
+        if not bool(globals().get('TOOLTIP_GRAB_WITH_MSS', True)):
+            raise RuntimeError("MSS devre dışı")
+        import mss, numpy as _np, cv2
+        # Mevcut mouse pozisyonundan tepeye doğru roi
+        class _PT:
+            pass
+
+        import ctypes
+        pt = _PT();
+        pt.x = ctypes.c_long();
+        pt.y = ctypes.c_long()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        mx, my = int(pt.x.value), int(pt.y.value)
+        Lw, Tw, Rw, Bw = win.left, win.top, win.right, win.bottom
+        half = roi_w // 2;
+        x1 = mx - half;
+        y1 = my - (roi_h + TOOLTIP_OFFSET_Y);
+        x2 = x1 + roi_w;
+        y2 = y1 + roi_h
+        x1 = max(Lw, x1);
+        y1 = max(Tw, y1);
+        x2 = min(Rw, x2);
+        y2 = min(Bw, y2)
+        if x2 - x1 < 40 or y2 - y1 < 40: return None
+        with mss.mss() as sct:
+            mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
+            im = _np.array(sct.grab(mon))[:, :, :3]
+            import cv2 as _cv2
+            return _cv2.cvtColor(im, _cv2.COLOR_BGR2GRAY)
+    except Exception:
+        return None
+
+
 # >>> [YAMA:GUI_DEFAULTS]
 
 try:
