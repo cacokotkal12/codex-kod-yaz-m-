@@ -10596,7 +10596,7 @@ def _MERDIVEN_RUN_GUI():
             if hasattr(m, "PRESS_MIN"): m.PRESS_MIN = float(self.v["press_min"].get())
             if hasattr(m, "PRESS_MAX"): m.PRESS_MAX = float(self.v["press_max"].get())
             try:
-                d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
+                d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 5, "BALANCED": 5, "SAFE": 5})
                 d.update({"FAST": int(self.v["brake_fast"].get()), "BALANCED": int(self.v["brake_bal"].get()),
                           "SAFE": int(self.v["brake_safe"].get())})
                 setattr(m, "_SPEED_PRE_BRAKE", d)
