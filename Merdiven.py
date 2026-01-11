@@ -3976,20 +3976,20 @@ def deposit_low_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS
     if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); return 0
     set_stage("SCROLL_DEPOSIT_LOW");
     moved = 0;
-    gray = grab_gray_region("BANK");
-    cols, rows = get_region_grid("BANK")
+    gray = grab_gray_region("INV");
+    cols, rows = get_region_grid("INV")
     for r in range(rows):
         for c in range(cols):
             if moved >= max_stacks: print(f"[SCROLL] Low deposit limiti {max_stacks}."); return moved
-            roi = _cell_roi(gray, "BANK", c, r);
+            roi = _cell_roi(gray, "INV", c, r);
             tmpl_empty = _load_empty_template()
-            if slot_is_empty_in_gray(gray, c, r, "BANK", tmpl_empty): continue
+            if slot_is_empty_in_gray(gray, c, r, "INV", tmpl_empty): continue
             if _roi_matches_any_template(roi, SCROLL_LOW_TEMPLATES):
-                x, y = slot_center("BANK", c, r);
+                x, y = slot_center("INV", c, r);
                 right_click_enter_at(x, y);
                 moved += 1;
                 time.sleep(0.2);
-                gray = grab_gray_region("BANK")
+                gray = grab_gray_region("INV")
     print(f"[SCROLL] Bankaya gönderilen LOW scroll: {moved}");
     return moved
 
@@ -9881,6 +9881,12 @@ def _MERDIVEN_RUN_GUI():
             if getattr(self, "thr", None) and self.thr.is_alive(): self._msg("Zaten çalışıyor."); return
             self.apply_core()
             try:
+                m._current_stage = "INIT";
+                m._stage_enter_ts = time.time()
+                self.stage_log = []
+            except Exception:
+                pass
+            try:
                 if hasattr(m, "_reset_empty_bank_state"):
                     m._reset_empty_bank_state()
             except Exception:
@@ -9912,6 +9918,12 @@ def _MERDIVEN_RUN_GUI():
         def stop(self):
             self._msg("Durdur (F12 sanalı)...");
             m.GUI_ABORT = True;
+            try:
+                m._current_stage = "INIT";
+                m._stage_enter_ts = time.time()
+                self.stage_log = []
+            except Exception:
+                pass
             try:
                 if hasattr(m, "_stop_empty_bank_notifier"):
                     m._stop_empty_bank_notifier()
