@@ -3221,6 +3221,16 @@ def read_coordinates(window):
                 except Exception:
                     pass
             if len(nums) >= 2:
+                try:
+                    _py = None
+                    _lp = globals().get("_LAST_PROGRESS_COORD", None)
+                    if isinstance(_lp, (list, tuple)) and len(_lp) >= 2:
+                        _py = _lp[1]
+                    if _py is not None and int(_py) >= 100 and len(str(nums[1])) < len(str(int(_py))):
+                        extra_retry = True
+                        continue
+                except Exception:
+                    pass
                 x_val, y_val = int(nums[0]), int(nums[1])
                 _update_progress_with_coord((x_val, y_val))
                 return x_val, y_val
@@ -3293,6 +3303,16 @@ def _read_coordinates_mss(window):
                 except Exception:
                     pass
             if len(nums) >= 2:
+                try:
+                    _py = None
+                    _lp = globals().get("_LAST_PROGRESS_COORD", None)
+                    if isinstance(_lp, (list, tuple)) and len(_lp) >= 2:
+                        _py = _lp[1]
+                    if _py is not None and int(_py) >= 100 and len(str(nums[1])) < len(str(int(_py))):
+                        extra_retry = True
+                        continue
+                except Exception:
+                    pass
                 x_val, y_val = int(nums[0]), int(nums[1])
                 try:
                     _update_progress_with_coord((x_val, y_val))
