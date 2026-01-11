@@ -3976,20 +3976,20 @@ def deposit_low_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS
     if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); return 0
     set_stage("SCROLL_DEPOSIT_LOW");
     moved = 0;
-    gray = grab_gray_region("INV");
-    cols, rows = get_region_grid("INV")
+    gray = grab_gray_region("BANK");
+    cols, rows = get_region_grid("BANK")
     for r in range(rows):
         for c in range(cols):
             if moved >= max_stacks: print(f"[SCROLL] Low deposit limiti {max_stacks}."); return moved
-            roi = _cell_roi(gray, "INV", c, r);
+            roi = _cell_roi(gray, "BANK", c, r);
             tmpl_empty = _load_empty_template()
-            if slot_is_empty_in_gray(gray, c, r, "INV", tmpl_empty): continue
+            if slot_is_empty_in_gray(gray, c, r, "BANK", tmpl_empty): continue
             if _roi_matches_any_template(roi, SCROLL_LOW_TEMPLATES):
-                x, y = slot_center("INV", c, r);
+                x, y = slot_center("BANK", c, r);
                 right_click_enter_at(x, y);
                 moved += 1;
                 time.sleep(0.2);
-                gray = grab_gray_region("INV")
+                gray = grab_gray_region("BANK")
     print(f"[SCROLL] Bankaya gönderilen LOW scroll: {moved}");
     return moved
 
