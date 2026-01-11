@@ -480,11 +480,6 @@ _sync_sale_refresh_from_cfg()
 
 
 try:
-    import mss
-except Exception:
-    mss = None
-
-try:
     import requests
 except Exception:
     requests = None
@@ -790,14 +785,6 @@ _init_statistics()
 
 
 def _grab_full_bgr():
-    try:
-        if mss is not None:
-            with mss.mss() as sct:
-                mon = sct.monitors[1];
-                im = np.array(sct.grab(mon))[:, :, :3];
-                return im
-    except Exception:
-        pass
     im = ImageGrab.grab();
     return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
 
@@ -882,7 +869,6 @@ def _bye(): log("[EXIT] program sonlandı")
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
 COORD_READ_DEBUG = True
-COORD_USE_MSS = True  # PyInstaller: hidden-import=mss (gerekirse mss.tools)
 COORD_RESIZE_SCALE = 1.2
 COORD_CONTRAST = 2.6
 COORD_THRESHOLD = 160
@@ -3245,99 +3231,6 @@ def read_coordinates(window):
     return None, None
 
 
-# === [YAMA COORD MSS] start ===
-# NE İŞE YARAR: Koordinat ROI grab işlemini ImageGrab yerine MSS ile hızlandırır (CPU OCR aynı, grab hızlanır).
-# PyInstaller notu: hidden-import=mss (gerekirse mss.tools)
-def _read_coordinates_mss(window):
-    """NE İŞE YARAR: read_coordinates() yerine geçer; MSS varsa ROI'yi hızlı yakalar."""
-    attempts = 0;
-    extra_retry = False
-    while (attempts < 1) or extra_retry:
-        attempts += 1;
-        extra_retry = False
-        w, rect = ensure_knight_online_window("read_coordinates", existing_window=window, focus=False, want_rect=True,
-                                              attempts=5, retry_delay=0.6)
-        if (not w) or (rect is None): return None, None
-        t0 = time.time()
-        try:
-            left, top, _r, _b = rect
-            x1, y1, x2, y2 = (left + 104, top + 102, left + 160, top + 120)  # senin mevcut bbox
-            img = None
-            if bool(globals().get("COORD_USE_MSS", True)):
-                try:
-                    _m = globals().get("mss", None)
-                    if _m is None:
-                        import mss as _m
-                    import numpy as _np
-                    with _m.mss() as sct:
-                        mon = {"left": int(x1), "top": int(y1), "width": int(x2 - x1), "height": int(y2 - y1)}
-                        arr = _np.array(sct.grab(mon))[:, :, :3]  # BGR
-                    from PIL import Image
-                    img = Image.fromarray(arr[:, :, ::-1])  # RGB
-                except Exception:
-                    img = None
-            if img is None:
-                from PIL import ImageGrab
-                img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
-            stage_now = str(globals().get("_current_stage", "") or "").upper()
-            fast_mode = (stage_now == "PREC_MOVE_X_768")
-            from PIL import ImageEnhance
-            gray = img.convert("L")
-            sc = float(globals().get("COORD_FAST_RESIZE_SCALE" if fast_mode else "COORD_RESIZE_SCALE", 1.2))
-            if sc != 1.0: gray = gray.resize((int(gray.width * sc), int(gray.height * sc)))
-            cval = float(globals().get("COORD_FAST_CONTRAST" if fast_mode else "COORD_CONTRAST", 2.6))
-            if cval != 1.0:
-                gray = ImageEnhance.Contrast(gray).enhance(cval)
-            thr = int(globals().get("COORD_FAST_THRESHOLD" if fast_mode else "COORD_THRESHOLD", 0))
-            if thr > 0:
-                gray = gray.point(lambda p: 255 if p > thr else 0)
-            cfg = r'--psm 7 -c tessedit_char_whitelist=0123456789,. -c classify_bln_numeric_mode=1'
-            text = pytesseract.image_to_string(gray, config=cfg).strip()
-            parts = re.split(r'[,.\s]+', text);
-            nums = [p for p in parts if p.isdigit()]
-            if COORD_READ_DEBUG:
-                dt = (time.time() - t0) * 1000.0
-                try:
-                    log(f"[COORD] dt={dt:.1f}ms txt='{text}' nums={nums} mss={bool(globals().get('COORD_USE_MSS', True))}",
-                        "info")
-                except Exception:
-                    pass
-            if len(nums) >= 2:
-                try:
-                    _py = None
-                    _lp = globals().get("_LAST_PROGRESS_COORD", None)
-                    if isinstance(_lp, (list, tuple)) and len(_lp) >= 2:
-                        _py = _lp[1]
-                    if _py is not None and int(_py) >= 100 and len(str(nums[1])) < len(str(int(_py))):
-                        extra_retry = True
-                        continue
-                except Exception:
-                    pass
-                x_val, y_val = int(nums[0]), int(nums[1])
-                try:
-                    _update_progress_with_coord((x_val, y_val))
-                except Exception:
-                    pass
-                return x_val, y_val
-        except Exception as exc:
-            try:
-                if _is_win_error_1400(exc):
-                    _handle_win1400_recovery("read_coordinates", "reset_hwnd refind_window retry=1/2", attempts, 2)
-                    if attempts < 2: extra_retry = True; continue
-                else:
-                    raise
-            except Exception:
-                raise
-    return None, None
-
-
-try:
-    globals()["read_coordinates"] = _read_coordinates_mss  # mevcut read_coordinates'i override eder
-except Exception:
-    pass
-# === [YAMA COORD MSS] end ===
-
-
 # === [YAMA COORD PERF LOG V2] start ===
 # NE İŞE YARAR: Koordinat okuma süresini (ms) %APPDATA%\Merdiven\logs\coord_perf.log dosyasına yazar.
 COORD_PERF_LOG_ENABLE = bool(globals().get("COORD_PERF_LOG_ENABLE", True))
@@ -3698,15 +3591,6 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
 # ================== Görüntü/Template Yardımcıları ==================
 def grab_window_gray(win):
     x1, y1, x2, y2 = win.left, win.top, win.right, win.bottom
-    if mss is not None:
-        try:
-            import numpy as _np
-            with mss.mss() as sct:
-                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-                im = _np.array(sct.grab(mon))[:, :, :3]
-                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        except Exception:
-            pass
     img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
@@ -4244,7 +4128,6 @@ def _grab_tooltip_roi_near_mouse(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_ROI_H):
 
 
 def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
-    # Hızlı +7/+8 tespiti: tek/az örnek, MSS ile hızlı grab, OCR opsiyonel
     if hover_wait is None:
         hover_wait = HOVER_WAIT_BANK if region == "BANK_PANEL" else HOVER_WAIT_INV
     x, y = slot_center(region, col, row)
@@ -4259,7 +4142,7 @@ def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
         wait_between = float(globals().get('PLUSN_WAIT_BETWEEN', 0.06))
         last_roi = None
         for i in range(samples):
-            roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
+            roi = _grab_tooltip_roi_near_mouse(win)
             last_roi = roi
             if N == 7:
                 if _match_plus7_templates_on(roi, 0.78) or _match_plus7_templates_on(roi, 0.80): return True
@@ -5637,7 +5520,7 @@ def withdraw_plus_range_from_bank_pages(win, min_plus: int = 1, max_plus: int = 
                     if hover_has_plusN(win, "BANK_PANEL", c, r, 7, hover_wait=HOVER_WAIT_BANK) or \
                             hover_has_plusN(win, "BANK_PANEL", c, r, 8, hover_wait=HOVER_WAIT_BANK):
                         continue
-                    roi = _grab_tooltip_roi_near_mouse_fast(win) or _grab_tooltip_roi_near_mouse(win)
+                    roi = _grab_tooltip_roi_near_mouse(win)
                     if roi is not None and (_roi_has_plusN(roi, 7) or _roi_has_plusN(roi, 8)):
                         continue
                     x, y = slot_center("BANK_PANEL", c, r)
@@ -6212,15 +6095,6 @@ def _jdelay(base: float, spread: float = 0.02) -> float:
 # === Genel bölge kırpma yardımcıları ===
 def _grab_gray_rect(rect):
     x1, y1, x2, y2 = rect
-    if mss is not None:
-        try:
-            import numpy as _np
-            with mss.mss() as sct:
-                mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-                im = _np.array(sct.grab(mon))[:, :, :3]
-                return cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        except Exception:
-            pass
     img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
 
@@ -8659,7 +8533,6 @@ _TR = {
     'ON_TEMPLATE_TIMEOUT_RESTART': 'şablon gecikirse yeniden başlat',
     'DEBUG_SAVE': 'debug görselleri kaydet',
     'GUI_AUTO_OPEN_SPEED': 'başlangıçta hız sekmesini aç',
-    'TOOLTIP_GRAB_WITH_MSS': 'tooltip yakalamada mss kullan',
     'TOOLTIP_OFFSET_Y': 'tooltip Y ofseti',
     'TOOLTIP_ROI_W': 'tooltip ROI genişlik',
     'TOOLTIP_ROI_H': 'tooltip ROI yükseklik',
@@ -8817,7 +8690,6 @@ _TR_HELP.update({
     "EMPTY_SLOT_THRESHOLD": "Boş slot sayısı ≥ bu değer ise 'çoğunlukla boş' kabul edilir.",
     'ENABLE_YAMA_SLOT_CACHE': 'Boş/dolu sonuçlarını önbelleğe al.',
     'MAX_CACHE_SIZE_PER_SNAPSHOT': 'Tek yakalamada izinli maksimum önbellek pikseli.',
-    'TOOLTIP_GRAB_WITH_MSS': 'Tooltip için mss kullan (genelde daha stabil).',
     'TOOLTIP_OFFSET_Y': 'Tooltip kırpma ofseti (Y).',
     'TOOLTIP_ROI_W': 'Tooltip ROI genişliği.',
     'TOOLTIP_ROI_H': 'Tooltip ROI yüksekliği.',
@@ -8997,7 +8869,6 @@ _ADV_CATEGORY_RULES = (
             'ROI_STALE_MS',
             'UPG_ROI_STALE_MS',
             'COORD_READ_DEBUG',
-            'COORD_USE_MSS',
             'COORD_RESIZE_SCALE',
             'COORD_CONTRAST',
             'COORD_THRESHOLD',
@@ -9012,7 +8883,6 @@ _ADV_CATEGORY_RULES = (
             'EMPTY_SLOT_THRESHOLD',
             'ENABLE_YAMA_SLOT_CACHE',
             'MAX_CACHE_SIZE_PER_SNAPSHOT',
-            'TOOLTIP_GRAB_WITH_MSS',
             'TOOLTIP_OFFSET_Y',
             'TOOLTIP_ROI_W',
             'TOOLTIP_ROI_H',
@@ -11421,45 +11291,6 @@ PLUSN_FAST_MODE = bool(globals().get('PLUSN_FAST_MODE', True))
 PLUSN_HOVER_SAMPLES = int(globals().get('PLUSN_HOVER_SAMPLES', 1))
 PLUSN_WAIT_BETWEEN = float(globals().get('PLUSN_WAIT_BETWEEN', 0.06))
 PLUSN_USE_OCR_FALLBACK = bool(globals().get('PLUSN_USE_OCR_FALLBACK', False))
-TOOLTIP_GRAB_WITH_MSS = bool(globals().get('TOOLTIP_GRAB_WITH_MSS', True))
-
-
-# [YAMA] Tooltip ROI hızlı yakalama (MSS varsa onu kullan)
-def _grab_tooltip_roi_near_mouse_fast(win, roi_w=TOOLTIP_ROI_W, roi_h=TOOLTIP_ROI_H):
-    try:
-        if not bool(globals().get('TOOLTIP_GRAB_WITH_MSS', True)):
-            raise RuntimeError("MSS devre dışı")
-        import mss, numpy as _np, cv2
-        # Mevcut mouse pozisyonundan tepeye doğru roi
-        class _PT:
-            pass
-
-        import ctypes
-        pt = _PT();
-        pt.x = ctypes.c_long();
-        pt.y = ctypes.c_long()
-        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-        mx, my = int(pt.x.value), int(pt.y.value)
-        Lw, Tw, Rw, Bw = win.left, win.top, win.right, win.bottom
-        half = roi_w // 2;
-        x1 = mx - half;
-        y1 = my - (roi_h + TOOLTIP_OFFSET_Y);
-        x2 = x1 + roi_w;
-        y2 = y1 + roi_h
-        x1 = max(Lw, x1);
-        y1 = max(Tw, y1);
-        x2 = min(Rw, x2);
-        y2 = min(Bw, y2)
-        if x2 - x1 < 40 or y2 - y1 < 40: return None
-        with mss.mss() as sct:
-            mon = {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1}
-            im = _np.array(sct.grab(mon))[:, :, :3]
-            import cv2 as _cv2
-            return _cv2.cvtColor(im, _cv2.COLOR_BGR2GRAY)
-    except Exception:
-        return None
-
-
 # >>> [YAMA:GUI_DEFAULTS]
 
 try:
