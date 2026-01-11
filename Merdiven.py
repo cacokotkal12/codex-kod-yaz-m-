@@ -793,7 +793,7 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 1
 X_OKUMA_ADET = 2
-X_OKUMA_GECIKME = 0.03
+X_OKUMA_GECIKME = 0.05
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -904,10 +904,10 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8009866329:AAFyeuZvrwe5klEii66bW10X-_2Uh4BElvk")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1520623463")
 PLUS8_WAIT_MESSAGE = ""
-PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
+PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 3.0
 PLUS8_CYCLE_BANK_START = 0
 PLUS8_CYCLE_SUMMARY_SENT = False
 ITEM_SALE_BANK_NOTIFY = True
@@ -978,8 +978,8 @@ X768_PLAUSIBLE_MAX = 780
 X768_MICRO_BAND = (767, 766, 765, 764, 763)
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
-PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
-PRESS_MAX = 0.1  # S/W mikro basış maksimum (sn)
+PRESS_MIN = 0.25  # S/W mikro basış minimum (sn)
+PRESS_MAX = 0.25  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 50  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
@@ -1047,7 +1047,7 @@ PLUS8_MARGIN = 0.05;
 # ---- Scroll Takası Şablon & Ayarlcacokotkal12 ar ----
 SCROLL_LOW_TEMPLATE_PATHS = ["scroll_low.png", "scroll_low2.png"]
 SCROLL_MID_TEMPLATE_PATHS = ["scroll_mid.png", "scroll_mid2.png"]
-SCROLL_MATCH_THRESHOLD = 0.70;
+SCROLL_MATCH_THRESHOLD = 0.55;
 SCROLL_SCALES = (0.80, 0.90, 1.00, 1.10, 1.20);
 SCROLL_SWAP_MAX_STACKS = 8
 # ---- Scroll arama (sabit nokta yerine tüm UPG/INV içinde) ----
@@ -4756,7 +4756,7 @@ def town_until_valid_x(w):
 # >>> SPEED_AWARE_BEGIN_v2
 # === Hız-Profili Dinamik Fren Mesafesi (X ve Y) ===
 # NE İŞE YARAR: FAST/BALANCED/SAFE → pre_brake_delta seçer ve precise_move_w_to_axis ile hedefe gider.
-_SPEED_PRE_BRAKE = {"FAST": 2, "BALANCED": 3, "SAFE": 4}
+_SPEED_PRE_BRAKE = {"FAST": 5, "BALANCED": 5, "SAFE": 5}
 
 
 def _get_speed_profile():
@@ -8774,7 +8774,7 @@ def _MERDIVEN_RUN_GUI():
             self._accounts_data = _accounts_cache()
             self._active_account_label = tk.StringVar(value="")
             self._stats_keys = ["plus7_bank_count", "plus8_bank_count", "market_sold_total", "last_tur_sold"]
-            dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
+            dm = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 5, "BALANCED": 5, "SAFE": 5})
             self.v["brake_fast"] = tk.IntVar(value=int(dm.get("FAST", 3)))
             self.v["brake_bal"] = tk.IntVar(value=int(dm.get("BALANCED", 2)))
             self.v["brake_safe"] = tk.IntVar(value=int(dm.get("SAFE", 1)))
@@ -10014,7 +10014,7 @@ def _MERDIVEN_RUN_GUI():
             if hasattr(m, "PRESS_MIN"): m.PRESS_MIN = float(self.v["press_min"].get())
             if hasattr(m, "PRESS_MAX"): m.PRESS_MAX = float(self.v["press_max"].get())
             try:
-                d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 3, "BALANCED": 2, "SAFE": 1})
+                d = getattr(m, "_SPEED_PRE_BRAKE", {"FAST": 5, "BALANCED": 5, "SAFE": 5})
                 d.update({"FAST": int(self.v["brake_fast"].get()), "BALANCED": int(self.v["brake_bal"].get()),
                           "SAFE": int(self.v["brake_safe"].get())})
                 setattr(m, "_SPEED_PRE_BRAKE", d)
