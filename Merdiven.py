@@ -1178,7 +1178,7 @@ PLUS8_MARGIN = 0.05;
 # ---- Scroll Takası Şablon & Ayarlcacokotkal12 ar ----
 SCROLL_LOW_TEMPLATE_PATHS = ["scroll_low.png", "scroll_low2.png"]
 SCROLL_MID_TEMPLATE_PATHS = ["scroll_mid.png", "scroll_mid2.png"]
-SCROLL_MATCH_THRESHOLD = 0.70;
+SCROLL_MATCH_THRESHOLD = 0.55;
 SCROLL_SCALES = (0.80, 0.90, 1.00, 1.10, 1.20);
 SCROLL_SWAP_MAX_STACKS = 8
 # ---- Scroll arama (sabit nokta yerine tüm UPG/INV içinde) ----
