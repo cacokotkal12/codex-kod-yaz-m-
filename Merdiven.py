@@ -1022,8 +1022,8 @@ PAZAR_FIRST_CLICK_POS = (902, 135)
 PAZAR_SECOND_CLICK_POS = (899, 399)
 PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8009866329:AAFyeuZvrwe5klEii66bW10X-_2Uh4BElvk")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1520623463")
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 10.0
 PLUS8_CYCLE_BANK_START = 0
@@ -1051,7 +1051,7 @@ TUR_BASLANGIC_ITEM_SAYISI = 0
 
 # ---- Telegram boş banka uyarı ayarları ----
 TELEGRAM_EMPTY_BANK_BURST_COUNT = 1
-TELEGRAM_EMPTY_BANK_INTERVAL_MIN = 10.0
+TELEGRAM_EMPTY_BANK_INTERVAL_MIN = 3
 
 _GUI_UPDATE_SALE_SLOT = None
 _GUI_UPDATE_STATS = None
@@ -1104,13 +1104,13 @@ X768_FIX_TOL = 1
 X768_FIX_STABLE_HITS = 1
 X768_YAKIN_MAX_SICRAMA = 5
 NPC_FREN_MESAFE = 5
-NPC_HIZLI_OKUMA_GECIKME = 0.02
+NPC_HIZLI_OKUMA_GECIKME = 0.05
 NPC_STABIL_HIT = 2
 NPC_X768_OVERSHOOT_MAX_ADIM = 50
 # ---- Mikro Adım ----
 # === 598→597 MİKRO AYAR SABİTLERİ (KULLANICI DÜZENLER) ===
-PRESS_MIN = 0.1  # S/W mikro basış minimum (sn)
-PRESS_MAX = 0.1  # S/W mikro basış maksimum (sn)
+PRESS_MIN = 0.25  # S/W mikro basış minimum (sn)
+PRESS_MAX = 0.25  # S/W mikro basış maksimum (sn)
 MAX_STEPS = 50  # 598→597 düzeltmede en fazla adım
 STUCK_TIMEOUT = 10  # (sn) değişim olmazsa güvenlik bırakma
 # --- Mikro Adım güvenlik denetimi (OTOMATİK) ---
@@ -5275,7 +5275,7 @@ def town_until_valid_x(w):
 # >>> SPEED_AWARE_BEGIN_v2
 # === Hız-Profili Dinamik Fren Mesafesi (X ve Y) ===
 # NE İŞE YARAR: FAST/BALANCED/SAFE → pre_brake_delta seçer ve precise_move_w_to_axis ile hedefe gider.
-_SPEED_PRE_BRAKE = {"FAST": 2, "BALANCED": 3, "SAFE": 4}
+_SPEED_PRE_BRAKE = {"FAST": 5, "BALANCED": 5, "SAFE": 5}
 
 
 def _get_speed_profile():
@@ -8124,7 +8124,7 @@ CONFIG_FIELDS: List[ConfigField] = [
                 _cfg_default("TELEGRAM_EMPTY_BANK_BURST_COUNT", 1),
                 "Banka boşaldığında ardışık gönderilecek mesaj sayısı."),
     ConfigField("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", "Boş banka tekrar süresi (dk)", "Item Satış", "float",
-                _cfg_default("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", 10.0),
+                _cfg_default("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", 3.0),
                 "Banka boş kalmaya devam ederse yeniden uyarı aralığı."),
     ConfigField("TELEGRAM_TOKEN", "Telegram Token", "Item Satış", "str",
                 _cfg_default("TELEGRAM_TOKEN", ""),
