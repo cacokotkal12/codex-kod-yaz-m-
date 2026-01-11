@@ -4011,6 +4011,7 @@ def withdraw_mid_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACK
                     f"[SCROLL] MID çekim tamam: {taken}, boş={inv_empty}"); return taken
                 if slot_is_empty_in_gray(grayp, c, r, "BANK_PANEL", tmpl_empty): continue
                 roi = _cell_roi(grayp, "BANK_PANEL", c, r)
+                if SCROLL_LOW_TEMPLATES and _roi_matches_any_template(roi, SCROLL_LOW_TEMPLATES): continue
                 if _roi_matches_any_template(roi, SCROLL_MID_TEMPLATES):
                     x, y = slot_center("BANK_PANEL", c, r);
                     right_click_enter_at(x, y);
