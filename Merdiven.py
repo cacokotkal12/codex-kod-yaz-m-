@@ -5078,6 +5078,14 @@ def withdraw_plusN_from_bank_pages(win, N: int, max_take=27):
                 if taken >= max_take: print(f"[BANK] İstenen adet: {taken}/{max_take}"); return taken
                 gray = grab_gray_region("BANK_PANEL")
                 if slot_is_empty_in_gray(gray, c, r, "BANK_PANEL", tmpl): continue
+                if N == 7 and (SCROLL_LOW_TEMPLATES or SCROLL_MID_TEMPLATES):
+                    try:
+                        roi = _cell_roi(gray, "BANK_PANEL", c, r)
+                        if (SCROLL_LOW_TEMPLATES and _roi_matches_any_template(roi, SCROLL_LOW_TEMPLATES)) or \
+                                (SCROLL_MID_TEMPLATES and _roi_matches_any_template(roi, SCROLL_MID_TEMPLATES)):
+                            continue
+                    except Exception:
+                        pass
                 if hover_has_plusN(win, "BANK_PANEL", c, r, N, hover_wait=HOVER_WAIT_BANK):
                     x, y = slot_center("BANK_PANEL", c, r);
                     mouse_move(x, y);
