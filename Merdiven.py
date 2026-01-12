@@ -4605,7 +4605,7 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, _RESUME_STATE_PATH)
-            globals()["_RESUME_FORCE_PLUS8_CHECK"] = True
+            globals()["_RESUME_FORCE_PLUS8_CHECK"] = False
             globals()["_RESUME_STATE_DATA"] = data
         except Exception:
             pass
