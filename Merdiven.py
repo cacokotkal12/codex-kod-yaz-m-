@@ -6457,7 +6457,7 @@ def run_stairs_and_workflow(w):
                 ascend_stairs_to_top(w)
                 continue
 
-            resume_check = bool(globals().get("_RESUME_FORCE_PLUS8_CHECK", False))
+            resume_check = bool(globals().get("_RESUME_FORCE_PLUS8_CHECK", False)) and str(MODE) != "BANK_PLUS7"
             if (not resume_check) and (keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME):
                 _set_mode_bank_plus8("Klavye/Resume")
                 print("[KAMPANYA] +8 modu (F/Resume).")
