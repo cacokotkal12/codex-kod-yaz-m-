@@ -3900,7 +3900,9 @@ def hover_has_plusN(win, region, col, row, N: int, hover_wait=None):
             if N == 7:
                 if _match_plus7_templates_on(roi, 0.78) or _match_plus7_templates_on(roi, 0.80): return True
             elif N == 8:
-                if _match_plus8_templates_on(roi, 0.76) or _match_plus8_templates_on(roi, 0.78): return True
+                if _match_plus8_templates_on(roi, 0.76) or _match_plus8_templates_on(roi, 0.78):
+                    if _match_plus6_templates_on(roi, 0.78) or _match_plus6_templates_on(roi, 0.80): return False
+                    return True
             if i < samples - 1: time.sleep(wait_between)
         if use_ocr and last_roi is not None:
             return _roi_has_plusN(last_roi, N)
@@ -6457,7 +6459,7 @@ def run_stairs_and_workflow(w):
                 ascend_stairs_to_top(w)
                 continue
 
-            resume_check = bool(globals().get("_RESUME_FORCE_PLUS8_CHECK", False))
+            resume_check = bool(globals().get("_RESUME_FORCE_PLUS8_CHECK", False)) and str(MODE) != "BANK_PLUS7"
             if (not resume_check) and (keyboard.is_pressed("f") or MODE == "BANK_PLUS8" or PLUS8_RESUME):
                 _set_mode_bank_plus8("Klavye/Resume")
                 print("[KAMPANYA] +8 modu (F/Resume).")
