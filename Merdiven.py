@@ -4861,6 +4861,7 @@ def _workflow_precondition_gate(w):
 def ascend_stairs_to_top(w):
     global NEED_STAIRS_REALIGN
     set_stage("ASCEND_STAIRS");
+    _set_town_hardlock_state(True, "ASCEND_STAIRS")
     ensure_ui_closed()
     try:
         x, _ = read_coordinates(w)
@@ -4896,7 +4897,14 @@ def ascend_stairs_to_top(w):
     ok = go_w_to_y(w, target_y, timeout=Y_SEEK_TIMEOUT)
     if not ok:
         print("[STAIRS] go_w_to_y başarısız → town & retry");
-        send_town_command()
+        try:
+            exit_game_fast(w)
+        except Exception as e:
+            print("[STAIRS] exit_game_fast hata:", e)
+        try:
+            relaunch_and_login_to_ingame()
+        except Exception as e:
+            print("[STAIRS] relaunch hata:", e)
         return
 
     _finalize_top(_read_y_now())
@@ -4955,7 +4963,7 @@ def send_town_command(*a, force=False, wait_override=None, **kw):
     # Y==598 ise kilit aktif → town iptal; diğer tüm durumlarda serbest
     global TOWN_LOCKED, BANK_OPEN
     stage_now = _normalize_stage_name(globals().get("_current_stage", ""))
-    if _stage_allows_town_recover(stage_now) and globals().get('TOWN_HARD_LOCK', False):
+    if stage_now != "ASCEND_STAIRS" and _stage_allows_town_recover(stage_now) and globals().get('TOWN_HARD_LOCK', False):
         _set_town_hardlock_state(False, "RECOVER_STAGE_TOWN")
     # [YAMA] HardLock aktifse town tamamen kapalı
     if globals().get('TOWN_HARD_LOCK', False):
@@ -6469,6 +6477,7 @@ def run_stairs_and_workflow(w):
                 run_bank_plus8_cycle(w, bank_is_open=BANK_OPEN)
                 print("[KAMPANYA] +8 modu tamam → NORMAL.")
                 _set_mode_normal("BANK_PLUS8 döngü tamam")
+                globals()["_RESUME_FORCE_PLUS8_CHECK"] = False
                 continue
 
             try:
@@ -6527,6 +6536,7 @@ def run_stairs_and_workflow(w):
                         run_bank_plus8_cycle(w, bank_is_open=True)
                         print("[KAMPANYA] +8 modu tamam → NORMAL.")
                         _set_mode_normal("BANK_PLUS8 döngü tamam")
+                        globals()["_RESUME_FORCE_PLUS8_CHECK"] = False
                     continue
 
             do_plus7 = FORCE_PLUS7_ONCE or (GLOBAL_CYCLE >= NEXT_PLUS7_CHECK_AT)
