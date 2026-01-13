@@ -6201,7 +6201,10 @@ def relaunch_and_login_to_ingame():
                 with open(_RESUME_STATE_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 globals()["_RESUME_STATE_DATA"] = data
-                globals()["_RESUME_FORCE_PLUS8_CHECK"] = True
+                if globals().get("MODE", "") == "BANK_PLUS8" or globals().get("PLUS8_RESUME", False):
+                    globals()["_RESUME_FORCE_PLUS8_CHECK"] = True
+                else:
+                    globals()["_RESUME_FORCE_PLUS8_CHECK"] = False
         except Exception:
             pass
         return w
