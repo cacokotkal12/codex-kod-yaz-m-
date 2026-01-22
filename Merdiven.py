@@ -690,6 +690,10 @@ class GUIAbort(RuntimeError):
     """GUI'den gelen anlık durdurma isteği."""
 
 
+class RecoverableError(RuntimeError):
+    pass
+
+
 def _raise_gui_abort(msg: str = "GUI durdurma isteği"):
     exc = globals().get("GUIAbort", GUIAbort)
     raise exc(msg)
@@ -717,6 +721,13 @@ def crashguard(stage=""):
             except GUIAbort:
                 raise
             except Exception as e:
+                if _is_win_error_1400(e):
+                    try:
+                        _invalidate_window_cache()
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                    raise RecoverableError("WIN1400")
                 dump_crash(e, stage or fn.__name__);
                 try:
                     _handle_runtime_error(e, stage or fn.__name__)
@@ -3341,10 +3352,36 @@ def scroll_alma_stage(w, adet=SCROLL_ALIM_ADET):
     return _run_scroll_purchase_flow(w, adet, (737, 183), prefix="[SCROLL] LOW")
 
 # ================== Görüntü/Template Yardımcıları ==================
-def grab_window_gray(win):
-    x1, y1, x2, y2 = win.left, win.top, win.right, win.bottom
-    img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
-    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+def grab_window_gray(win, roi=None):
+    w = win
+    if w is None:
+        w, _rect = ensure_knight_online_window("grab_window_gray", existing_window=None, focus=False, want_rect=False,
+                                               attempts=3, retry_delay=0.5)
+        if not w:
+            return None
+
+    def _do_grab(_w):
+        if roi is not None:
+            x1, y1, x2, y2 = [int(v) for v in roi]
+        else:
+            x1, y1, x2, y2 = _w.left, _w.top, _w.right, _w.bottom
+        img = ImageGrab.grab(bbox=(x1, y1, x2, y2))
+        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+
+    try:
+        return _do_grab(w)
+    except Exception as exc:
+        if _is_win_error_1400(exc):
+            _invalidate_window_cache()
+            w, _rect = ensure_knight_online_window("grab_window_gray", existing_window=None, focus=False,
+                                                   want_rect=False, attempts=3, retry_delay=0.5)
+            if not w:
+                return None
+            try:
+                return _do_grab(w)
+            except Exception:
+                return None
+        return None
 
 
 def match_template_multiscale(hay_gray, tmpl_gray, scales):
@@ -3515,9 +3552,9 @@ def _game_start_template_paths():
     return paths
 
 
-def _is_template_visible(win, templates, scales, threshold):
+def _is_template_visible(win, templates, scales, threshold, roi=None):
     try:
-        gray = grab_window_gray(win)
+        gray = grab_window_gray(win, roi=roi)
     except Exception:
         return False
     for path in templates:
@@ -3547,6 +3584,7 @@ def _click_game_start_fallback(win):
 def _wait_start_transition(win, templates, scales, timeout):
     deadline = time.time() + timeout
     has_templates = bool(templates)
+    not_visible_count = 0
     while time.time() < deadline:
         if _EMPTY_BANK_STOP_EVENT.is_set():
             break
@@ -3555,8 +3593,15 @@ def _wait_start_transition(win, templates, scales, timeout):
                 return True
         except Exception:
             pass
-        if has_templates and not _is_template_visible(win, templates, scales, globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD)):
-            return True
+        if has_templates:
+            if not _is_template_visible(win, templates, scales,
+                                        globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD),
+                                        roi=globals().get("GAME_START_ROI", GAME_START_ROI)):
+                not_visible_count += 1
+                if not_visible_count >= 3:
+                    return True
+            else:
+                not_visible_count = 0
         time.sleep(0.4)
     return False
 
@@ -3567,6 +3612,7 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
     templates = _game_start_template_paths()
     scales = _game_start_scale_list()
     for attempt in range(1, int(attempts) + 1):
+        skip_fallback = False
         wait_if_paused();
         watchdog_enforce()
         if not templates:
@@ -3591,13 +3637,39 @@ def try_click_oyun_start_with_retries(w, attempts=5, wait_between=4.0):
                             _extra_key_count = 1
                         for _ in range(_extra_key_count):
                             _press_named_key_once(globals().get("POST_START_EXTRA_KEY", "ENTER"))
-                    if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+                    start_visible = _is_template_visible(w, templates, scales,
+                                                         globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD),
+                                                         roi=globals().get("GAME_START_ROI", GAME_START_ROI))
+                    if not start_visible:
+                        if confirm_loading_until_ingame(w, timeout=20.0, allow_periodic_enter=False):
+                            return True
+                        print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
+                        skip_fallback = True
+                        break
+                    if _wait_start_transition(w, templates, scales,
+                                              globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
                         return True
                     print("[START] Tık sonrası geçiş teyidi yok, tekrar dene.")
                     break
+        if skip_fallback:
+            if attempt < attempts:
+                time.sleep(max(0.5, float(wait_between)))
+            continue
         _click_game_start_fallback(w)
-        if _wait_start_transition(w, templates, scales, globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
-            return True
+        if templates:
+            start_visible = _is_template_visible(w, templates, scales,
+                                                 globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD),
+                                                 roi=globals().get("GAME_START_ROI", GAME_START_ROI))
+            if not start_visible:
+                if confirm_loading_until_ingame(w, timeout=20.0, allow_periodic_enter=False):
+                    return True
+            if _wait_start_transition(w, templates, scales,
+                                      globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+                return True
+        else:
+            if _wait_start_transition(w, templates, scales,
+                                      globals().get("GAME_START_VERIFY_TIMEOUT", GAME_START_VERIFY_TIMEOUT)):
+                return True
         if attempt < attempts:
             time.sleep(max(0.5, float(wait_between)))
     _capture_debug_screenshot("start_fail")
@@ -6014,6 +6086,13 @@ def safe_press_enter_if_not_ingame(w):
                 return False
         else:
             pass
+    start_templates = _game_start_template_paths()
+    if start_templates:
+        start_scales = _game_start_scale_list()
+        if not _is_template_visible(w, start_templates, start_scales,
+                                    globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD),
+                                    roi=globals().get("GAME_START_ROI", GAME_START_ROI)):
+            return False
     press_key(SC_ENTER);
     release_key(SC_ENTER);
     print("[ENTER] Enter basıldı.");
@@ -6071,7 +6150,16 @@ def _market_icon_score(win):
         return 0.0
 
 
-def is_ingame(win):
+_INGAME_COORD_LAST_TS = 0.0
+_INGAME_COORD_LAST_OK = False
+_LAST_INGAME_HP = False
+_LAST_INGAME_MARKET_SCORE = 0.0
+_LAST_INGAME_COORD = False
+
+
+def is_ingame(win, log=True):
+    global _INGAME_COORD_LAST_TS, _INGAME_COORD_LAST_OK
+    global _LAST_INGAME_HP, _LAST_INGAME_MARKET_SCORE, _LAST_INGAME_COORD
     hp_ok = False;
     market_score = 0.0;
     market_ok = False
@@ -6085,11 +6173,28 @@ def is_ingame(win):
     except Exception:
         market_score = 0.0;
         market_ok = False
+    coord_ok = _INGAME_COORD_LAST_OK
     try:
-        print(f"[INGAME] HP={hp_ok} Market={market_score:.3f} → {'OK' if (hp_ok or market_ok) else 'BEKLE'}")
+        now = time.time()
+    except Exception:
+        now = 0.0
+    if now - float(_INGAME_COORD_LAST_TS or 0.0) >= 1.0:
+        try:
+            x, y = read_coordinates(win)
+            coord_ok = (x is not None and y is not None and 0 <= x <= 3000 and 0 <= y <= 3000)
+        except Exception:
+            coord_ok = False
+        _INGAME_COORD_LAST_TS = now
+        _INGAME_COORD_LAST_OK = coord_ok
+    _LAST_INGAME_HP = bool(hp_ok)
+    _LAST_INGAME_MARKET_SCORE = float(market_score)
+    _LAST_INGAME_COORD = bool(coord_ok)
+    try:
+        if log:
+            print(f"[INGAME] HP={hp_ok} Market={market_score:.3f} Coord={coord_ok} → {'OK' if (hp_ok or market_ok or coord_ok) else 'BEKLE'}")
     except Exception:
         pass
-    return hp_ok or market_ok
+    return hp_ok or market_ok or coord_ok
 
 
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
@@ -6112,7 +6217,15 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
             _window_retry_message(1, 3)
             time.sleep(poll)
             continue
-        if is_ingame(w): print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
+        ingame_ok = is_ingame(w, log=False)
+        try:
+            hp_ok = bool(globals().get("_LAST_INGAME_HP", False))
+            market_score = float(globals().get("_LAST_INGAME_MARKET_SCORE", 0.0))
+            coord_ok = bool(globals().get("_LAST_INGAME_COORD", False))
+            print(f"[INGAME] HP={hp_ok} Market={market_score:.3f} Coord={coord_ok} → {'OK' if ingame_ok else 'BEKLE'}")
+        except Exception:
+            pass
+        if ingame_ok: print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
         if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
             w); last_enter = time.time()
         time.sleep(poll)
