@@ -971,7 +971,7 @@ MARKET_ROI = (14, 759, 50, 792)
 MARKET_THRESHOLD = 0.80
 MARKET_SCALES = (0.90, 1.00, 1.10)
 MARKET_CONSEC_HITS_REQUIRED = 2
-MARKET_CONSEC_MAX_GAP_SEC = 0.5
+MARKET_CONSEC_MAX_GAP_SEC = 0.2
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
