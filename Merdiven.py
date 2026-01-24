@@ -773,7 +773,7 @@ def _bye(): log("[EXIT] program sonlandı")
 
 # ============================== KULLANICI AYARLARI ==============================
 # ---- Hız / Tıklama / Jitter ----
-tus_hizi = 0.050;
+tus_hizi = 0.060;
 mouse_hizi = 0.1;
 jitter_px = 0
 # ---- OCR / Tesseract ----
@@ -866,6 +866,7 @@ WINDOW_APPEAR_TIMEOUT = 120.0
 LOGIN_USERNAME = os.getenv("KO_USER", "cacokotkal12");
 LOGIN_PASSWORD = os.getenv("KO_PASS", "Vaz14999999jS@1")
 LOGIN_TYPE_DELAY = 0.03  # sn / karakter
+LOGIN_DEBUG_CRED = False  # True: ID maskeli log (şifre asla yazmaz)
 # Bu alanları kendi ekranına göre ayarla (gerekirse TAB ile de ilerliyor):
 LOGIN_USERNAME_CLICK_POS = (579, 326)  # kullanıcı adı alanı
 LOGIN_PASSWORD_CLICK_POS = (579, 378)  # şifre alanı
@@ -907,6 +908,12 @@ PAZAR_CONFIRM_CLICK_POS = (512, 290)
 PAZAR_DROP_TARGET = (383, 237)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8009866329:AAFyeuZvrwe5klEii66bW10X-_2Uh4BElvk")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1520623463")
+TELEGRAM_ALERT_ENABLE = True  # NE İŞE YARAR: Takılma/uyarı durumlarında Telegram bildirimini aç/kapat.
+TELEGRAM_ALERT_COOLDOWN_GLOBAL = 20.0  # NE İŞE YARAR: Art arda mesaj spamini engeller (saniye).
+TELEGRAM_ALERT_COOLDOWN_PER_EVENT = 120.0  # NE İŞE YARAR: Aynı hatadan tekrar tekrar mesajı engeller (saniye).
+TELEGRAM_ALERT_MAX_PER_HOUR = 30  # NE İŞE YARAR: Saatlik maksimum Telegram mesaj limiti.
+# Not: TELEGRAM_TOKEN ve TELEGRAM_CHAT_ID zaten dosyada var (env ile de verilebilir).
+
 PLUS8_WAIT_MESSAGE = ""
 PLUS8_WAIT_MESSAGE_INTERVAL_MIN = 3.0
 PLUS8_CYCLE_BANK_START = 0
@@ -2192,6 +2199,49 @@ def _notify_error_telegram_once(message: str) -> bool:
             pass
     return ok
 
+# === [PATCH_TELEGRAM_ALERTS] ===
+_TG_EVENT_LAST_TS = {}
+_TG_GLOBAL_LAST_TS = 0.0
+_TG_HOURLY_TS = []
+
+def _tg_trim_hourly(now: float):
+    # NE İŞE YARAR: Saatlik limit için eski timestamp'leri temizler.
+    try:
+        cutoff = now - 3600.0
+        while _TG_HOURLY_TS and _TG_HOURLY_TS[0] < cutoff: _TG_HOURLY_TS.pop(0)
+    except Exception: pass
+
+def _notify_event_telegram(event_key: str, message: str) -> bool:
+    # NE İŞE YARAR: Hata/uyarı için Telegram mesajı yollar (spam korumalı).
+    if not globals().get("TELEGRAM_ALERT_ENABLE", True): return False
+    key = str(event_key or "EVENT").strip()[:64]
+    msg = str(message or "").strip()
+    if not msg: return False
+    now = time.time()
+    global _TG_GLOBAL_LAST_TS
+    try:
+        if now - float(_TG_GLOBAL_LAST_TS or 0.0) < float(globals().get("TELEGRAM_ALERT_COOLDOWN_GLOBAL", 20.0) or 0.0): return False
+        last = float(_TG_EVENT_LAST_TS.get(key, 0.0) or 0.0)
+        if now - last < float(globals().get("TELEGRAM_ALERT_COOLDOWN_PER_EVENT", 120.0) or 0.0): return False
+        _tg_trim_hourly(now)
+        maxh = int(globals().get("TELEGRAM_ALERT_MAX_PER_HOUR", 30) or 0)
+        if maxh > 0 and len(_TG_HOURLY_TS) >= maxh: return False
+    except Exception: pass
+    try:
+        stg = str(globals().get("_current_stage", "") or "").strip()
+        mode = str(globals().get("MODE", "") or "").strip()
+        if stg or mode: msg = f"{msg} | stage={stg or '-'} mode={mode or '-'}"
+    except Exception: pass
+    ok=False
+    try: ok = send_telegram_message(msg)
+    except Exception: ok=False
+    if ok:
+        _TG_GLOBAL_LAST_TS = now; _TG_EVENT_LAST_TS[key] = now
+        try: _TG_HOURLY_TS.append(now)
+        except Exception: pass
+    return ok
+# === [/PATCH_TELEGRAM_ALERTS] ===
+
 
 def _telegram_command_listener_loop():
     global _TELEGRAM_UPDATE_OFFSET
@@ -2997,37 +3047,27 @@ def _login_input_text(text: str, label: str = "", target_window=None) -> str:
 def perform_login_inputs(w):
     """NE İŞE YARAR: Login ekranında kullanıcı adı/şifreyi SAĞLAM şekilde yazar ve Enter basar."""
     # (Kendi ekranına göre LOGIN_*_CLICK_POS ayarlayabilirsin)
-    if w is None or not _is_window_valid(w):
-        w = bring_game_window_to_front()
-    if not w:
-        print("[LOGIN] Pencere bulunamadı; yazım başlatılmadı.")
+    if w is None or not _is_window_valid(w):w=bring_game_window_to_front()
+    if not w:print("[LOGIN] Pencere bulunamadı; yazım başlatılmadı.");return False
+    if not _ensure_window_focus(w, timeout=5.0):print("[LOGIN] Pencere odakta değil; yazım başlatılmadı.");return False
+    if _abort_requested():_raise_gui_abort("Login yazımı başlatılmadan durduruldu")
+    # PATCH: ID/Şifre boşsa login denemesini DURDUR (ID yazmadan şifre yazma sorunu)
+    u=str((globals().get("LOGIN_USERNAME") or "")).strip();p=str((globals().get("LOGIN_PASSWORD") or "")).strip()
+    if not u or not p:
+        print(f"[LOGIN] HATA: ID/Şifre boş (id_len={len(u)},sifre_len={len(p)}). GUI'den hesap seç/ID-Şifre gir.")
         return False
-    if not _ensure_window_focus(w, timeout=5.0):
-        print("[LOGIN] Pencere odakta değil; yazım başlatılmadı.")
-        return False
-    if _abort_requested():
-        _raise_gui_abort("Login yazımı başlatılmadan durduruldu")
-    mouse_move(*LOGIN_USERNAME_CLICK_POS);
-    mouse_click("left");
-    time.sleep(0.1)
-    username_method = _login_input_text(LOGIN_USERNAME, "username", target_window=w);
-    time.sleep(0.1)
-    press_key(SC_TAB);
-    release_key(SC_TAB);
-    time.sleep(0.1)
+    if globals().get("LOGIN_DEBUG_CRED", False):
+        um=(u[:2]+"***"+u[-2:]) if len(u)>=4 else (u[0]+"***" if u else "***")
+        print(f"[LOGIN] Kaynak={globals().get('_ACTIVE_ACCOUNT_NAME','') or 'MANUAL'} id={um} sifre=***")
+    mouse_move(*LOGIN_USERNAME_CLICK_POS);mouse_click("left");time.sleep(0.1)
+    username_method=_login_input_text(u,"username",target_window=w);time.sleep(0.1)
+    press_key(SC_TAB);release_key(SC_TAB);time.sleep(0.1)
     # Eğer TAB ile odak geçmiyorsa şifre alanını tıkla:
-    mouse_move(*LOGIN_PASSWORD_CLICK_POS);
-    mouse_click("left");
-    time.sleep(0.1)
-    password_method = _login_input_text(LOGIN_PASSWORD, "password", target_window=w);
-    time.sleep(0.1)
-    press_key(SC_ENTER);
-    release_key(SC_ENTER);
-    time.sleep(0.4)
+    mouse_move(*LOGIN_PASSWORD_CLICK_POS);mouse_click("left");time.sleep(0.1)
+    password_method=_login_input_text(p,"password",target_window=w);time.sleep(0.1)
+    press_key(SC_ENTER);release_key(SC_ENTER);time.sleep(0.4)
     # Bazı clientlarda iki kez Enter gerekiyor:
-    press_key(SC_ENTER);
-    release_key(SC_ENTER);
-    time.sleep(0.4)
+    press_key(SC_ENTER);release_key(SC_ENTER);time.sleep(0.4)
     print(f"[LOGIN] Username/Password yazıldı ({username_method}/{password_method}) ve Enter basıldı.")
     return True
 
@@ -4045,7 +4085,7 @@ def _cell_roi(gray, region, c, r): x1, y1, x2, y2 = cell_rect_in_img(c, r, gray.
 
 
 def deposit_low_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS):
-    if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); return 0
+    if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); _notify_event_telegram("SCROLL_LOW_TEMPLATES_MISSING","[SCROLL] Low templates yok."); return 0
     set_stage("SCROLL_DEPOSIT_LOW");
     moved = 0;
     gray = grab_gray_region("BANK");
@@ -4067,7 +4107,7 @@ def deposit_low_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS
 
 
 def withdraw_mid_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACKS):
-    if not SCROLL_MID_TEMPLATES: print("[SCROLL] Mid templates yok."); return 0
+    if not SCROLL_MID_TEMPLATES: print("[SCROLL] Mid templates yok."); _notify_event_telegram("SCROLL_MID_TEMPLATES_MISSING","[SCROLL] Mid templates yok."); return 0
     set_stage("SCROLL_WITHDRAW_MID");
     taken = 0;
     inv_empty = count_empty_slots("BANK")
@@ -4097,7 +4137,7 @@ def withdraw_mid_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACK
 
 
 def deposit_mid_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS):
-    if not SCROLL_MID_TEMPLATES: print("[SCROLL] Mid templates yok."); return 0
+    if not SCROLL_MID_TEMPLATES: print("[SCROLL] Mid templates yok."); _notify_event_telegram("SCROLL_MID_TEMPLATES_MISSING","[SCROLL] Mid templates yok."); return 0
     set_stage("SCROLL_DEPOSIT_MID");
     moved = 0;
     gray = grab_gray_region("BANK");
@@ -4119,7 +4159,7 @@ def deposit_mid_scrolls_from_inventory_to_bank(max_stacks=SCROLL_SWAP_MAX_STACKS
 
 
 def withdraw_low_scrolls_from_bank_to_inventory(max_stacks=SCROLL_SWAP_MAX_STACKS):
-    if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); return 0
+    if not SCROLL_LOW_TEMPLATES: print("[SCROLL] Low templates yok."); _notify_event_telegram("SCROLL_LOW_TEMPLATES_MISSING","[SCROLL] Low templates yok."); return 0
     set_stage("SCROLL_WITHDRAW_LOW");
     taken = 0;
     inv_empty = count_empty_slots("BANK")
@@ -5012,7 +5052,7 @@ def move_to_769_and_turn_from_top(w):
     time.sleep(TURN_RIGHT_SEC);
     release_key(SC_D)
     ok = go_w_to_y(w, TARGET_Y_AFTER_TURN, timeout=Y_SEEK_TIMEOUT)
-    if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
+    if not ok: print("[Uyarı] 648 y hedeflemesi zaman aşımı (storage)."); _notify_event_telegram("STORAGE_Y648_TIMEOUT","[Uyarı] 648 y hedeflemesi zaman aşımı (storage).")
     time.sleep(0.05);
     press_key(SC_B);
     release_key(SC_B);
@@ -5021,10 +5061,10 @@ def move_to_769_and_turn_from_top(w):
     mouse_click("right");
     time.sleep(0.2)
     tpl = pick_existing_template(USE_STORAGE_TEMPLATE_PATHS)
-    if not tpl: print("[STORAGE] 'Use Storage' template yok."); return False
+    if not tpl: print("[STORAGE] 'Use Storage' template yok."); _notify_event_telegram("STORAGE_USE_STORAGE_TEMPLATE_MISSING","[STORAGE] 'Use Storage' template yok."); return False
     ok = wait_and_click_template(w, tpl, threshold=USE_STORAGE_MATCH_THRESHOLD, timeout=USE_STORAGE_FIND_TIMEOUT,
                                  scales=USE_STORAGE_SCALES)
-    if not ok: print("[STORAGE] 'Use Storage' bulunamadı."); return False
+    if not ok: print("[STORAGE] 'Use Storage' bulunamadı."); _notify_event_telegram("STORAGE_USE_STORAGE_NOT_FOUND","[STORAGE] 'Use Storage' bulunamadı."); return False
     print("[STORAGE] 'Use Storage' tıklandı → banka.");
     time.sleep(0.4);
     BANK_OPEN = True;
@@ -6069,7 +6109,7 @@ def npc_post_purchase_route_to_anvil_and_upgrade(w):
 
 
 # ================== RE-LAUNCH & LOGIN ==================
-def safe_press_enter_if_not_ingame(w):
+def safe_press_enter_if_not_ingame(w, force=False):
     w, _ = ensure_knight_online_window("safe_press_enter_if_not_ingame", existing_window=w, focus=True, want_rect=False,
                                        attempts=5, retry_delay=0.6)
     if not w:
@@ -6087,7 +6127,7 @@ def safe_press_enter_if_not_ingame(w):
         else:
             pass
     start_templates = _game_start_template_paths()
-    if start_templates:
+    if start_templates and not force:
         start_scales = _game_start_scale_list()
         if not _is_template_visible(w, start_templates, start_scales,
                                     globals().get("GAME_START_MATCH_THRESHOLD", GAME_START_MATCH_THRESHOLD),
@@ -6251,7 +6291,7 @@ def relaunch_and_login_to_ingame():
             set_stage("RELAUNCH_SPLASH_PASS");
             time.sleep(0.5)
             for _ in range(2): time.sleep(1.5); mouse_move(*SPLASH_CLICK_POS); mouse_click("left"); time.sleep(0.5)
-            safe_press_enter_if_not_ingame(w);
+            safe_press_enter_if_not_ingame(w, force=True);
             print("[RELAUNCH] Splash geçildi.")
             set_stage("RELAUNCH_LOGIN_INPUT");
             time.sleep(0.5);
@@ -6780,7 +6820,7 @@ def main():
                     time.sleep(0.5)
                     for _ in range(2): time.sleep(1.5); mouse_move(*SPLASH_CLICK_POS); mouse_click("left"); time.sleep(
                         0.5)
-                    safe_press_enter_if_not_ingame(w);
+                    safe_press_enter_if_not_ingame(w, force=True);
                     print(">>> Splash geçildi. Login.")
                     set_stage("LOGIN_INPUT");
                     time.sleep(0.5);
@@ -10115,18 +10155,24 @@ def _MERDIVEN_RUN_GUI():
 
         def apply_core(self):
             # login
-            applied_active = False
+            applied_active=False;active_name=""
+            try:active_name=self.v["active_account"].get().strip()
+            except Exception:active_name=""
+            # GUI boşsa, accounts.json içindeki 'active' hesabı dene (tesadüfi boşalma yüzünden ID/Şifre ezilmesin)
+            if not active_name:
+                try:active_name=str(_accounts_cache(refresh=True).get("active","") or "").strip()
+                except Exception:active_name=""
             try:
-                active_name = self.v["active_account"].get().strip()
-                if active_name:
-                    applied_active = _set_active_account(active_name)
-            except Exception:
-                applied_active = False
+                if active_name:applied_active=_set_active_account(active_name)
+            except Exception:applied_active=False
             if not applied_active:
-                if hasattr(m, "LOGIN_USERNAME"): m.LOGIN_USERNAME = self.v["username"].get()
-                if hasattr(m, "LOGIN_PASSWORD"): m.LOGIN_PASSWORD = self.v["password"].get()
-                globals()["_ACTIVE_ACCOUNT_NAME"] = ""
-                globals()["ACTIVE_ACCOUNT_LABEL"] = ""
+                # Manuel alanlar BOŞSA runtime değerleri EZME (aksi halde ID boş kalır, direkt şifre yazar)
+                u=self.v["username"].get();p=self.v["password"].get()
+                if u and hasattr(m,"LOGIN_USERNAME"):m.LOGIN_USERNAME=u
+                if p and hasattr(m,"LOGIN_PASSWORD"):m.LOGIN_PASSWORD=p
+                if u or p:
+                    globals()["_ACTIVE_ACCOUNT_NAME"]=""
+                    globals()["ACTIVE_ACCOUNT_LABEL"]=""
             try:
                 m.LOGIN_TYPE_DELAY = float(self.v["login_type_delay"].get())
             except Exception:
@@ -10376,8 +10422,8 @@ except Exception as _e:
 
 # ---- Ayarlar (GUI ile değişebilir) ----
 UPG_USE_FAST_MOUSE = True
-UPG_MOUSE_HIZI = 0.05
-UPG_TUS_HIZI = 0.05
+UPG_MOUSE_HIZI = 0.06
+UPG_TUS_HIZI = 0.06
 ANVIL_CONFIRM_WAIT_MS = 40
 ROI_STALE_MS = 50
 
