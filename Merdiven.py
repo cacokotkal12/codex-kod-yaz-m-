@@ -965,14 +965,13 @@ def _choose_server_xy():
     return random.choice(SERVER_CHOICES)
 
 
-# ---- HP Bar / In-Game Teyit ----
-HP_POINTS = [(185, 68), (218, 74)];
-HP_RED_MIN = 120.0;
-HP_RED_DELTA = 35.0
+# ---- In-Game Teyit (Market) ----
 MARKET_TEMPLATE_PATH = "market.png"
 MARKET_ROI = (14, 759, 50, 792)
 MARKET_THRESHOLD = 0.80
 MARKET_SCALES = (0.90, 1.00, 1.10)
+MARKET_CONSEC_HITS_REQUIRED = 2
+MARKET_CONSEC_MAX_GAP_SEC = 0.5
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
@@ -4318,6 +4317,8 @@ def detect_w_direction(w, axis: str, pulses=4, dp=0.020, target=None) -> int:
     if base is None:
         # Ölçüm yoksa güvenli varsayım: ileri (artıyor)
         return +1
+    up_votes = 0
+    down_votes = 0
     for _ in range(pulses):
         with key_tempo(0.0):
             press_key(SC_W);
@@ -4326,8 +4327,21 @@ def detect_w_direction(w, axis: str, pulses=4, dp=0.020, target=None) -> int:
         time.sleep(MICRO_READ_DELAY);
         newv = _read_axis(w, axis)
         if newv is None: continue
-        if newv > base: return +1
-        if newv < base: return -1
+        try:
+            if abs(int(newv) - int(base)) > 5:
+                continue
+        except Exception:
+            pass
+        if newv > base:
+            up_votes += 1
+            continue
+        if newv < base:
+            down_votes += 1
+            continue
+    if up_votes > down_votes:
+        return +1
+    if down_votes > up_votes:
+        return -1
     # Değişim okunamadı: hedef ipucuyla yönü seç
     if target is not None:
         try:
@@ -4843,6 +4857,12 @@ def precise_move_w_to_axis(w, axis: str, target: int, timeout: float = 20.0, pre
     if overshoot_failed:
         return _finish_prec_move(False)
     direction = detect_w_direction(w, axis, target=target);
+    if direction != expected_dir:
+        try:
+            print(f"[PREC][DIR] override: detect={direction} expected={expected_dir} (OCR jitter)")
+        except Exception:
+            pass
+        direction = expected_dir
     print(f"[PREC] {axis.upper()} yön: {'artıyor' if direction == 1 else 'azalıyor'}")
 
     seq = [pulse * 0.5, pulse * 0.66, pulse * 0.8, pulse]
@@ -6139,35 +6159,6 @@ def safe_press_enter_if_not_ingame(w, force=False):
     return True
 
 
-def _mean_rgb_around(win, rx, ry, size=7):
-    w, rect = ensure_knight_online_window("_mean_rgb_around", existing_window=win, focus=False, want_rect=True,
-                                          attempts=5, retry_delay=0.5)
-    if not w or rect is None:
-        return 0.0, 0.0, 0.0
-    x = rect[0] + rx;
-    y = rect[1] + ry;
-    k = size // 2;
-    x1 = max(0, x - k);
-    y1 = max(0, y - k);
-    x2 = x + k + 1;
-    y2 = y + k + 1
-    img = ImageGrab.grab(bbox=(x1, y1, x2, y2));
-    arr = np.array(img)[:, :, :3].reshape(-1, 3).astype(np.float32);
-    m = arr.mean(axis=0);
-    return float(m[0]), float(m[1]), float(m[2])
-
-
-def _is_red(rgb, r_min=HP_RED_MIN, delta=HP_RED_DELTA):
-    r, g, b = rgb;
-    return (r >= r_min) and (r - max(g, b) >= delta)
-
-
-def _ingame_by_hpbar_once(win):
-    rgb1 = _mean_rgb_around(win, HP_POINTS[0][0], HP_POINTS[0][1], 7);
-    rgb2 = _mean_rgb_around(win, HP_POINTS[1][0], HP_POINTS[1][1], 7)
-    return _is_red(rgb1) and _is_red(rgb2)
-
-
 def _market_icon_score(win):
     try:
         w, rect = ensure_knight_online_window("_market_icon_score", existing_window=win, focus=False, want_rect=True,
@@ -6190,56 +6181,51 @@ def _market_icon_score(win):
         return 0.0
 
 
-_INGAME_COORD_LAST_TS = 0.0
-_INGAME_COORD_LAST_OK = False
-_LAST_INGAME_HP = False
 _LAST_INGAME_MARKET_SCORE = 0.0
-_LAST_INGAME_COORD = False
+_INGAME_MARKET_HITS = 0
+_INGAME_MARKET_LAST_HIT_TS = 0.0
 
 
 def is_ingame(win, log=True):
-    global _INGAME_COORD_LAST_TS, _INGAME_COORD_LAST_OK
-    global _LAST_INGAME_HP, _LAST_INGAME_MARKET_SCORE, _LAST_INGAME_COORD
-    hp_ok = False;
+    global _INGAME_MARKET_HITS, _INGAME_MARKET_LAST_HIT_TS
+    global _LAST_INGAME_MARKET_SCORE
     market_score = 0.0;
     market_ok = False
-    try:
-        hp_ok = _ingame_by_hpbar_once(win)
-    except Exception:
-        hp_ok = False
     try:
         market_score = _market_icon_score(win)
         market_ok = market_score >= float(MARKET_THRESHOLD)
     except Exception:
         market_score = 0.0;
         market_ok = False
-    coord_ok = _INGAME_COORD_LAST_OK
     try:
         now = time.time()
     except Exception:
         now = 0.0
-    if now - float(_INGAME_COORD_LAST_TS or 0.0) >= 1.0:
-        try:
-            x, y = read_coordinates(win)
-            coord_ok = (x is not None and y is not None and 0 <= x <= 3000 and 0 <= y <= 3000)
-        except Exception:
-            coord_ok = False
-        _INGAME_COORD_LAST_TS = now
-        _INGAME_COORD_LAST_OK = coord_ok
-    _LAST_INGAME_HP = bool(hp_ok)
+    if market_ok:
+        if now - float(_INGAME_MARKET_LAST_HIT_TS or 0.0) <= float(MARKET_CONSEC_MAX_GAP_SEC):
+            _INGAME_MARKET_HITS += 1
+        else:
+            _INGAME_MARKET_HITS = 1
+        _INGAME_MARKET_LAST_HIT_TS = now
+    else:
+        _INGAME_MARKET_HITS = 0
     _LAST_INGAME_MARKET_SCORE = float(market_score)
-    _LAST_INGAME_COORD = bool(coord_ok)
+    try:
+        req_hits = int(globals().get("MARKET_CONSEC_HITS_REQUIRED", MARKET_CONSEC_HITS_REQUIRED))
+    except Exception:
+        req_hits = MARKET_CONSEC_HITS_REQUIRED
+    ingame_ok = (_INGAME_MARKET_HITS >= max(1, req_hits))
     try:
         if log:
-            print(f"[INGAME] HP={hp_ok} Market={market_score:.3f} Coord={coord_ok} → {'OK' if (hp_ok or market_ok or coord_ok) else 'BEKLE'}")
+            print(f"[INGAME] Market={market_score:.3f} hits={_INGAME_MARKET_HITS}/{req_hits} → {'OK' if ingame_ok else 'BEKLE'}")
     except Exception:
         pass
-    return hp_ok or market_ok or coord_ok
+    return ingame_ok
 
 
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
     set_stage("LOADING_TO_INGAME");
-    print("[WAIT] HP bar bekleniyor.")
+    print("[WAIT] Market ikonu 2x dogrulama bekleniyor.")
     t0 = time.time();
     last_enter = 0.0
     w, _ = ensure_knight_online_window("confirm_loading_until_ingame", existing_window=w, focus=True, want_rect=False,
@@ -6259,17 +6245,17 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
             continue
         ingame_ok = is_ingame(w, log=False)
         try:
-            hp_ok = bool(globals().get("_LAST_INGAME_HP", False))
             market_score = float(globals().get("_LAST_INGAME_MARKET_SCORE", 0.0))
-            coord_ok = bool(globals().get("_LAST_INGAME_COORD", False))
-            print(f"[INGAME] HP={hp_ok} Market={market_score:.3f} Coord={coord_ok} → {'OK' if ingame_ok else 'BEKLE'}")
+            hits = int(globals().get("_INGAME_MARKET_HITS", 0))
+            req_hits = int(globals().get("MARKET_CONSEC_HITS_REQUIRED", MARKET_CONSEC_HITS_REQUIRED))
+            print(f"[INGAME] Market={market_score:.3f} hits={hits}/{req_hits} → {'OK' if ingame_ok else 'BEKLE'}")
         except Exception:
             pass
-        if ingame_ok: print("[WAIT] HP bar görüldü."); ensure_ui_closed(); return True
+        if ingame_ok: print("[WAIT] Market ikonu dogrulandi."); ensure_ui_closed(); return True
         if allow_periodic_enter and (time.time() - last_enter >= enter_period): safe_press_enter_if_not_ingame(
             w); last_enter = time.time()
         time.sleep(poll)
-    print("[WAIT] Zaman aşımı: HP bar yok.");
+    print("[WAIT] Zaman asimi: Market ikonu yok.");
     return False
 
 
@@ -6332,7 +6318,7 @@ def relaunch_and_login_to_ingame():
             time.sleep(1)
             ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False)
             if not ok:
-                print("[RELAUNCH] HP bar teyidi yok. Kapat→yeniden.")
+                print("[RELAUNCH] Market ikonu teyidi yok. Kapat→yeniden.")
                 try:
                     exit_game_fast(w)
                 except Exception:
@@ -6855,7 +6841,7 @@ def main():
                     time.sleep(1)
                     ok = confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0,
                                                       allow_periodic_enter=False)
-                if not ok: print("[LOAD] Oyuna giriş teyidi yok."); raise WatchdogTimeout("HP bar görünmedi.")
+                if not ok: print("[LOAD] Oyuna giris teyidi yok."); raise WatchdogTimeout("Market ikonu gorunmedi.")
                 set_stage("INGAME_TOWN");
                 ensure_ui_closed();
                 send_town_command();
@@ -7585,9 +7571,12 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("SERVER_CHOICES", "Sunucu seçimleri", "Sunucu / Login", "list_pairs",
                 _cfg_default("SERVER_CHOICES", [(671, 254), (676, 281)]),
                 "Sunucu listesindeki seçim koordinatları.", apply=_ensure_pair_list),
-    ConfigField("HP_POINTS", "HP ölçüm noktaları", "HP & Town", "list_pairs",
-                _cfg_default("HP_POINTS", [(185, 68), (218, 74)]),
-                "HP barının kontrol edildiği koordinatlar.", apply=_ensure_pair_list),
+    ConfigField("MARKET_CONSEC_HITS_REQUIRED", "Market ard arda onay adet", "HP & Town", "int",
+                _cfg_default("MARKET_CONSEC_HITS_REQUIRED", 2),
+                "Oyunda saymak icin gereken ard arda market eslesme sayisi."),
+    ConfigField("MARKET_CONSEC_MAX_GAP_SEC", "Market onay max ara (sn)", "HP & Town", "float",
+                _cfg_default("MARKET_CONSEC_MAX_GAP_SEC", 0.5),
+                "Iki eslesme arasi max sure, asarsa sayac sifirlanir."),
     ConfigField("TOWN_CLICK_POS", "Town tık (x,y)", "HP & Town", "int_pair",
                 _cfg_default("TOWN_CLICK_POS", (775, 775)),
                 "Town komutunun tıklama noktası.", apply=_ensure_int_pair),
@@ -8306,8 +8295,8 @@ _TR = {
     'LOGIN_PASSWORD': 'şifre',
     'LOGIN_TYPE_DELAY': 'login yazma hızı',
     'ITEMS_DEPLETED_FLAG': 'item bitti işareti',
-    'HP_RED_MIN': 'HP kırmızı min',
-    'HP_RED_DELTA': 'HP kırmızı delta',
+    'MARKET_CONSEC_HITS_REQUIRED': 'market ard arda onay adet',
+    'MARKET_CONSEC_MAX_GAP_SEC': 'market onay max ara (sn)',
     'PLUS7_TEMPLATE_TIMEOUT': '+7 şablon zaman aşımı',
     'PLUS8_TEMPLATE_TIMEOUT': '+8 şablon zaman aşımı',
     'PLUS8_WAIT_MESSAGE': '+8 bekleme mesajı',
@@ -8359,6 +8348,8 @@ _TR_HELP.update({
     'PLUS8_WAIT_MESSAGE_INTERVAL_MIN': '+8 bekleme modunda mesaj tekrar aralığı (dakika).',
     'PLUS8_CYCLE_BANK_START': '+8 döngüsü başlarken bankadaki +8 sayacı.',
     'PLUS8_CYCLE_SUMMARY_SENT': '+8 döngüsü özeti gönderildi mi işareti.',
+    'MARKET_CONSEC_HITS_REQUIRED': 'Oyuna giris icin gereken ard arda market eslesme sayisi.',
+    'MARKET_CONSEC_MAX_GAP_SEC': 'Market eslesmeleri arasi max sure (sn), asilirsa sayac sifirlanir.',
     # … sende olan diğer anahtarlar aynı şekilde devam edecek …
 })
 
