@@ -856,7 +856,8 @@ GAME_START_FALLBACK_RELATIVE_POS = (896, 596)
 GAME_START_VERIFY_TIMEOUT = 12.0
 TEMPLATE_EXTRA_CLICK_POS = (906, 600)
 giris_enter = 0.5
-server_sonrasi_enter = 1.0
+server_sonrasi_enter = True
+server_sonrasi_enter_suresi = 1.0
 # ---- Launcher ----
 LAUNCHER_EXE = r"C:\NTTGame\KnightOnlineEn\Launcher.exe";
 LAUNCHER_START_CLICK_POS = (974, 726)
@@ -6224,8 +6225,11 @@ def is_ingame(win, log=True):
 
 
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
+    global _INGAME_MARKET_HITS, _INGAME_MARKET_LAST_HIT_TS
     set_stage("LOADING_TO_INGAME");
     print("[WAIT] Market ikonu 2x dogrulama bekleniyor.")
+    _INGAME_MARKET_HITS = 0
+    _INGAME_MARKET_LAST_HIT_TS = 0.0
     t0 = time.time();
     last_enter = 0.0
     w, _ = ensure_knight_online_window("confirm_loading_until_ingame", existing_window=w, focus=True, want_rect=False,
@@ -6294,14 +6298,22 @@ def relaunch_and_login_to_ingame():
             print(f"[RELAUNCH] Server seçildi: {server_xy}")
             set_stage("RELAUNCH_POST_SELECT");
             try:
-                enter_delay = float(globals().get("server_sonrasi_enter", 1.0))
+                server_enter = globals().get("server_sonrasi_enter", True)
+                enter_delay = float(globals().get("server_sonrasi_enter_suresi", 1.0))
+                if isinstance(server_enter, bool):
+                    enter_enabled = bool(server_enter)
+                else:
+                    enter_delay = float(server_enter)
+                    enter_enabled = True
             except Exception:
                 enter_delay = 1.0
+                enter_enabled = True
             time.sleep(enter_delay)
-            try:
-                safe_press_enter_if_not_ingame(w);
-            except Exception:
-                pass
+            if enter_enabled:
+                try:
+                    safe_press_enter_if_not_ingame(w, force=True);
+                except Exception:
+                    pass
             remaining_wait = 1.5 - enter_delay
             if remaining_wait > 0:
                 time.sleep(remaining_wait)
@@ -6823,14 +6835,22 @@ def main():
                     print(f"[SERVER] Seçilen server: {server_xy}")
                     set_stage("SERVER_POST_SELECT");
                     try:
-                        enter_delay = float(globals().get("server_sonrasi_enter", 1.0))
+                        server_enter = globals().get("server_sonrasi_enter", True)
+                        enter_delay = float(globals().get("server_sonrasi_enter_suresi", 1.0))
+                        if isinstance(server_enter, bool):
+                            enter_enabled = bool(server_enter)
+                        else:
+                            enter_delay = float(server_enter)
+                            enter_enabled = True
                     except Exception:
                         enter_delay = 1.0
+                        enter_enabled = True
                     time.sleep(enter_delay)
-                    try:
-                        safe_press_enter_if_not_ingame(w);
-                    except Exception:
-                        pass
+                    if enter_enabled:
+                        try:
+                            safe_press_enter_if_not_ingame(w, force=True);
+                        except Exception:
+                            pass
                     remaining_wait = 1.5 - enter_delay
                     if remaining_wait > 0:
                         time.sleep(remaining_wait)
@@ -7553,9 +7573,12 @@ CONFIG_FIELDS: List[ConfigField] = [
     ConfigField("LOGIN_TYPE_DELAY", "Login yazma hızı (sn/karakter)", "Sunucu / Login", "float",
                 _cfg_default("LOGIN_TYPE_DELAY", 0.04),
                 "Kullanıcı adı ve şifre yazılırken karakter başına bekleme süresi."),
-    ConfigField("server_sonrasi_enter", "Server sonrasi enter bekleme (sn)", "Sunucu / Login", "float",
-                _cfg_default("server_sonrasi_enter", 1.0),
-                "Server secimi sonrasi ENTER oncesi bekleme suresi."),
+    ConfigField("server_sonrasi_enter", "Server sonrasi enter", "Sunucu / Login", "bool",
+                _cfg_default("server_sonrasi_enter", True),
+                "Server secimi sonrasi ENTER basilsin mi."),
+    ConfigField("server_sonrasi_enter_suresi", "Server sonrasi enter suresi (sn)", "Sunucu / Login", "float",
+                _cfg_default("server_sonrasi_enter_suresi", 1.0),
+                "Server secimi sonrasi ENTER bekleme suresi."),
     ConfigField("POST_START_EXTRA_KEY_ENABLED", "Oyun start sonrası ekstra tus", "Sunucu / Login", "bool",
                 _cfg_default("POST_START_EXTRA_KEY_ENABLED", True),
                 "oyun_start tıklandıktan sonra ekstra tuş basılsın."),
