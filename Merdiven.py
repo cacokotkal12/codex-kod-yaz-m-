@@ -6227,9 +6227,6 @@ def is_ingame(win, log=True):
 def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, allow_periodic_enter=False):
     global _INGAME_MARKET_HITS, _INGAME_MARKET_LAST_HIT_TS
     set_stage("LOADING_TO_INGAME");
-    print("[WAIT] Market ikonu 2x dogrulama bekleniyor.")
-    _INGAME_MARKET_HITS = 0
-    _INGAME_MARKET_LAST_HIT_TS = 0.0
     t0 = time.time();
     last_enter = 0.0
     w, _ = ensure_knight_online_window("confirm_loading_until_ingame", existing_window=w, focus=True, want_rect=False,
@@ -6237,6 +6234,15 @@ def confirm_loading_until_ingame(w, timeout=90.0, poll=0.25, enter_period=3.0, a
     if not w:
         print("[WAIT] KO penceresi bulunamadı (başlangıç).")
         return False
+    try:
+        if is_ingame(w, log=False):
+            ensure_ui_closed();
+            return True
+    except Exception:
+        pass
+    print("[WAIT] Market ikonu 2x dogrulama bekleniyor.")
+    _INGAME_MARKET_HITS = 0
+    _INGAME_MARKET_LAST_HIT_TS = 0.0
     while time.time() - t0 < timeout:
         wait_if_paused();
         watchdog_enforce()
