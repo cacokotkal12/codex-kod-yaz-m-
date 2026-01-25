@@ -1009,7 +1009,7 @@ except Exception as _e:
 PRE_BRAKE_DELTA = 2;
 MICRO_PULSE_DURATION = 0.100;
 MICRO_READ_DELAY = 0.02;
-TARGET_STABLE_HITS = 10
+TARGET_STABLE_HITS = 3
 MICRO_ADJUST_MAX_DURATION = 60.0  # mikro düzeltme döngüsü üst sınırı (sn)
 # ---- Y=598 Overshoot ----
 Y598_OVERSHOOT_ENABLE = True
