@@ -1594,7 +1594,7 @@ def _wait_for_f_with_countdown(deadline_ts: float, *, label: str = "+8 F bekleme
         watchdog_resume()
 
 # ---- LOW scroll genel reopen limiti (anvil) ----
-SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 5
+SCROLL_GLOBAL_REOPEN_LIMIT_LOW = 15
 _scroll_reopen_low_remaining = None
 
 
