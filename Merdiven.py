@@ -794,7 +794,7 @@ VALID_X_RIGHT = {819, 820, 821};
 VALID_X = VALID_X_LEFT | VALID_X_RIGHT
 X_TOLERANS = 1
 X_OKUMA_ADET = 2
-X_OKUMA_GECIKME = 0.05
+X_OKUMA_GECIKME = 0.2
 STOP_Y = {598};
 STAIRS_TOP_Y = 598
 # ---- Envanter / Banka Grid ----
@@ -976,7 +976,7 @@ MARKET_CONSEC_MAX_GAP_SEC = 0.3
 # ---- HASSAS X HEDEFİ (OVERSHOOT FIX) ----
 X_TOLERANCE = 1  # hedef çevresi ölü bölge (±px) → 795 için 792..798 kabul
 X_BAND_CONSEC = 2  # band içinde ardışık okuma sayısı (titreşim süzgeci)
-X_TOL_READ_DELAY = 0.05  # X okuma aralığı (sn)
+X_TOL_READ_DELAY = 0.2  # X okuma aralığı (sn)
 X_TOL_TIMEOUT = 20.0  # varsayılan zaman aşımı (sn), çağrıda override edilebilir
 X768_OVERSHOOT_CONFIRM_HITS = 3
 X768_OVERSHOOT_MAX_STEPS = 50
@@ -1024,8 +1024,8 @@ ANVIL_WALK_TIME = 2.5;
 NPC_GIDIS_SURESI = 5.0;
 NPC_SEEK_TIMEOUT = 20.0;
 Y_SEEK_TIMEOUT = 20.0
-TURN_LEFT_SEC = 1.41;
-TURN_RIGHT_SEC = 1.41
+TURN_LEFT_SEC = 1.42;
+TURN_RIGHT_SEC = 1.42
 # ---- Town ----
 TOWN_CLICK_POS = (775, 775);
 TOWN_POST_WAIT_SECONDS = 1.3
@@ -10445,8 +10445,8 @@ except Exception as _e:
 
 # ---- Ayarlar (GUI ile değişebilir) ----
 UPG_USE_FAST_MOUSE = True
-UPG_MOUSE_HIZI = 0.06
-UPG_TUS_HIZI = 0.06
+UPG_MOUSE_HIZI = 0.05
+UPG_TUS_HIZI = 0.05
 ANVIL_CONFIRM_WAIT_MS = 40
 ROI_STALE_MS = 50
 
