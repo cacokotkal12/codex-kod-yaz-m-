@@ -23,6 +23,9 @@ CHECK_INTERVAL = 0.5
 
 # === [PATCH] TOWN/GUI tek-sefer log helper ===
 _TOWN_ONCE_KEYS = set()
+_SILENT_ERROR_COUNTS = {}
+_GUI_LOG_DROPPED_COUNT = 0
+_WORKER_HEARTBEAT = {}
 
 
 def _town_log_once(*args, sep=' ', end='\n'):
@@ -35,6 +38,20 @@ def _town_log_once(*args, sep=' ', end='\n'):
     except Exception:
         pass
 
+
+def _track_silent_error(key: str):
+    try:
+        k = str(key or "").strip() or "UNKNOWN"
+        _SILENT_ERROR_COUNTS[k] = int(_SILENT_ERROR_COUNTS.get(k, 0) or 0) + 1
+    except Exception:
+        pass
+
+
+def _worker_beat(name: str):
+    try:
+        _WORKER_HEARTBEAT[str(name or "").strip() or "WORKER"] = time.time()
+    except Exception:
+        pass
 
 # === [/PATCH] ===
 
@@ -190,11 +207,14 @@ def _priority_booster_worker():
     if interval <= 0:
         interval = 0.5
     while True:
+        _worker_beat("priority_booster")
+        if _abort_requested():
+            break
         try:
             for pid, _ in _enum_target_processes(names):
                 _set_priority_for_pid(pid, desired)
         except Exception:
-            pass
+            _track_silent_error("priority_booster_worker")
         try:
             time.sleep(interval)
         except Exception:
@@ -418,13 +438,14 @@ _ORIGINAL_STDERR = sys.stderr
 
 
 def _push_gui_log(msg: str):
+    global _GUI_LOG_DROPPED_COUNT
     q = globals().get("_GUI_LOG_QUEUE")
     if q is None:
         return
     try:
         q.put_nowait(str(msg))
     except Exception:
-        pass
+        _GUI_LOG_DROPPED_COUNT += 1
 
 
 class _GuiQueueHandler(logging.Handler):
@@ -776,6 +797,7 @@ def _bye(): log("[EXIT] program sonlandı")
 tus_hizi = 0.060;
 mouse_hizi = 0.1;
 jitter_px = 0
+PAUSE_POLL_INTERVAL = 0.2
 # ---- OCR / Tesseract ----
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 pyautogui.FAILSAFE = False;
@@ -2209,7 +2231,8 @@ def _tg_trim_hourly(now: float):
     try:
         cutoff = now - 3600.0
         while _TG_HOURLY_TS and _TG_HOURLY_TS[0] < cutoff: _TG_HOURLY_TS.pop(0)
-    except Exception: pass
+    except Exception:
+        _track_silent_error("telegram_alerts")
 
 def _notify_event_telegram(event_key: str, message: str) -> bool:
     # NE İŞE YARAR: Hata/uyarı için Telegram mesajı yollar (spam korumalı).
@@ -2226,12 +2249,14 @@ def _notify_event_telegram(event_key: str, message: str) -> bool:
         _tg_trim_hourly(now)
         maxh = int(globals().get("TELEGRAM_ALERT_MAX_PER_HOUR", 30) or 0)
         if maxh > 0 and len(_TG_HOURLY_TS) >= maxh: return False
-    except Exception: pass
+    except Exception:
+        _track_silent_error("telegram_alerts")
     try:
         stg = str(globals().get("_current_stage", "") or "").strip()
         mode = str(globals().get("MODE", "") or "").strip()
         if stg or mode: msg = f"{msg} | stage={stg or '-'} mode={mode or '-'}"
-    except Exception: pass
+    except Exception:
+        _track_silent_error("telegram_alerts")
     ok=False
     try: ok = send_telegram_message(msg)
     except Exception: ok=False
@@ -2247,6 +2272,9 @@ def _telegram_command_listener_loop():
     global _TELEGRAM_UPDATE_OFFSET
     backoff_time = 1.0
     while not _TELEGRAM_CMD_STOP.is_set():
+        _worker_beat("telegram_listener")
+        if _abort_requested():
+            break
         if requests is None:
             _TELEGRAM_CMD_STOP.wait(5.0)
             continue
@@ -2280,7 +2308,7 @@ def _telegram_command_listener_loop():
             try:
                 _TELEGRAM_UPDATE_OFFSET = int(upd.get("update_id", 0) or 0) + 1
             except Exception:
-                pass
+                _track_silent_error("telegram_listener_update_offset")
             msg = upd.get("message") or upd.get("edited_message") or {}
             chat = msg.get("chat", {}) if isinstance(msg, dict) else {}
             if str(chat.get("id", "")) != str(chat_id):
@@ -2340,6 +2368,9 @@ def _reset_empty_bank_state():
 def _empty_bank_notifier_loop():
     global _EMPTY_BANK_THREAD, _EMPTY_BANK_LAST_SEND_TS
     while _EMPTY_BANK_NOTIFY_ACTIVE and not _EMPTY_BANK_STOP_EVENT.is_set():
+        _worker_beat("empty_bank_notifier")
+        if _abort_requested():
+            break
         try:
             interval_min = float(globals().get("TELEGRAM_EMPTY_BANK_INTERVAL_MIN", TELEGRAM_EMPTY_BANK_INTERVAL_MIN))
         except Exception:
@@ -7314,7 +7345,15 @@ def wait_if_paused():  # mevcut işleve override (aynı iş + F3/F4 dinleme)
                 print("[PAUSE] CapsLock AÇIK. Devam için kapat.")
                 told = True
             _check_hotkeys_for_buy_mode()
-            time.sleep(0.1)
+            try:
+                poll = float(globals().get("PAUSE_POLL_INTERVAL", 0.2))
+            except Exception:
+                poll = 0.2
+            if poll < 0.2:
+                poll = 0.2
+            if poll > 0.5:
+                poll = 0.5
+            time.sleep(poll)
             wdog()
         _check_hotkeys_for_buy_mode()
         _ensure_not_aborted()
@@ -8865,7 +8904,10 @@ def apply_config_to_runtime(cfg, gui=None):
     for src, dst, cast in assignments:
         if src in gui_data:
             try:
-                globals()[dst] = cast(gui_data.get(src))
+                val = cast(gui_data.get(src))
+                if cast is int and val < 0:
+                    val = 0
+                globals()[dst] = val
             except Exception:
                 globals()[dst] = gui_data.get(src)
     return True
@@ -10298,6 +10340,11 @@ def _MERDIVEN_RUN_GUI():
 
         def _tick(self):
             self._update_caps_status()
+            try:
+                self.gui_log_dusen_satir = int(globals().get("_GUI_LOG_DROPPED_COUNT", 0) or 0)
+                self.worker_heartbeat = dict(globals().get("_WORKER_HEARTBEAT", {}))
+            except Exception:
+                pass
             self.root.after(250, self._tick)  # ileride canlı metrik eklenebilir
 
     # Pencereyi başlat
