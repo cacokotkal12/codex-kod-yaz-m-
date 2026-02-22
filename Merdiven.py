@@ -1133,7 +1133,7 @@ NPC_BUY_STEPS = [((687, 237), 2, "right"), ((737, 237), 2, "right"), ((787, 237)
 NPC_BUY_TURN_COUNT = 2;
 NPC_MENU_PAGE2_POS = (968, 328)
 # ---- NPC sonrası Anvil rotası ----
-NPC_POSTBUY_FIRST_A_DURATION = 3.1;
+NPC_SONRASI_ORTA_TUS_SURESI = 2.0;
 NPC_POSTBUY_TARGET_X1 = 795;
 NPC_POSTBUY_A_WHILE_W_DURATION = 0.08;
 NPC_POSTBUY_TARGET_X2 = 815
@@ -1966,6 +1966,8 @@ MOUSEEVENTF_LEFTDOWN = 0x0002;
 MOUSEEVENTF_LEFTUP = 0x0004;
 MOUSEEVENTF_RIGHTDOWN = 0x0008;
 MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+MOUSEEVENTF_MIDDLEUP = 0x0040
 
 
 # ================== Tuş / Fare / Pause ==================
@@ -2062,8 +2064,12 @@ def mouse_move(x, y):
 
 def mouse_click(button="left"):
     if not pause_point(): return
-    flags_down, flags_up = (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP) if button == "left" else (
-        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
+    if button == "left":
+        flags_down, flags_up = (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
+    elif button == "middle":
+        flags_down, flags_up = (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)
+    else:
+        flags_down, flags_up = (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
     extra = ctypes.c_ulong(0);
     ii_ = Input_I();
     ii_.mi = MouseInput(0, 0, 0, flags_down, 0, ctypes.pointer(extra))
@@ -6135,9 +6141,8 @@ def basma_dongusu(attempts_limit=None, scroll_required=None, *, win=None, skip_p
 def npc_post_purchase_route_to_anvil_and_upgrade(w):
     set_stage("NPC_POSTBUY_ROUTE");
     ensure_ui_closed()
-    press_key(SC_A);
-    time.sleep(NPC_POSTBUY_FIRST_A_DURATION);
-    release_key(SC_A)
+    mouse_click("middle")
+    time.sleep(NPC_SONRASI_ORTA_TUS_SURESI);
     set_stage("NPC_POSTBUY_W_TO_795");
     go_w_to_x(w, NPC_POSTBUY_TARGET_X1, timeout=NPC_POSTBUY_SEEK_TIMEOUT)
     set_stage("NPC_POSTBUY_D_WHILE_W");
@@ -8297,7 +8302,7 @@ _TR = {
     'NPC_CONFIRM_TEMPLATE_PATH': 'NPC onay şablonu',
     'NPC_SEEK_TIMEOUT': 'NPC arama zaman aşımı (sn)',
     'NPC_GIDIS_SURESI': 'NPC’ye yürüme süresi (sn)',
-    'NPC_POSTBUY_FIRST_A_DURATION': 'alış sonrası 1. A basma (sn)',
+    'NPC_SONRASI_ORTA_TUS_SURESI': 'alis sonrasi orta tus suresi (sn)',
     'NPC_POSTBUY_SECOND_A_DURATION': 'alış sonrası 2. A basma (sn)',
     'NPC_POSTBUY_A_WHILE_W_DURATION': 'alış sonrası A + W (sn)',
     'NPC_POSTBUY_FINAL_W_DURATION': 'alış sonrası düz W (sn)',
@@ -8472,7 +8477,7 @@ _ADV_CATEGORY_RULES = (
             'LINEN_STEPS',
             'NPC_GIDIS_SURESI',
             'NPC_SEEK_TIMEOUT',
-            'NPC_POSTBUY_FIRST_A_DURATION',
+            'NPC_SONRASI_ORTA_TUS_SURESI',
             'NPC_POSTBUY_SECOND_A_DURATION',
             'NPC_POSTBUY_A_WHILE_W_DURATION',
             'NPC_POSTBUY_FINAL_W_DURATION',
@@ -11058,6 +11063,7 @@ try:
         # --- Rota/Koordinat ---
         "TARGET_NPC_X": 766,  # NPC hedef X
         "NPC_SEEK_TIMEOUT": 6.0,
+        "NPC_SONRASI_ORTA_TUS_SURESI": 2.0,
         "NPC_POSTBUY_TARGET_X1": 795,
         "NPC_POSTBUY_A_WHILE_W_DURATION": 0.35,
         "NPC_POSTBUY_TARGET_X2": 814,
@@ -11398,6 +11404,8 @@ def _y_build_and_attach_gui(root):
     lf_r.pack(fill="x", padx=4, pady=4)
     target_x = _y_make_entry(lf_r, "TARGET_NPC_X", data.get("TARGET_NPC_X", gdef.get("TARGET_NPC_X")))
     seek_to = _y_make_entry(lf_r, "NPC_SEEK_TIMEOUT", data.get("NPC_SEEK_TIMEOUT", gdef.get("NPC_SEEK_TIMEOUT")))
+    orta_tus_sure = _y_make_entry(lf_r, "NPC_SONRASI_ORTA_TUS_SURESI",
+                                  data.get("NPC_SONRASI_ORTA_TUS_SURESI", gdef.get("NPC_SONRASI_ORTA_TUS_SURESI")))
     x1 = _y_make_entry(lf_r, "POSTBUY_TARGET_X1", data.get("NPC_POSTBUY_TARGET_X1", gdef.get("NPC_POSTBUY_TARGET_X1")))
     a1 = _y_make_entry(lf_r, "A_Bas_Sure1",
                        data.get("NPC_POSTBUY_A_WHILE_W_DURATION", gdef.get("NPC_POSTBUY_A_WHILE_W_DURATION")))
@@ -11525,6 +11533,7 @@ def _y_build_and_attach_gui(root):
 
                 "TARGET_NPC_X": _y_to_int(target_x.get(), 766),
                 "NPC_SEEK_TIMEOUT": _y_to_float(seek_to.get(), 6.0),
+                "NPC_SONRASI_ORTA_TUS_SURESI": _y_to_float(orta_tus_sure.get(), 2.0),
                 "NPC_POSTBUY_TARGET_X1": _y_to_int(x1.get(), 795),
                 "NPC_POSTBUY_A_WHILE_W_DURATION": _y_to_float(a1.get(), 0.35),
                 "NPC_POSTBUY_TARGET_X2": _y_to_int(x2.get(), 814),
